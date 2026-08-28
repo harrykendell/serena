@@ -36,6 +36,14 @@ def pytest_configure(config: pytest.Config) -> None:
     if os.getenv("PYCHARM_HOSTED") == "1":
         config.option.patch_pycharm_diff = True
 
+    # default local runs exercise unmarked tests only; PYTEST_MARKERS opt selected marked suites back in
+    if not config.option.markexpr:
+        marker_names = sorted(marker.split(":", 1)[0].strip() for marker in config.getini("markers"))
+        marked_expression = " or ".join(marker_names)
+        unmarked_expression = f"not ({marked_expression})"
+        requested_markers = os.getenv("PYTEST_MARKERS", "").strip()
+        config.option.markexpr = f"({unmarked_expression}) or ({requested_markers})" if requested_markers else unmarked_expression
+
 
 @pytest.fixture(scope="session")
 def resources_dir() -> Path:
@@ -402,6 +410,16 @@ def _is_ocaml_lsp_available() -> bool:
         return False
 
 
+def _is_ruby_language_server_available() -> bool:
+    """Whether Ruby and the ruby-lsp gem are already available without privileged installation."""
+    if _sh.which("ruby") is None or _sh.which("gem") is None:
+        return False
+    try:
+        return subprocess.run(["gem", "list", "-i", "ruby-lsp"], capture_output=True, timeout=30, check=False).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def _determine_disabled_language_servers() -> list[LanguageServerId]:
     """
     Determine which language server tests are disabled in the current environment.
@@ -428,6 +446,16 @@ def _determine_disabled_language_servers() -> list[LanguageServerId]:
     # === 2. Disabled off-CI if the precondition is missing; expected to be present on CI ===
     if _sh.which("terraform") is None and not is_ci:
         result.append(LanguageServerId.TERRAFORM)
+    if _sh.which("go") is None and not is_ci:
+        result.append(LanguageServerId.GO)
+    if _sh.which("dotnet") is None and not is_ci:
+        result.append(LanguageServerId.CSHARP)
+    if _sh.which("pwsh") is None and _sh.which("powershell") is None and not is_ci:
+        result.append(LanguageServerId.POWERSHELL)
+    if not _is_ruby_language_server_available() and not is_ci:
+        result.append(LanguageServerId.RUBY)
+    if (_sh.which("zig") is None or _sh.which("zls") is None) and not is_ci:
+        result.append(LanguageServerId.ZIG)
     if _sh.which("regal") is None and not is_ci:
         result.append(LanguageServerId.REGO)
     if _sh.which("elm") is None and not is_ci:
@@ -515,6 +543,20 @@ def language_server_tests_enabled(ls_id: LanguageServerId) -> bool:
     :return: True if tests for the language are enabled, False otherwise
     """
     return ls_id not in _disabled_language_servers
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip unavailable language suites consistently, including module-level marker-only tests."""
+    del config
+    for item in items:
+        for marker in item.iter_markers():
+            try:
+                ls_id = LanguageServerId(marker.name)
+            except ValueError:
+                continue
+            if not language_server_tests_enabled(ls_id):
+                item.add_marker(pytest.mark.skip(reason=f"{ls_id.value} tests are disabled in this environment"))
+                break
 
 
 def ls_supports_implementation(language: LanguageServerId) -> bool:

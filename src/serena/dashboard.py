@@ -24,6 +24,7 @@ from sensai.util.pickle import dump_pickle, load_pickle
 from serena.analytics import ToolUsageStats
 from serena.config.serena_config import SerenaConfig, SerenaPaths
 from serena.constants import SERENA_DASHBOARD_DIR, SerenaPorts
+from serena.jobs import DEFAULT_MAX_CONCURRENT_JOBS, JobManager
 from serena.task_executor import TaskExecutor
 from serena.util.logging import MemoryLogHandler
 from serena.util.pypi import PyPIPackageInfo
@@ -211,9 +212,11 @@ class SerenaDashboardAPI:
         if trusted_hosts:
             self._app.config["TRUSTED_HOSTS"] = trusted_hosts
         self._tool_usage_stats = tool_usage_stats
+        self._job_manager = JobManager(max_concurrent_jobs=DEFAULT_MAX_CONCURRENT_JOBS)
         self._loaded_news: dict[str, str] = {}
         self._news_ready = threading.Event()
         self._setup_routes()
+        self._register_dashboard_api_aliases()
         self._read_news = ReadNews.load()
         self._newer_serena_version: str | None = None
 
@@ -413,6 +416,13 @@ class SerenaDashboardAPI:
             except Exception as e:
                 return {"status": "error", "message": str(e)}
 
+        @self._app.route("/background_jobs", methods=["GET"])
+        def get_background_jobs() -> dict[str, Any]:
+            try:
+                return self._get_background_jobs()
+            except Exception as e:
+                return {"status": "error", "message": str(e)}
+
         @self._app.route("/queued_task_executions", methods=["GET"])
         def get_queued_executions() -> dict[str, Any]:
             try:
@@ -485,6 +495,26 @@ class SerenaDashboardAPI:
             except Exception as e:
                 return {"status": "error", "message": str(e)}
 
+    def _register_dashboard_api_aliases(self) -> None:
+        """Expose dashboard API routes beneath the dashboard URL namespace.
+
+        The original root routes remain available for backwards compatibility with existing local
+        dashboard clients. The namespaced aliases let reverse proxies and access-control layers treat
+        the complete browser application as a single ``/dashboard`` security boundary.
+        """
+        excluded_routes = {"/", "/dashboard/", "/dashboard/<path:filename>"}
+        for rule in list(self._app.url_map.iter_rules()):
+            if rule.endpoint == "static" or rule.rule in excluded_routes or rule.rule.startswith("/dashboard/"):
+                continue
+
+            methods = sorted(rule.methods - {"HEAD", "OPTIONS"})
+            self._app.add_url_rule(
+                f"/dashboard/api{rule.rule}",
+                endpoint=f"dashboard_api_{rule.endpoint}",
+                view_func=self._app.view_functions[rule.endpoint],
+                methods=methods,
+            )
+
     def _get_log_messages(self, request_log: RequestLog) -> ResponseLog:
         messages = self._memory_log_handler.get_log_messages(from_idx=request_log.start_idx)
         project = self._agent.get_active_project()
@@ -499,6 +529,43 @@ class SerenaDashboardAPI:
             return ResponseToolStats(stats=self._tool_usage_stats.get_tool_stats_dict())
         else:
             return ResponseToolStats(stats={})
+
+    def _get_background_jobs(self) -> dict[str, Any]:
+        """Return running durable jobs for the dashboard without retrieving their journal output."""
+        snapshots = self._job_manager.list_job_snapshots(limit=DEFAULT_MAX_CONCURRENT_JOBS, running_only=True)
+        persistence = self._job_manager.persistence_info()
+        jobs: list[dict[str, Any]] = []
+        for snapshot in snapshots:
+            record = snapshot.record
+            runtime = snapshot.runtime
+            jobs.append(
+                {
+                    "job_id": record.job_id,
+                    "label": record.label,
+                    "project": record.project_name,
+                    "cwd": record.cwd,
+                    "status": record.status.value,
+                    "created_at": record.created_at,
+                    "timeout_seconds": record.timeout_seconds,
+                    "elapsed_seconds": runtime.elapsed_seconds,
+                    "seconds_since_last_output": runtime.seconds_since_last_output,
+                    "memory_bytes": runtime.memory_bytes,
+                    "cpu_seconds": runtime.cpu_seconds,
+                    "process_count": runtime.process_count,
+                }
+            )
+        return {
+            "status": "success",
+            "jobs": jobs,
+            "running_jobs": len(jobs),
+            "max_concurrent_jobs": self._job_manager.max_concurrent_jobs,
+            "persistence": {
+                "survives_serena_restart": persistence.survives_serena_restart,
+                "survives_logout": persistence.survives_logout,
+                "survives_reboot": persistence.survives_reboot,
+                "linger_enabled": persistence.linger_enabled,
+            },
+        }
 
     def _clear_tool_stats(self) -> None:
         if self._tool_usage_stats is not None:

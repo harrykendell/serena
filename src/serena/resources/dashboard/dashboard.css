@@ -745,6 +745,11 @@ code, pre, kbd, samp,
     to { transform: rotate(360deg); }
 }
 
+.execution-content {
+    min-width: 0;
+    flex: 1;
+}
+
 .execution-name {
     flex: 1;
     font-size: 13px;
@@ -758,6 +763,27 @@ code, pre, kbd, samp,
     font-size: 11px;
     color: var(--text-muted);
     flex-shrink: 0;
+}
+
+.background-job-item .execution-meta {
+    margin-top: 2px;
+    white-space: normal;
+    line-height: 1.35;
+}
+
+.job-summary,
+.job-persistence-note {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.job-summary {
+    margin-bottom: 8px;
+}
+
+.job-persistence-note {
+    margin-top: 8px;
+    line-height: 1.4;
 }
 
 .execution-cancel-btn {

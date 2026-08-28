@@ -1,3 +1,5 @@
+const DASHBOARD_API_PREFIX = '/dashboard/api';
+
 class LogMessage {
     constructor(message, toolNames) {
         message = this.escapeHtml(message);
@@ -257,6 +259,7 @@ class Dashboard {
         this.isAddingLanguage = false;
         this.waitingForConfigPollingResult = false;
         this.waitingForExecutionsPollingResult = false;
+        this.waitingForBackgroundJobsPollingResult = false;
         this.originalSerenaConfigContent = null;
         this.serenaConfigContentDirty = false;
 
@@ -270,6 +273,7 @@ class Dashboard {
         this.pollInterval = null;
         this.configPollInterval = null;
         this.executionsPollInterval = null;
+        this.backgroundJobsPollInterval = null;
         this.heartbeatFailureCount = 0;
 
         // jQuery elements
@@ -328,6 +332,7 @@ class Dashboard {
         this.$createMemoryCreateBtn = $('#create-memory-create-btn');
         this.$createMemoryCancelBtn = $('#create-memory-cancel-btn');
         this.$modalCloseCreateMemory = $('.modal-close-create-memory');
+        this.$backgroundJobsDisplay = $('#background-jobs-display');
         this.$activeExecutionQueueDisplay = $('#active-executions-display');
         this.$lastExecutionDisplay = $('#last-execution-display');
         this.$cancelledExecutionsDisplay = $('#cancelled-executions-display');
@@ -525,6 +530,7 @@ class Dashboard {
             this.loadNews();
             this.startConfigPolling();
             this.startExecutionsPolling();
+            this.startBackgroundJobsPolling();
         } else if (page === 'logs') {
             this.loadLogs();
         } else if (page === 'stats') {
@@ -545,6 +551,10 @@ class Dashboard {
             clearInterval(this.executionsPollInterval);
             this.executionsPollInterval = null;
         }
+        if (this.backgroundJobsPollInterval) {
+            clearInterval(this.backgroundJobsPollInterval);
+            this.backgroundJobsPollInterval = null;
+        }
     }
 
     // ===== Config Overview Methods =====
@@ -558,7 +568,7 @@ class Dashboard {
         console.log('Polling for config overview...');
         let self = this;
         $.ajax({
-            url: '/get_config_overview',
+            url: DASHBOARD_API_PREFIX + '/get_config_overview',
             type: 'GET',
             success: function (response) {
                 // Check if the config data has actually changed
@@ -891,10 +901,97 @@ class Dashboard {
 
     // ===== Executions Methods =====
 
+    loadBackgroundJobs() {
+        if (this.waitingForBackgroundJobsPollingResult) {
+            return;
+        }
+        this.waitingForBackgroundJobsPollingResult = true;
+        let self = this;
+        $.ajax({
+            url: DASHBOARD_API_PREFIX + '/background_jobs', type: 'GET',
+            success: function (response) {
+                if (response.status === 'success') {
+                    self.displayBackgroundJobs(response);
+                } else {
+                    console.error('Error loading background jobs:', response.message);
+                }
+            },
+            error: function (xhr, status, error) {
+                console.error('Error loading background jobs:', error);
+                self.$backgroundJobsDisplay.html('<div class="error-message">Error loading background jobs</div>');
+            },
+            complete: function () {
+                self.waitingForBackgroundJobsPollingResult = false;
+            }
+        });
+    }
+
+    startBackgroundJobsPolling() {
+        this.loadBackgroundJobs();
+        this.backgroundJobsPollInterval = setInterval(this.loadBackgroundJobs.bind(this), 2000);
+    }
+
+    displayBackgroundJobs(response) {
+        const jobs = response.jobs || [];
+        if (jobs.length === 0) {
+            this.$backgroundJobsDisplay.html('<div class="loaded">No background jobs running · 0 / ' + response.max_concurrent_jobs + ' slots</div>');
+            return;
+        }
+
+        let html = '<div class="job-summary">' + jobs.length + ' / ' + response.max_concurrent_jobs + ' slots in use</div>';
+        html += '<div class="execution-list">';
+        let self = this;
+        jobs.forEach(function (job) {
+            const elapsed = self.formatDuration(job.elapsed_seconds);
+            const idle = job.seconds_since_last_output === null ? 'no output yet' : self.formatDuration(job.seconds_since_last_output) + ' since output';
+            const memory = job.memory_bytes === null ? '' : ' · ' + self.formatBytes(job.memory_bytes);
+            const cpu = job.cpu_seconds === null ? '' : ' · ' + self.formatDuration(job.cpu_seconds) + ' CPU';
+            const processes = job.process_count === null ? '' : ' · ' + job.process_count + ' proc';
+            const timeout = job.timeout_seconds === null ? '' : ' · limit ' + self.formatDuration(job.timeout_seconds);
+            const project = job.project ? ' · ' + self.escapeHtml(job.project) : '';
+            html += '<div class="execution-item running background-job-item">';
+            html += '<div class="execution-spinner"></div>';
+            html += '<div class="execution-content">';
+            html += '<div class="execution-name">' + self.escapeHtml(job.label || job.job_id) + '</div>';
+            html += '<div class="execution-meta">' + elapsed + ' elapsed · ' + idle + memory + cpu + processes + timeout + project + '</div>';
+            html += '</div>';
+            html += '</div>';
+        });
+        html += '</div>';
+        if (response.persistence && !response.persistence.survives_logout) {
+            html += '<div class="job-persistence-note">Jobs survive Serena restarts, but user logout may stop them while systemd linger is disabled.</div>';
+        }
+        this.$backgroundJobsDisplay.html(html);
+    }
+
+    formatDuration(seconds) {
+        if (seconds === null || seconds === undefined || !Number.isFinite(Number(seconds))) return '—';
+        seconds = Math.max(0, Math.round(Number(seconds)));
+        if (seconds < 60) return seconds + 's';
+        const minutes = Math.floor(seconds / 60);
+        const remainingSeconds = seconds % 60;
+        if (minutes < 60) return minutes + 'm ' + remainingSeconds + 's';
+        const hours = Math.floor(minutes / 60);
+        const remainingMinutes = minutes % 60;
+        return hours + 'h ' + remainingMinutes + 'm';
+    }
+
+    formatBytes(bytes) {
+        if (bytes === null || bytes === undefined || !Number.isFinite(Number(bytes))) return '—';
+        const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+        let value = Math.max(0, Number(bytes));
+        let unit = 0;
+        while (value >= 1024 && unit < units.length - 1) {
+            value /= 1024;
+            unit += 1;
+        }
+        return (unit === 0 ? Math.round(value) : value.toFixed(value >= 10 ? 1 : 2)) + ' ' + units[unit];
+    }
+
     loadQueuedExecutions(onComplete) {
         let self = this;
         $.ajax({
-            url: '/queued_task_executions', type: 'GET',
+            url: DASHBOARD_API_PREFIX + '/queued_task_executions', type: 'GET',
             success: function (response) {
                 if (response.status === 'success') {
                     self.displayActiveExecutionsQueue(response.queued_executions || []);
@@ -913,7 +1010,7 @@ class Dashboard {
     loadLastExecution(onComplete) {
         let self = this;
         $.ajax({
-            url: '/last_execution', type: 'GET',
+            url: DASHBOARD_API_PREFIX + '/last_execution', type: 'GET',
             success: function (response) {
                 if (response.status === 'success') {
                     if (response.last_execution !== null && response.last_execution.logged) {
@@ -1103,7 +1200,7 @@ class Dashboard {
 
         // Call backend API to cancel the task
         $.ajax({
-            url: '/cancel_task_execution', type: 'POST', contentType: 'application/json', data: JSON.stringify({
+            url: DASHBOARD_API_PREFIX + '/cancel_task_execution', type: 'POST', contentType: 'application/json', data: JSON.stringify({
                 task_id: executionData.task_id
             }), success: function (response) {
                 console.log('Cancel task response:', response);
@@ -1180,7 +1277,7 @@ class Dashboard {
     loadToolNames() {
         let self = this;
         return $.ajax({
-            url: '/get_tool_names', type: 'GET', success: function (response) {
+            url: DASHBOARD_API_PREFIX + '/get_tool_names', type: 'GET', success: function (response) {
                 self.toolNames = response.tool_names || [];
                 console.log('Loaded tool names:', self.toolNames);
             }, error: function (xhr, status, error) {
@@ -1239,7 +1336,7 @@ class Dashboard {
     clearLogs() {
         let self = this;
         $.ajax({
-            url: '/clear_logs',
+            url: DASHBOARD_API_PREFIX + '/clear_logs',
             type: 'POST',
             success: function () {
                 self.$logContainer.empty();
@@ -1265,7 +1362,7 @@ class Dashboard {
 
         // Make API call
         $.ajax({
-            url: '/get_log_messages', type: 'POST', contentType: 'application/json', data: JSON.stringify({
+            url: DASHBOARD_API_PREFIX + '/get_log_messages', type: 'POST', contentType: 'application/json', data: JSON.stringify({
                 start_idx: 0
             }), success: function (response) {
                 // Clear existing logs
@@ -1303,7 +1400,7 @@ class Dashboard {
         let self = this;
         console.log("Polling logs", this.currentMaxIdx);
         $.ajax({
-            url: '/get_log_messages',
+            url: DASHBOARD_API_PREFIX + '/get_log_messages',
             type: 'POST',
             contentType: 'application/json',
             data: JSON.stringify({
@@ -1359,8 +1456,8 @@ class Dashboard {
 
     loadStats() {
         let self = this;
-        $.when($.ajax({url: '/get_tool_stats', type: 'GET'}), $.ajax({
-            url: '/get_token_count_estimator_name',
+        $.when($.ajax({url: DASHBOARD_API_PREFIX + '/get_tool_stats', type: 'GET'}), $.ajax({
+            url: DASHBOARD_API_PREFIX + '/get_token_count_estimator_name',
             type: 'GET'
         })).done(function (statsResp, estimatorResp) {
             const stats = statsResp[0].stats;
@@ -1374,7 +1471,7 @@ class Dashboard {
     clearStats() {
         let self = this;
         $.ajax({
-            url: '/clear_tool_stats', type: 'POST', success: function () {
+            url: DASHBOARD_API_PREFIX + '/clear_tool_stats', type: 'POST', success: function () {
                 self.loadStats();
             }, error: function (xhr, status, error) {
                 console.error('Error clearing stats:', error);
@@ -1714,7 +1811,7 @@ class Dashboard {
         const self = this;
 
         $.ajax({
-            url: '/remove_language', type: 'POST', contentType: 'application/json', data: JSON.stringify({
+            url: DASHBOARD_API_PREFIX + '/remove_language', type: 'POST', contentType: 'application/json', data: JSON.stringify({
                 language: language
             }), success: function (response) {
                 if (response.status === 'success') {
@@ -1753,7 +1850,7 @@ class Dashboard {
     loadAvailableLanguages() {
         let self = this;
         $.ajax({
-            url: '/get_available_languages', type: 'GET', success: function (response) {
+            url: DASHBOARD_API_PREFIX + '/get_available_languages', type: 'GET', success: function (response) {
                 const languages = (response.languages || []).slice().sort();
                 self.modalLanguageAvailable = languages;
                 self.$modalLanguageSelect.val('');
@@ -1922,7 +2019,7 @@ class Dashboard {
         self.isAddingLanguage = true;
 
         $.ajax({
-            url: '/add_language', type: 'POST', contentType: 'application/json', data: JSON.stringify({
+            url: DASHBOARD_API_PREFIX + '/add_language', type: 'POST', contentType: 'application/json', data: JSON.stringify({
                 language: selectedLanguage
             }), success: function (response) {
                 if (response.status === 'success') {
@@ -1958,7 +2055,7 @@ class Dashboard {
 
         // Load memory content
         $.ajax({
-            url: '/get_memory', type: 'POST', contentType: 'application/json', data: JSON.stringify({
+            url: DASHBOARD_API_PREFIX + '/get_memory', type: 'POST', contentType: 'application/json', data: JSON.stringify({
                 memory_name: memoryName
             }), success: function (response) {
                 if (response.status === 'error') {
@@ -2009,7 +2106,7 @@ class Dashboard {
         self.$editMemorySaveBtn.prop('disabled', true).text('Saving...');
 
         $.ajax({
-            url: '/save_memory', type: 'POST', contentType: 'application/json', data: JSON.stringify({
+            url: DASHBOARD_API_PREFIX + '/save_memory', type: 'POST', contentType: 'application/json', data: JSON.stringify({
                 memory_name: memoryName, content: content
             }), success: function (response) {
                 if (response.status === 'success') {
@@ -2065,7 +2162,7 @@ class Dashboard {
         this.$editMemoryRenameInput.prop('disabled', true);
 
         $.ajax({
-            url: '/rename_memory', type: 'POST', contentType: 'application/json', data: JSON.stringify({
+            url: DASHBOARD_API_PREFIX + '/rename_memory', type: 'POST', contentType: 'application/json', data: JSON.stringify({
                 old_name: oldName, new_name: newName
             }), success: function (response) {
                 if (response.status === 'success') {
@@ -2115,7 +2212,7 @@ class Dashboard {
         const self = this;
 
         $.ajax({
-            url: '/delete_memory', type: 'POST', contentType: 'application/json', data: JSON.stringify({
+            url: DASHBOARD_API_PREFIX + '/delete_memory', type: 'POST', contentType: 'application/json', data: JSON.stringify({
                 memory_name: memoryName
             }), success: function (response) {
                 if (response.status === 'success') {
@@ -2173,7 +2270,7 @@ class Dashboard {
         self.$createMemoryCreateBtn.prop('disabled', true).text('Creating...');
 
         $.ajax({
-            url: '/save_memory', type: 'POST', contentType: 'application/json', data: JSON.stringify({
+            url: DASHBOARD_API_PREFIX + '/save_memory', type: 'POST', contentType: 'application/json', data: JSON.stringify({
                 memory_name: memoryName, content: ''
             }), success: function (response) {
                 if (response.status === 'success') {
@@ -2203,7 +2300,7 @@ class Dashboard {
         let self = this;
         console.log('Loading news...');
         $.ajax({
-            url: '/fetch_unread_news',
+            url: DASHBOARD_API_PREFIX + '/fetch_unread_news',
             type: 'GET',
             success: function(response) {
                 console.log('Unread news response:', response);
@@ -2274,7 +2371,7 @@ class Dashboard {
     markNewsAsRead(newsId) {
         let self = this;
         $.ajax({
-            url: '/mark_news_snippet_as_read',
+            url: DASHBOARD_API_PREFIX + '/mark_news_snippet_as_read',
             type: 'POST',
             contentType: 'application/json',
             data: JSON.stringify({ news_snippet_id: newsId }),
@@ -2300,7 +2397,7 @@ class Dashboard {
 
         // Load serena config content
         $.ajax({
-            url: '/get_serena_config', type: 'GET', success: function (response) {
+            url: DASHBOARD_API_PREFIX + '/get_serena_config', type: 'GET', success: function (response) {
                 if (response.status === 'error') {
                     alert('Error: ' + response.message);
                     return;
@@ -2343,7 +2440,7 @@ class Dashboard {
         self.$editSerenaConfigSaveBtn.prop('disabled', true).text('Saving...');
 
         $.ajax({
-            url: '/save_serena_config', type: 'POST', contentType: 'application/json', data: JSON.stringify({
+            url: DASHBOARD_API_PREFIX + '/save_serena_config', type: 'POST', contentType: 'application/json', data: JSON.stringify({
                 content: content
             }), success: function (response) {
                 if (response.status === 'success') {
@@ -2373,7 +2470,7 @@ class Dashboard {
         const _shutdown = function () {
             console.log("Triggering shutdown");
             $.ajax({
-                url: '/shutdown', type: "PUT", contentType: 'application/json',
+                url: DASHBOARD_API_PREFIX + '/shutdown', type: "PUT", contentType: 'application/json',
             });
             self.$errorContainer.html('<div class="error-message">Shutting down ...</div>')
             setTimeout(function () {
