@@ -872,7 +872,7 @@ class SerenaAgent:
                 os.environ["COMSPEC"] = ""  # force use of default shell
                 log.info("Adjusting COMSPEC environment variable to use the default shell instead of '%s'", comspec)
 
-    def record_tool_usage(self, input_kwargs: dict, tool_result: str | dict, tool: Tool) -> None:
+    def record_tool_usage(self, input_kwargs: dict, tool_result: object, tool: Tool) -> None:
         """
         Record the usage of a tool with the given input and output strings if tool usage statistics recording is enabled.
         """

@@ -94,7 +94,7 @@ class SerenaFastMCPTool(FastMCPTool):
                 param_desc = f"{param_doc.description.strip().strip('.') + '.'}"
                 properties["description"] = param_desc[0].upper() + param_desc[1:]
 
-        def execute_fn(**kwargs) -> str:
+        def execute_fn(**kwargs) -> Any:
             try:
                 return tool.apply_ex(log_call=True, catch_exceptions=False, **kwargs)
             except ToolCallError as e:

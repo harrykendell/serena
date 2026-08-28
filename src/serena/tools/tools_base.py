@@ -327,7 +327,7 @@ class Tool(Component):
         """
         return {}
 
-    def apply_ex(self, log_call: bool = True, catch_exceptions: bool = True, mcp_ctx: Context | None = None, **kwargs) -> str:
+    def apply_ex(self, log_call: bool = True, catch_exceptions: bool = True, mcp_ctx: Context | None = None, **kwargs) -> Any:
         """
         Applies the tool with logging and exception handling, using the given keyword arguments.
         This method either returns a string result or raises a ToolCallError in case of an error during tool application
@@ -351,7 +351,7 @@ class Tool(Component):
             except Exception as e:
                 log.info(f"Failed to get client info: {e}.")
 
-        def task() -> str:
+        def task() -> Any:
             apply_fn = self.get_apply_fn()
 
             try:
