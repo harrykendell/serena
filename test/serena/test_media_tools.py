@@ -5,10 +5,12 @@ from unittest.mock import MagicMock
 
 import pytest
 from mcp.server.fastmcp import Image
+from mcp.types import CallToolResult
 
 from serena.config.serena_config import SerenaConfig
 from serena.project import Project
 from serena.tools import FetchMediaFileTool, RenderPdfPageTool
+from serena.tools.media_tools import MEDIA_VIEWER_URI
 
 _ONE_PIXEL_PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
 
@@ -53,6 +55,22 @@ def test_fetch_media_file_returns_native_mcp_image(project: Project, tmp_path: P
     result = _make_tool(FetchMediaFileTool, project).apply("pixel.png")
 
     assert isinstance(result, Image)
+
+
+def test_media_tool_prepares_chatgpt_preview_result(project: Project, tmp_path: Path) -> None:
+    (tmp_path / "pixel.png").write_bytes(_ONE_PIXEL_PNG)
+    tool = _make_tool(FetchMediaFileTool, project)
+
+    result = tool.prepare_mcp_result(tool.apply("pixel.png"))
+
+    assert isinstance(result, CallToolResult)
+    assert result.content[0].type == "image"
+    assert result.meta is not None
+    assert result.meta["serena/media"]["mimeType"] == "image/png"
+    assert tool.get_mcp_tool_meta() == {
+        "ui": {"resourceUri": MEDIA_VIEWER_URI},
+        "openai/outputTemplate": MEDIA_VIEWER_URI,
+    }
 
 
 def test_fetch_media_file_rejects_non_media(project: Project, tmp_path: Path) -> None:

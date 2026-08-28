@@ -7,8 +7,68 @@ import tempfile
 from pathlib import Path
 
 from mcp.server.fastmcp import Audio, Image
+from mcp.types import CallToolResult
 
 from serena.tools.tools_base import Tool
+
+MEDIA_VIEWER_URI = "ui://serena/media-viewer"
+MEDIA_VIEWER_MIME_TYPE = "text/html;profile=mcp-app"
+MEDIA_VIEWER_HTML = r"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+html,body{margin:0;padding:0;background:transparent}body{font-family:system-ui,sans-serif}
+#root{display:flex;justify-content:center;align-items:center;min-height:24px}
+img{display:block;max-width:100%;height:auto}audio{width:min(100%,720px)}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+(() => {
+  const root = document.getElementById("root");
+  let lastData = null;
+
+  function render(media) {
+    if (!media || !media.data || media.data === lastData) return;
+    lastData = media.data;
+    root.replaceChildren();
+    const url = `data:${media.mimeType};base64,${media.data}`;
+    if (media.type === "image") {
+      const image = document.createElement("img");
+      image.src = url;
+      image.alt = "Serena media preview";
+      root.appendChild(image);
+    } else if (media.type === "audio") {
+      const audio = document.createElement("audio");
+      audio.controls = true;
+      audio.src = url;
+      root.appendChild(audio);
+    }
+  }
+
+  function readOpenAI() {
+    render(window.openai?.toolResponseMetadata?.["serena/media"]);
+  }
+
+  window.addEventListener("openai:set_globals", readOpenAI);
+  window.addEventListener("message", (event) => {
+    const message = event.data;
+    if (message?.method === "ui/notifications/tool-result") {
+      const direct = message.params?.content?.find((item) => item?.type === "image" || item?.type === "audio");
+      if (direct) render(direct);
+      else render(message.params?._meta?.["serena/media"]);
+    }
+  });
+
+  readOpenAI();
+  const timer = setInterval(readOpenAI, 100);
+  setTimeout(() => clearInterval(timer), 10000);
+})();
+</script>
+</body>
+</html>"""
 
 
 class _McpMediaTool(Tool):
@@ -18,6 +78,36 @@ class _McpMediaTool(Tool):
     def get_apply_fn_metadata_from_cls(cls, structured_output: bool | None = None):
         # MCP media helpers are content blocks, not JSON-structured outputs
         return super().get_apply_fn_metadata_from_cls(structured_output=False)
+
+    @classmethod
+    def get_mcp_tool_meta(cls) -> dict[str, object]:
+        """Returns ChatGPT/MCP Apps metadata for the shared media viewer."""
+        return {
+            "ui": {"resourceUri": MEDIA_VIEWER_URI},
+            "openai/outputTemplate": MEDIA_VIEWER_URI,
+        }
+
+    def prepare_mcp_result(self, result: object) -> CallToolResult:
+        """Wraps native media with widget-only preview metadata for ChatGPT."""
+        if isinstance(result, Image):
+            content = result.to_image_content()
+        elif isinstance(result, Audio):
+            content = result.to_audio_content()
+        else:
+            raise TypeError(f"Unexpected MCP media result: {type(result).__name__}")
+
+        return CallToolResult.model_validate(
+            {
+                "content": [content],
+                "_meta": {
+                    "serena/media": {
+                        "type": content.type,
+                        "data": content.data,
+                        "mimeType": content.mimeType,
+                    }
+                },
+            }
+        )
 
 
 class FetchMediaFileTool(_McpMediaTool):

@@ -12,11 +12,13 @@ from typing import Any, Literal, cast
 import docstring_parser
 from mcp.server.fastmcp import server
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.fastmcp.resources import TextResource
 from mcp.server.fastmcp.server import Context, FastMCP, Settings
 from mcp.server.fastmcp.tools.base import Tool as FastMCPTool
 from mcp.server.session import ServerSessionT
 from mcp.shared.context import LifespanContextT, RequestT
 from mcp.types import ToolAnnotations
+from pydantic import AnyUrl
 from pydantic_settings import SettingsConfigDict
 from sensai.util import logging
 
@@ -27,6 +29,7 @@ from serena.config.context_mode import SerenaAgentContext
 from serena.config.serena_config import LanguageBackend, ModeSelectionDefinition, SerenaConfig
 from serena.constants import DEFAULT_CONTEXT, SERENA_LOG_FORMAT
 from serena.tools import Tool, ToolCallError
+from serena.tools.media_tools import MEDIA_VIEWER_HTML, MEDIA_VIEWER_MIME_TYPE, MEDIA_VIEWER_URI
 from serena.util.exception import show_fatal_exception_safe
 from serena.util.logging import MemoryLogHandler
 
@@ -96,7 +99,7 @@ class SerenaFastMCPTool(FastMCPTool):
 
         def execute_fn(**kwargs) -> Any:
             try:
-                return tool.apply_ex(log_call=True, catch_exceptions=False, **kwargs)
+                return tool.prepare_mcp_result(tool.apply_ex(log_call=True, catch_exceptions=False, **kwargs))
             except ToolCallError as e:
                 raise ToolError(e.get_error_message()) from e
 
@@ -123,6 +126,7 @@ class SerenaFastMCPTool(FastMCPTool):
             context_kwarg="mcp_ctx",
             annotations=annotations,
             title=tool_title,
+            meta=tool.get_mcp_tool_meta(),
         )
 
         self._param_aliases = tool.get_param_aliases()
@@ -389,6 +393,15 @@ class SerenaMCPFactory:
             host=host,
             port=port,
             instructions=instructions,
+        )
+        mcp.add_resource(
+            TextResource(
+                uri=AnyUrl(MEDIA_VIEWER_URI),
+                name="Serena media viewer",
+                description="Renders media returned by Serena media tools.",
+                mime_type=MEDIA_VIEWER_MIME_TYPE,
+                text=MEDIA_VIEWER_HTML,
+            )
         )
         return mcp
 

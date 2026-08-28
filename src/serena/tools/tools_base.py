@@ -217,6 +217,15 @@ class Tool(Component):
         return issubclass(cls, ToolMarkerCanEdit)
 
     @classmethod
+    def get_mcp_tool_meta(cls) -> dict[str, Any] | None:
+        """Returns optional MCP ``_meta`` attached to this tool's declaration."""
+        return None
+
+    def prepare_mcp_result(self, result: Any) -> Any:
+        """Prepares a tool result for transport through MCP."""
+        return result
+
+    @classmethod
     def get_tool_description(cls) -> str:
         docstring = cls.__doc__
         if docstring is None:
