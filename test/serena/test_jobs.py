@@ -7,6 +7,7 @@ import pytest
 
 from serena.job_runner import run_job
 from serena.jobs import (
+    DEFAULT_MAX_CONCURRENT_JOBS,
     JobBackend,
     JobLimitError,
     JobManager,
@@ -131,7 +132,12 @@ class FailingJobBackend(FakeJobBackend):
         raise RuntimeError("backend start failed")
 
 
-def _manager(tmp_path: Path, backend: FakeJobBackend, max_jobs: int = 6, output_limit: int = 100) -> JobManager:
+def _manager(
+    tmp_path: Path,
+    backend: FakeJobBackend,
+    max_jobs: int = DEFAULT_MAX_CONCURRENT_JOBS,
+    output_limit: int = 100,
+) -> JobManager:
     return JobManager(
         store=JobStore(tmp_path / "jobs"),
         backend=backend,
@@ -140,21 +146,21 @@ def _manager(tmp_path: Path, backend: FakeJobBackend, max_jobs: int = 6, output_
     )
 
 
-def test_job_limit_is_six_and_cancelled_job_frees_capacity(tmp_path: Path) -> None:
+def test_job_limit_is_ten_and_cancelled_job_frees_capacity(tmp_path: Path) -> None:
     backend = FakeJobBackend()
     manager = _manager(tmp_path, backend)
 
-    records = [manager.start_job(f"echo {index}", str(tmp_path), label=f"job {index}")[0] for index in range(6)]
+    records = [manager.start_job(f"echo {index}", str(tmp_path), label=f"job {index}")[0] for index in range(10)]
 
-    with pytest.raises(JobLimitError, match="limit of 6"):
-        manager.start_job("echo seventh", str(tmp_path), label="seventh")
+    with pytest.raises(JobLimitError, match="limit of 10"):
+        manager.start_job("echo eleventh", str(tmp_path), label="eleventh")
 
     cancelled = manager.cancel_job(records[0].job_id)
     replacement, running_jobs = manager.start_job("echo replacement", str(tmp_path), label="replacement")
 
     assert cancelled.status is JobStatus.CANCELLED
     assert replacement.status is JobStatus.RUNNING
-    assert running_jobs == 6
+    assert running_jobs == 10
 
 
 def test_start_requires_distinctive_nonempty_label(tmp_path: Path) -> None:
@@ -351,7 +357,7 @@ def test_job_tools_return_chat_friendly_telemetry_and_persistence(tmp_path: Path
     listed = json.loads(status_tool.apply())
     cancelled = json.loads(cancel_tool.apply(started["job_id"]))
 
-    assert started["max_concurrent_jobs"] == 6
+    assert started["max_concurrent_jobs"] == 10
     assert started["running_jobs"] == 1
     assert started["timeout_seconds"] == 60
     assert started["persistence"]["survives_serena_restart"] is True

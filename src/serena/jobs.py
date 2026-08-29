@@ -22,7 +22,7 @@ from filelock import FileLock
 
 from serena.config.serena_config import SerenaPaths
 
-DEFAULT_MAX_CONCURRENT_JOBS = 6
+DEFAULT_MAX_CONCURRENT_JOBS = 10
 DEFAULT_OUTPUT_CHAR_LIMIT = 12_000
 DEFAULT_JOB_RETENTION = timedelta(days=7)
 _MAX_CURSOR_LENGTH = 4096

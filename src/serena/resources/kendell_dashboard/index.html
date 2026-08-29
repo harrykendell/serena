@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f7f9fb" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#10161d" media="(prefers-color-scheme: dark)">
+  <title>Serena dashboard</title>
+  <link rel="icon" href="serena-logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script src="dashboard.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="site-header">
+      <div class="brand">
+        <img class="brand-mark" src="serena-logo.svg" alt="">
+        <div class="brand-copy">
+          <span class="brand-title">Serena</span>
+          <span class="brand-subtitle">Agent dashboard</span>
+        </div>
+      </div>
+      <div class="connection" id="connection-state" data-state="loading">
+        <span class="status-led" aria-hidden="true"></span>
+        <span id="connection-label">Connecting</span>
+        <span class="last-update" id="last-update"></span>
+      </div>
+    </header>
+
+    <main class="shell-main">
+      <section class="session-summary" aria-label="Session metadata">
+        <div class="session-heading">
+          <span class="session-path mono" id="project-path">—</span>
+        </div>
+        <dl class="metadata-grid">
+          <div class="meta-item meta-project">
+            <dt>Project</dt>
+            <dd id="project-name">—</dd>
+          </div>
+          <div class="meta-item">
+            <dt>Languages</dt>
+            <dd id="languages">—</dd>
+          </div>
+          <div class="meta-item">
+            <dt>Context</dt>
+            <dd id="context-name">—</dd>
+          </div>
+          <div class="meta-item">
+            <dt>Memories</dt>
+            <dd>
+              <button class="meta-resource-button" id="memories-button" type="button" aria-haspopup="dialog" aria-controls="resource-dialog">
+                <span id="memories-count">—</span>
+              </button>
+            </dd>
+          </div>
+          <div class="meta-item">
+            <dt>Version</dt>
+            <dd class="mono" id="version">—</dd>
+          </div>
+          <div class="meta-item">
+            <dt>Tools</dt>
+            <dd>
+              <button class="meta-resource-button" id="tools-button" type="button" aria-haspopup="dialog" aria-controls="resource-dialog">
+                <span id="tool-count">—</span>
+              </button>
+            </dd>
+          </div>
+        </dl>
+      </section>
+
+
+      <nav class="tabs" role="tablist" aria-label="Dashboard views">
+        <button class="tab-button active" id="tools-tab" type="button" role="tab" aria-selected="true" aria-controls="tools-panel" data-tab="tools">
+          Tools
+          <span class="tab-count" id="tools-tab-count">0</span>
+        </button>
+        <button class="tab-button" id="jobs-tab" type="button" role="tab" aria-selected="false" aria-controls="jobs-panel" data-tab="jobs">
+          Jobs
+          <span class="tab-count" id="jobs-tab-count">0</span>
+        </button>
+      </nav>
+
+      <section class="tab-panel active" id="tools-panel" role="tabpanel" aria-labelledby="tools-tab" data-panel="tools">
+        <div class="section-head">
+          <div>
+            <h2 class="section-title">Tool executions</h2>
+            <p class="section-note">Running, queued and completed calls in this Serena session</p>
+          </div>
+          <div class="counter-row" aria-label="Tool execution counts">
+            <span class="counter live"><strong id="execution-running">0</strong> running</span>
+            <span class="counter"><strong id="execution-queued">0</strong> queued</span>
+            <span class="counter"><strong id="execution-done">0</strong> done</span>
+          </div>
+        </div>
+        <div class="activity-list" id="executions-list">
+          <div class="empty-card">No tool executions recorded yet.</div>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="jobs-panel" role="tabpanel" aria-labelledby="jobs-tab" data-panel="jobs" hidden>
+        <div class="section-head">
+          <div>
+            <h2 class="section-title">Jobs</h2>
+            <p class="section-note" id="jobs-note">Durable long-running Serena jobs</p>
+          </div>
+          <div class="counter-row" aria-label="Job counts">
+            <span class="counter live"><strong id="jobs-running">0</strong> running</span>
+            <span class="counter"><strong id="jobs-done">0</strong> done</span>
+          </div>
+        </div>
+        <div class="activity-list" id="jobs-list">
+          <div class="empty-card">No jobs recorded.</div>
+        </div>
+      </section>
+    </main>
+
+    <dialog class="memory-dialog resource-dialog" id="resource-dialog" aria-labelledby="resource-dialog-title">
+      <div class="memory-dialog-head">
+        <div>
+          <div class="memory-dialog-kicker">Resources</div>
+          <h2 id="resource-dialog-title">Resources</h2>
+        </div>
+        <button class="memory-dialog-close" id="resource-dialog-close" type="button" aria-label="Close resources">×</button>
+      </div>
+      <div class="resource-dialog-content" id="resource-dialog-content"></div>
+    </dialog>
+
+    <dialog class="memory-dialog" id="memory-dialog" aria-labelledby="memory-dialog-title">
+      <div class="memory-dialog-head">
+        <div>
+          <div class="memory-dialog-kicker">Memory</div>
+          <h2 id="memory-dialog-title">Memory</h2>
+        </div>
+        <button class="memory-dialog-close" id="memory-dialog-close" type="button" aria-label="Close memory">×</button>
+      </div>
+      <pre class="memory-content" id="memory-dialog-content">Loading…</pre>
+    </dialog>
+  </div>
+</body>
+</html>

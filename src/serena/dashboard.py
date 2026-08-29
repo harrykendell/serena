@@ -24,7 +24,7 @@ from sensai.util.pickle import dump_pickle, load_pickle
 from serena.analytics import ToolUsageStats
 from serena.config.serena_config import SerenaConfig, SerenaPaths
 from serena.constants import SERENA_DASHBOARD_DIR, SerenaPorts
-from serena.jobs import DEFAULT_MAX_CONCURRENT_JOBS, JobManager, JobStatus
+from serena.custom_dashboard import CustomDashboard
 from serena.task_executor import TaskExecutor
 from serena.util.logging import MemoryLogHandler
 from serena.util.pypi import PyPIPackageInfo
@@ -35,8 +35,6 @@ if TYPE_CHECKING:
     from serena.agent import SerenaAgent
 
 log = logging.getLogger(__name__)
-
-_DASHBOARD_RECENT_JOB_LIMIT = 20
 
 # disable Werkzeug's logging to avoid cluttering the output
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
@@ -214,11 +212,10 @@ class SerenaDashboardAPI:
         if trusted_hosts:
             self._app.config["TRUSTED_HOSTS"] = trusted_hosts
         self._tool_usage_stats = tool_usage_stats
-        self._job_manager = JobManager(max_concurrent_jobs=DEFAULT_MAX_CONCURRENT_JOBS)
+        self._custom_dashboard = CustomDashboard(self._app, agent, memory_log_handler)
         self._loaded_news: dict[str, str] = {}
         self._news_ready = threading.Event()
         self._setup_routes()
-        self._register_dashboard_api_aliases()
         self._read_news = ReadNews.load()
         self._newer_serena_version: str | None = None
 
@@ -265,11 +262,11 @@ class SerenaDashboardAPI:
         # Static files
         @self._app.route("/dashboard/<path:filename>")
         def serve_dashboard(filename: str) -> Response:
-            return send_from_directory(SERENA_DASHBOARD_DIR, filename)
+            return send_from_directory(self._custom_dashboard.static_dir, filename)
 
         @self._app.route("/dashboard/")
         def serve_dashboard_index() -> Response:
-            return send_from_directory(SERENA_DASHBOARD_DIR, "index.html")
+            return send_from_directory(self._custom_dashboard.static_dir, "index.html")
 
         # API routes
 
@@ -422,22 +419,6 @@ class SerenaDashboardAPI:
             except Exception as e:
                 return {"status": "error", "message": str(e)}
 
-        @self._app.route("/background_jobs", methods=["GET"])
-        def get_background_jobs() -> dict[str, Any]:
-            try:
-                return self._get_background_jobs()
-            except Exception as e:
-                return {"status": "error", "message": str(e)}
-
-        @self._app.route("/background_jobs/<job_id>/output", methods=["GET"])
-        def get_background_job_output(job_id: str) -> dict[str, Any]:
-            try:
-                mode = request.args.get("mode", "latest")
-                cursor = request.args.get("cursor")
-                return self._get_background_job_output(job_id, mode, cursor)
-            except Exception as e:
-                return {"status": "error", "message": str(e)}
-
         @self._app.route("/queued_task_executions", methods=["GET"])
         def get_queued_executions() -> dict[str, Any]:
             try:
@@ -510,26 +491,6 @@ class SerenaDashboardAPI:
             except Exception as e:
                 return {"status": "error", "message": str(e)}
 
-    def _register_dashboard_api_aliases(self) -> None:
-        """Expose dashboard API routes beneath the dashboard URL namespace.
-
-        The original root routes remain available for backwards compatibility with existing local
-        dashboard clients. The namespaced aliases let reverse proxies and access-control layers treat
-        the complete browser application as a single ``/dashboard`` security boundary.
-        """
-        excluded_routes = {"/", "/dashboard", "/dashboard/", "/dashboard/<path:filename>"}
-        for rule in list(self._app.url_map.iter_rules()):
-            if rule.endpoint == "static" or rule.rule in excluded_routes or rule.rule.startswith("/dashboard/"):
-                continue
-
-            methods = sorted(rule.methods - {"HEAD", "OPTIONS"})
-            self._app.add_url_rule(
-                f"/dashboard/api{rule.rule}",
-                endpoint=f"dashboard_api_{rule.endpoint}",
-                view_func=self._app.view_functions[rule.endpoint],
-                methods=methods,
-            )
-
     def _get_log_messages(self, request_log: RequestLog) -> ResponseLog:
         messages = self._memory_log_handler.get_log_messages(from_idx=request_log.start_idx)
         project = self._agent.get_active_project()
@@ -544,87 +505,6 @@ class SerenaDashboardAPI:
             return ResponseToolStats(stats=self._tool_usage_stats.get_tool_stats_dict())
         else:
             return ResponseToolStats(stats={})
-
-    def _get_background_jobs(self) -> dict[str, Any]:
-        """Return running and recent durable jobs without retrieving journal output."""
-        snapshots = self._job_manager.list_job_snapshots(
-            limit=DEFAULT_MAX_CONCURRENT_JOBS + _DASHBOARD_RECENT_JOB_LIMIT,
-            running_only=False,
-        )
-        running = [snapshot for snapshot in snapshots if snapshot.record.status is JobStatus.RUNNING]
-        recent = [snapshot for snapshot in snapshots if snapshot.record.status.is_terminal][:_DASHBOARD_RECENT_JOB_LIMIT]
-        persistence = self._job_manager.persistence_info()
-
-        jobs: list[dict[str, Any]] = []
-        for snapshot in [*running, *recent]:
-            record = snapshot.record
-            runtime = snapshot.runtime
-            jobs.append(
-                {
-                    "job_id": record.job_id,
-                    "label": record.label,
-                    "project": record.project_name,
-                    "cwd": record.cwd,
-                    "status": record.status.value,
-                    "created_at": record.created_at,
-                    "finished_at": record.finished_at,
-                    "return_code": record.return_code,
-                    "status_message": record.status_message,
-                    "timeout_seconds": record.timeout_seconds,
-                    "elapsed_seconds": runtime.elapsed_seconds,
-                    "seconds_since_last_output": runtime.seconds_since_last_output,
-                    "memory_bytes": runtime.memory_bytes,
-                    "cpu_seconds": runtime.cpu_seconds,
-                    "process_count": runtime.process_count,
-                }
-            )
-        return {
-            "status": "success",
-            "jobs": jobs,
-            "running_jobs": len(running),
-            "recent_jobs": len(recent),
-            "max_concurrent_jobs": self._job_manager.max_concurrent_jobs,
-            "persistence": {
-                "survives_serena_restart": persistence.survives_serena_restart,
-                "survives_logout": persistence.survives_logout,
-                "survives_reboot": persistence.survives_reboot,
-                "linger_enabled": persistence.linger_enabled,
-            },
-        }
-
-    def _get_background_job_output(self, job_id: str, mode: str, cursor: str | None) -> dict[str, Any]:
-        """Return one bounded output page for a durable job."""
-        if mode == "latest":
-            if cursor is not None:
-                raise ValueError("latest output does not accept a cursor")
-            snapshot = self._job_manager.get_job(job_id)
-        elif mode == "after":
-            if cursor is None:
-                raise ValueError("after output requires a cursor")
-            snapshot = self._job_manager.get_job(job_id, cursor=cursor)
-        elif mode == "before":
-            if cursor is None:
-                raise ValueError("before output requires a cursor")
-            snapshot = self._job_manager.get_job_output_before(job_id, cursor)
-        else:
-            raise ValueError(f"Unsupported output mode {mode!r}")
-
-        chunk = snapshot.output
-        if chunk is None:
-            raise RuntimeError(f"No output payload available for job {job_id!r}")
-        return {
-            "status": "success",
-            "job_id": snapshot.record.job_id,
-            "job_status": snapshot.record.status.value,
-            "output": chunk.output,
-            "newest_cursor": chunk.next_cursor,
-            "oldest_cursor": chunk.oldest_cursor,
-            "has_more_output": chunk.has_more_output,
-            "has_earlier_output": chunk.has_earlier_output,
-            "output_truncated": chunk.output_truncated,
-            "earlier_output_omitted": chunk.earlier_output_omitted,
-            "cursor_reset": chunk.cursor_reset,
-        }
 
     def _clear_tool_stats(self) -> None:
         if self._tool_usage_stats is not None:
