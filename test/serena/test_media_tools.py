@@ -57,6 +57,21 @@ def test_fetch_media_file_returns_native_mcp_image(project: Project, tmp_path: P
     assert isinstance(result, Image)
 
 
+def test_fetch_media_file_preserves_svg_mime_type(project: Project, tmp_path: Path) -> None:
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><circle cx=".5" cy=".5" r=".5"/></svg>'
+    (tmp_path / "icon.svg").write_bytes(svg)
+    tool = _make_tool(FetchMediaFileTool, project)
+
+    result = tool.prepare_mcp_result(tool.apply("icon.svg"))
+
+    assert isinstance(result, CallToolResult)
+    assert result.content[0].type == "image"
+    assert result.content[0].mimeType == "image/svg+xml"
+    assert base64.b64decode(result.content[0].data) == svg
+    assert result.meta is not None
+    assert result.meta["serena/media"]["mimeType"] == "image/svg+xml"
+
+
 def test_media_tool_prepares_chatgpt_preview_result(project: Project, tmp_path: Path) -> None:
     (tmp_path / "pixel.png").write_bytes(_ONE_PIXEL_PNG)
     tool = _make_tool(FetchMediaFileTool, project)

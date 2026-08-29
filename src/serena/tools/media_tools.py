@@ -128,14 +128,15 @@ class FetchMediaFileTool(_McpMediaTool):
         if path.stat().st_size > self._MAX_FILE_SIZE:
             raise ValueError(f"Media file exceeds the {self._MAX_FILE_SIZE // (1024 * 1024)} MiB size limit")
 
-        # determine the MCP media helper from the MIME type
+        # preserve the MIME type already identified by the standard library
         mime_type, _ = mimetypes.guess_type(path.name)
         if mime_type is None:
             raise ValueError(f"Could not determine media type from file extension: {relative_path}")
-        if mime_type.startswith("image/"):
-            return Image(path=path)
-        if mime_type.startswith("audio/"):
-            return Audio(path=path)
+        media_type, _, media_format = mime_type.partition("/")
+        if media_type == "image":
+            return Image(path=path, format=media_format)
+        if media_type == "audio":
+            return Audio(path=path, format=media_format)
         raise ValueError(f"Unsupported media type '{mime_type}'; expected an image or audio file")
 
 
