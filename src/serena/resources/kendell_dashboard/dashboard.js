@@ -4,6 +4,7 @@ const SCROLL_IDLE_MS = 350;
 
 const outputCache = new Map();
 const outputRequests = new Set();
+const jobCpuSamples = new Map();
 const scrollerStates = new WeakMap();
 let refreshInFlight = false;
 
@@ -462,6 +463,46 @@ function formatDuration(seconds) {
   return `${hours}h ${minutes % 60}m`;
 }
 
+function formatBytes(bytes) {
+  if (bytes === null || bytes === undefined) return null;
+  const value = Math.max(0, Number(bytes));
+  if (!Number.isFinite(value)) return null;
+  const mebibytes = value / (1024 ** 2);
+  if (mebibytes < 1024) return `${Math.round(mebibytes)} MB`;
+  return `${(mebibytes / 1024).toFixed(1)} GB`;
+}
+
+function formatJobCpuPercent(job) {
+  if (job.status !== "running" || job.cpu_seconds === null || job.cpu_seconds === undefined) {
+    jobCpuSamples.delete(job.job_id);
+    return null;
+  }
+
+  const cpuSeconds = Number(job.cpu_seconds);
+  if (!Number.isFinite(cpuSeconds)) return null;
+  const sampledAt = performance.now() / 1000;
+  const previous = jobCpuSamples.get(job.job_id);
+  let cpuPercent = job.elapsed_seconds > 0 ? (cpuSeconds / job.elapsed_seconds) * 100 : null;
+
+  if (previous && cpuSeconds >= previous.cpuSeconds && sampledAt > previous.sampledAt) {
+    cpuPercent = ((cpuSeconds - previous.cpuSeconds) / (sampledAt - previous.sampledAt)) * 100;
+  }
+  jobCpuSamples.set(job.job_id, { cpuSeconds, sampledAt });
+
+  return cpuPercent === null || !Number.isFinite(cpuPercent) ? null : Math.max(0, Math.round(cpuPercent));
+}
+
+function formatJobRuntime(job) {
+  const parts = [formatDuration(job.elapsed_seconds)];
+  if (job.status !== "running") return parts[0];
+
+  const cpuPercent = formatJobCpuPercent(job);
+  const memory = formatBytes(job.memory_bytes);
+  if (cpuPercent !== null) parts.push(`CPU ${cpuPercent}%`);
+  if (memory !== null) parts.push(`RAM ${memory}`);
+  return parts.join(" · ");
+}
+
 function formatClock(iso) {
   if (!iso) return "—";
   const date = new Date(iso);
@@ -545,7 +586,7 @@ function updateJobRow(row, job) {
   setNodeText(refs.project, job.project || "—");
   updateStatusBadge(refs.badge, job.status);
   setNodeText(refs.submitted, formatClock(job.created_at));
-  setNodeText(refs.elapsed, formatDuration(job.elapsed_seconds));
+  setNodeText(refs.elapsed, formatJobRuntime(job));
 
   if (!row.open) return;
   const needsFinalRefresh = previousStatus === "running" && job.status !== "running";
