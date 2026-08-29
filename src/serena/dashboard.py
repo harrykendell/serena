@@ -203,11 +203,13 @@ class SerenaDashboardAPI:
         tool_usage_stats: ToolUsageStats | None = None,
         host: str = "127.0.0.1",
         trusted_hosts: list[str] | None = None,
+        port: int | None = None,
     ) -> None:
         self._memory_log_handler = memory_log_handler
         self._tool_names = tool_names
         self._agent = agent
         self._host = host
+        self._port = port
         self._app = Flask(self.__class__.__name__)
         if trusted_hosts:
             self._app.config["TRUSTED_HOSTS"] = trusted_hosts
@@ -827,7 +829,15 @@ class SerenaDashboardAPI:
         return port
 
     def run_in_thread(self) -> tuple[threading.Thread, int]:
-        port = self._find_first_free_port(self.BASE_PORT, self._host)
+        if self._port is None:
+            # Port 24282 is reserved for the externally exposed MCP service dashboard.
+            # Other Serena processes must not claim it while that service is stopped.
+            port = self._find_first_free_port(self.BASE_PORT + 1, self._host)
+        else:
+            port = self._port
+            first_free_port = self._find_first_free_port(port, self._host)
+            if first_free_port != port:
+                raise RuntimeError(f"Configured dashboard port {port} is already in use on {self._host}")
         log.info("Starting dashboard (listen_address=%s, port=%d)", self._host, port)
         thread = threading.Thread(target=lambda: self.run(port=port), daemon=True)
         thread.start()

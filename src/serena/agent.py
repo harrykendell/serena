@@ -546,6 +546,7 @@ class SerenaAgent:
         context: SerenaAgentContext | None = None,
         modes: ModeSelectionDefinition | None = None,
         memory_log_handler: MemoryLogHandler | None = None,
+        web_dashboard_port: int | None = None,
     ):
         """
         :param project: the project to load immediately or None to not load any project; may be a path to the project or a name of
@@ -559,6 +560,7 @@ class SerenaAgent:
         :param modes: mode selection definition to apply for this session
         :param memory_log_handler: a MemoryLogHandler instance from which to read log messages; if None, a new one will be created
             if necessary.
+        :param web_dashboard_port: exact dashboard port to bind, or None to use the first available secondary dashboard port.
         """
         self._active_project: Project | None = None  # NOTE: field name used in __del__
         self._project_activation_callback = project_activation_callback
@@ -694,6 +696,7 @@ class SerenaAgent:
                 tool_usage_stats=self._tool_usage_stats,
                 host=self.serena_config.web_dashboard_listen_address,
                 trusted_hosts=self.serena_config.web_dashboard_trusted_hosts,
+                port=web_dashboard_port,
             )
 
         # propagate the initial config/state to listeners, particularly to the dashboard API.

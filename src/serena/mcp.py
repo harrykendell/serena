@@ -311,7 +311,11 @@ class SerenaMCPFactory:
             log.info(f"Starting MCP server with {len(mcp._tool_manager._tools)} tools: {list(mcp._tool_manager._tools.keys())}")
 
     def _create_serena_agent(
-        self, serena_config: SerenaConfig, modes: ModeSelectionDefinition | None = None, project_activation_error: str | None = None
+        self,
+        serena_config: SerenaConfig,
+        modes: ModeSelectionDefinition | None = None,
+        project_activation_error: str | None = None,
+        web_dashboard_port: int | None = None,
     ) -> SerenaAgent:
         return SerenaAgent(
             project=self.project,
@@ -320,6 +324,7 @@ class SerenaMCPFactory:
             modes=modes,
             memory_log_handler=self.memory_log_handler,
             project_activation_error=project_activation_error,
+            web_dashboard_port=web_dashboard_port,
         )
 
     def create_mcp_server(
@@ -329,6 +334,7 @@ class SerenaMCPFactory:
         mode_selection_def: ModeSelectionDefinition | None = None,
         language_backend: LanguageBackend | None = None,
         enable_web_dashboard: bool | None = None,
+        web_dashboard_port: int | None = None,
         enable_gui_log_window: bool | None = None,
         open_web_dashboard: bool | None = None,
         log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] | None = None,
@@ -344,6 +350,7 @@ class SerenaMCPFactory:
         :param mode_selection_def: the mode selection definition to apply
         :param language_backend: the language backend to use, overriding the configuration setting.
         :param enable_web_dashboard: Whether to enable the web dashboard. If not specified, will take the value from the serena configuration.
+        :param web_dashboard_port: Exact dashboard port to bind. If omitted, secondary dashboard instances start searching at port 24283.
         :param enable_gui_log_window: Whether to enable the GUI log window. It currently does not work on macOS, and setting this to True will be ignored then.
             If not specified, will take the value from the serena configuration.
         :param open_web_dashboard: Whether to open the web dashboard on launch.
@@ -374,7 +381,12 @@ class SerenaMCPFactory:
             if language_backend is not None:
                 config.language_backend = language_backend
 
-            self.agent = self._create_serena_agent(config, modes=mode_selection_def, project_activation_error=project_activation_error)
+            self.agent = self._create_serena_agent(
+                config,
+                modes=mode_selection_def,
+                project_activation_error=project_activation_error,
+                web_dashboard_port=web_dashboard_port,
+            )
 
         except Exception as e:
             show_fatal_exception_safe(e)

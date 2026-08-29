@@ -288,6 +288,12 @@ class TopLevelCommands(AutoRegisteringGroup):
         "For more information, see\nhttps://oraios.github.io/serena/02-usage/060_dashboard.html",
     )
     @click.option(
+        "--web-dashboard-port",
+        type=click.IntRange(1, 65535),
+        default=None,
+        help="Bind the web dashboard to this exact port. When omitted, dashboard instances start at port 24283.",
+    )
+    @click.option(
         "--enable-gui-log-window",
         type=bool,
         is_flag=False,
@@ -327,6 +333,7 @@ class TopLevelCommands(AutoRegisteringGroup):
         host: str,
         port: int,
         enable_web_dashboard: bool | None,
+        web_dashboard_port: int | None,
         open_web_dashboard: bool | None,
         enable_gui_log_window: bool | None,
         log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] | None,
@@ -384,6 +391,7 @@ class TopLevelCommands(AutoRegisteringGroup):
             mode_selection_def=mode_selection_def,
             language_backend=LanguageBackend.from_str(language_backend) if language_backend else None,
             enable_web_dashboard=enable_web_dashboard,
+            web_dashboard_port=web_dashboard_port,
             open_web_dashboard=open_web_dashboard,
             enable_gui_log_window=enable_gui_log_window,
             log_level=log_level,
