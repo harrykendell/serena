@@ -3,10 +3,10 @@
 import re
 import subprocess
 
-from serena.tools.tools_base import Tool, ToolMarkerCanEdit
+from serena.tools.tools_base import Tool, ToolMarkerCanEdit, ToolMarkerOptional
 
 
-class _GitTool(Tool):
+class _GitTool(Tool, ToolMarkerOptional):
     _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 
     def _run_git(self, args: list[str], max_answer_chars: int = -1) -> str:

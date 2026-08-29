@@ -49,6 +49,26 @@ def test_grok_context_prompt_renders():
     assert "Serena's code intelligence tools" in rendered_prompt
 
 
+def test_chatgpt_context_includes_fork_optional_tools() -> None:
+    context = SerenaAgentContext.from_name("chatgpt")
+
+    assert {
+        "start_job",
+        "job_status",
+        "cancel_job",
+        "git_status",
+        "git_fetch",
+        "git_log",
+        "git_diff",
+        "git_branch",
+        "git_commit",
+        "git_pull",
+        "git_push",
+        "fetch_media_file",
+        "render_pdf_page",
+    } <= set(context.included_optional_tools)
+
+
 @pytest.mark.parametrize("context_name", BUILTIN_RUNTIME_CONTEXT_NAMES)
 def test_builtin_contexts_load_and_prompt_templates_render(context_name: str):
     context = SerenaAgentContext.from_name(context_name)

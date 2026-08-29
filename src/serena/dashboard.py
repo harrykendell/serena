@@ -256,6 +256,10 @@ class SerenaDashboardAPI:
         def redirect_to_dashboard() -> Response:
             return redirect("/dashboard/")  # type: ignore[return-value]
 
+        @self._app.route("/dashboard")
+        def redirect_dashboard_slash() -> Response:
+            return redirect("/dashboard/")  # type: ignore[return-value]
+
         # Static files
         @self._app.route("/dashboard/<path:filename>")
         def serve_dashboard(filename: str) -> Response:
@@ -502,7 +506,7 @@ class SerenaDashboardAPI:
         dashboard clients. The namespaced aliases let reverse proxies and access-control layers treat
         the complete browser application as a single ``/dashboard`` security boundary.
         """
-        excluded_routes = {"/", "/dashboard/", "/dashboard/<path:filename>"}
+        excluded_routes = {"/", "/dashboard", "/dashboard/", "/dashboard/<path:filename>"}
         for rule in list(self._app.url_map.iter_rules()):
             if rule.endpoint == "static" or rule.rule in excluded_routes or rule.rule.startswith("/dashboard/"):
                 continue

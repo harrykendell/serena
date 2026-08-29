@@ -9,7 +9,7 @@ from pathlib import Path
 from mcp.server.fastmcp import Audio, Image
 from mcp.types import CallToolResult
 
-from serena.tools.tools_base import Tool
+from serena.tools.tools_base import Tool, ToolMarkerOptional
 
 MEDIA_VIEWER_URI = "ui://serena/media-viewer"
 MEDIA_VIEWER_MIME_TYPE = "text/html;profile=mcp-app"
@@ -71,7 +71,7 @@ img{display:block;max-width:100%;height:auto}audio{width:min(100%,720px)}
 </html>"""
 
 
-class _McpMediaTool(Tool):
+class _McpMediaTool(Tool, ToolMarkerOptional):
     """Base for tools whose results are MCP-native unstructured media content."""
 
     @classmethod

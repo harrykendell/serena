@@ -42,7 +42,7 @@ class LogMessage {
     };
 }
 
-function updateThemeAwareImage($img, theme=null) {
+function updateThemeAwareImage($img, theme = null) {
     if (!theme) {
         const isDarkMode = $('html').data("theme") == 'dark';
         theme = isDarkMode ? 'dark' : 'light';
@@ -77,7 +77,7 @@ class BannerRotation {
 
     init() {
         let self = this;
-        this.loadBanners(function() {
+        this.loadBanners(function () {
             self.randomizeInitialBanner('platinum');
             self.randomizeInitialBanner('gold');
 
@@ -175,7 +175,7 @@ class BannerRotation {
 
     bindArrowButtons() {
         let self = this;
-        $('.banner-arrow').on('click', function(e) {
+        $('.banner-arrow').on('click', function (e) {
             e.preventDefault();
             e.stopPropagation();
             const target = $(this).data('target');
@@ -928,7 +928,7 @@ class Dashboard {
 
     startBackgroundJobsPolling() {
         this.loadBackgroundJobs();
-        this.backgroundJobsPollInterval = setInterval(this.loadBackgroundJobs.bind(this), 2000);
+        this.backgroundJobsPollInterval = setInterval(this.loadBackgroundJobs.bind(this), 3000);
     }
 
     displayBackgroundJobs(response) {
@@ -1038,8 +1038,8 @@ class Dashboard {
         else {
             this.waitingForExecutionsPollingResult = true;
             console.log('Polling for executions...');
-            this.loadQueuedExecutions(function() {
-                self.loadLastExecution(function() {
+            this.loadQueuedExecutions(function () {
+                self.loadLastExecution(function () {
                     self.waitingForExecutionsPollingResult = false;
                 });
             });
@@ -1299,7 +1299,7 @@ class Dashboard {
     saveLogs() {
         const logText = this.$logContainer.text();
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        const blob = new Blob([logText], {type: 'text/plain'});
+        const blob = new Blob([logText], { type: 'text/plain' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -1456,7 +1456,7 @@ class Dashboard {
 
     loadStats() {
         let self = this;
-        $.when($.ajax({url: DASHBOARD_API_PREFIX + '/get_tool_stats', type: 'GET'}), $.ajax({
+        $.when($.ajax({ url: DASHBOARD_API_PREFIX + '/get_tool_stats', type: 'GET' }), $.ajax({
             url: DASHBOARD_API_PREFIX + '/get_token_count_estimator_name',
             type: 'GET'
         })).done(function (statsResp, estimatorResp) {
@@ -1547,7 +1547,7 @@ class Dashboard {
                             color: textColor
                         }
                     }, datalabels: {
-                        display: true, color: 'white', font: {weight: 'bold'}, formatter: (value) => value
+                        display: true, color: 'white', font: { weight: 'bold' }, formatter: (value) => value
                     }
                 }
             }
@@ -1566,7 +1566,7 @@ class Dashboard {
                             color: textColor
                         }
                     }, datalabels: {
-                        display: true, color: 'white', font: {weight: 'bold'}, formatter: (value) => value
+                        display: true, color: 'white', font: { weight: 'bold' }, formatter: (value) => value
                     }
                 }
             }
@@ -1585,7 +1585,7 @@ class Dashboard {
                             color: textColor
                         }
                     }, datalabels: {
-                        display: true, color: 'white', font: {weight: 'bold'}, formatter: (value) => value
+                        display: true, color: 'white', font: { weight: 'bold' }, formatter: (value) => value
                     }
                 }
             }
@@ -1638,7 +1638,7 @@ class Dashboard {
 
     generateColors(count) {
         const colors = ['#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF', '#FF9F40', '#FF6384', '#C9CBCF', '#4BC0C0', '#FF6384'];
-        return Array.from({length: count}, (_, i) => colors[i % colors.length]);
+        return Array.from({ length: count }, (_, i) => colors[i % colors.length]);
     }
 
     updateSummaryTable(totalCalls, totalInputTokens, totalOutputTokens) {
@@ -1727,7 +1727,7 @@ class Dashboard {
         }
 
         // Update theme-aware images
-        $(".theme-aware-img").each(function() {
+        $(".theme-aware-img").each(function () {
             const $img = $(this);
             updateThemeAwareImage($img, theme);
         });
@@ -2302,7 +2302,7 @@ class Dashboard {
         $.ajax({
             url: DASHBOARD_API_PREFIX + '/fetch_unread_news',
             type: 'GET',
-            success: function(response) {
+            success: function (response) {
                 console.log('Unread news response:', response);
                 if (response.status === 'success' && response.news && Object.keys(response.news).length > 0) {
                     const newsIds = Object.keys(response.news);
@@ -2312,7 +2312,7 @@ class Dashboard {
                     self.$newsSection.hide();
                 }
             },
-            error: function(xhr, status, error) {
+            error: function (xhr, status, error) {
                 console.error('Error loading news:', error);
                 self.$newsSection.hide();
             }
@@ -2339,7 +2339,7 @@ class Dashboard {
         self.$newsDisplay.empty();
         console.log('Displaying ' + newsIds.length + ' news items.');
 
-        newsIds.forEach(function(newsId) {
+        newsIds.forEach(function (newsId) {
             const html = newsData[String(newsId)];
             if (!html) {
                 console.warn('No news content found for ID ' + newsId);
@@ -2360,7 +2360,7 @@ class Dashboard {
             self.$newsDisplay.append($newsContainer);
 
             // Bind button click event
-            $button.on('click', function() {
+            $button.on('click', function () {
                 const btn = $(this);
                 btn.prop('disabled', true).text('Marking...');
                 self.markNewsAsRead(newsId);
@@ -2375,7 +2375,7 @@ class Dashboard {
             type: 'POST',
             contentType: 'application/json',
             data: JSON.stringify({ news_snippet_id: newsId }),
-            success: function(response) {
+            success: function (response) {
                 if (response.status === 'success') {
                     // Reload news to show updated list
                     self.loadNews();
@@ -2383,7 +2383,7 @@ class Dashboard {
                     console.error('Error marking news as read:', response.message);
                 }
             },
-            error: function(xhr, status, error) {
+            error: function (xhr, status, error) {
                 console.error('Error marking news as read:', error);
             }
         });

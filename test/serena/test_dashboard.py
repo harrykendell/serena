@@ -56,6 +56,14 @@ def test_available_languages_exclude_project_languages():
     assert LanguageServerId.ANSIBLE.value in available
 
 
+def test_dashboard_redirect_preserves_reverse_proxy_host() -> None:
+    dashboard = _make_dashboard(project_languages=None)
+    response = dashboard._app.test_client().get("/dashboard", base_url="https://serena.kendell.uk")
+
+    assert response.status_code == 302
+    assert response.headers["Location"] == "/dashboard/"
+
+
 def test_background_jobs_route_exposes_running_job_telemetry() -> None:
     dashboard = _make_dashboard(project_languages=None)
     job_manager = MagicMock()
