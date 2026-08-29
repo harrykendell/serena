@@ -978,7 +978,6 @@ class Dashboard {
             const state = this.backgroundJobOutputState.get(job.job_id);
             const previousStatus = state ? state.status : null;
             this.updateBackgroundJobCard($card, job);
-            (job.status === 'running' ? $runningList : $recentList).append($card);
 
             if (state) {
                 state.status = job.status;
@@ -997,12 +996,33 @@ class Dashboard {
             }
         }
 
+        this.reconcileBackgroundJobOrder($runningList, runningJobs);
+        this.reconcileBackgroundJobOrder($recentList, recentJobs);
         this.$backgroundJobsDisplay.find('.background-job-running-empty').toggle(runningJobs.length === 0);
         this.$backgroundJobsDisplay.find('.background-job-recent-empty').toggle(recentJobs.length === 0);
         const persistenceMessage = response.persistence && !response.persistence.survives_logout
             ? 'Jobs survive Serena restarts, but user logout may stop them while systemd linger is disabled.'
             : '';
         this.$backgroundJobsDisplay.find('.job-persistence-note').text(persistenceMessage).toggle(Boolean(persistenceMessage));
+    }
+
+    reconcileBackgroundJobOrder($list, jobs) {
+        const listElement = $list.get(0);
+        if (!listElement) return;
+
+        let nextElement = null;
+        for (let index = jobs.length - 1; index >= 0; index -= 1) {
+            const $card = this.backgroundJobCards.get(jobs[index].job_id);
+            const cardElement = $card ? $card.get(0) : null;
+            if (!cardElement) continue;
+
+            const alreadyPlaced = cardElement.parentElement === listElement
+                && cardElement.nextElementSibling === nextElement;
+            if (!alreadyPlaced) {
+                listElement.insertBefore(cardElement, nextElement);
+            }
+            nextElement = cardElement;
+        }
     }
 
     createBackgroundJobCard(jobId) {
@@ -1045,7 +1065,7 @@ class Dashboard {
         const state = this.backgroundJobOutputState.get(job.job_id);
         const expanded = Boolean(state && state.expanded);
         $card.find('.background-job-toggle').text(expanded ? '▾' : '▸');
-        $card.find('.background-job-output-panel').toggle(expanded);
+        $card.find('.background-job-header').attr('aria-expanded', expanded ? 'true' : 'false');
     }
 
     backgroundJobMeta(job) {
@@ -1093,6 +1113,7 @@ class Dashboard {
 
         state.expanded = !state.expanded;
         $card.find('.background-job-toggle').text(state.expanded ? '▾' : '▸');
+        $card.find('.background-job-header').attr('aria-expanded', state.expanded ? 'true' : 'false');
         $card.find('.background-job-output-panel').toggle(state.expanded);
         if (!state.expanded) return;
 
