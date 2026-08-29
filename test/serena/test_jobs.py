@@ -59,11 +59,14 @@ class FakeJobBackend(JobBackend):
                 selected.append(message)
                 chars = prospective
             selected.reverse()
+            oldest_index = len(messages) - len(selected)
             return JobOutputChunk(
                 output="\n".join(selected),
                 next_cursor=str(len(messages)) if messages else None,
                 has_more_output=False,
-                earlier_output_omitted=len(selected) < len(messages),
+                oldest_cursor=str(oldest_index) if selected else None,
+                has_earlier_output=oldest_index > 0,
+                earlier_output_omitted=oldest_index > 0,
             )
 
         start = int(cursor) if cursor is not None else 0
@@ -80,6 +83,29 @@ class FakeJobBackend(JobBackend):
             output="\n".join(selected),
             next_cursor=str(next_index),
             has_more_output=next_index < len(messages),
+            oldest_cursor=str(start) if selected else None,
+        )
+
+    def read_output_before(self, record: JobRecord, cursor: str, max_chars: int) -> JobOutputChunk:
+        messages = self.output.get(record.job_id, [])
+        boundary = int(cursor)
+        selected: list[str] = []
+        chars = 0
+        for message in reversed(messages[:boundary]):
+            prospective = chars + (1 if selected else 0) + len(message)
+            if selected and prospective > max_chars:
+                break
+            selected.append(message)
+            chars = prospective
+        selected.reverse()
+        start = boundary - len(selected)
+        return JobOutputChunk(
+            output="\n".join(selected),
+            next_cursor=str(boundary - 1) if selected else None,
+            has_more_output=False,
+            oldest_cursor=str(start) if selected else None,
+            has_earlier_output=start > 0,
+            earlier_output_omitted=start > 0,
         )
 
     def runtime_info(self, record: JobRecord) -> JobRuntimeInfo:
@@ -196,6 +222,25 @@ def test_job_state_is_recoverable_with_latest_start_and_incremental_output(tmp_p
     assert incremental.output.output == "line four"
 
 
+def test_job_output_can_page_backward_from_latest_tail(tmp_path: Path) -> None:
+    backend = FakeJobBackend()
+    manager = _manager(tmp_path, backend, output_limit=14)
+    record, _ = manager.start_job("echo hello", str(tmp_path), label="history test")
+    backend.output[record.job_id].extend(["line one", "line two", "line three", "line four"])
+
+    latest = manager.get_job(record.job_id)
+    assert latest.output is not None
+    assert latest.output.output == "line four"
+    assert latest.output.oldest_cursor == "3"
+    assert latest.output.has_earlier_output is True
+
+    previous = manager.get_job_output_before(record.job_id, latest.output.oldest_cursor)
+    assert previous.output is not None
+    assert previous.output.output == "line three"
+    assert previous.output.oldest_cursor == "2"
+    assert previous.output.has_earlier_output is True
+
+
 def test_stale_cursor_recovers_to_latest_output(tmp_path: Path) -> None:
     backend = FakeJobBackend()
     manager = _manager(tmp_path, backend)
@@ -222,6 +267,43 @@ def test_job_listing_always_keeps_running_jobs_visible(tmp_path: Path) -> None:
 
     assert listed[0].job_id == running.job_id
     assert len(listed) == 20
+
+
+def test_terminal_job_listing_is_ordered_by_finish_time(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs")
+    older_start = "0123456789abcdef0123456789abcdef"
+    newer_start = "fedcba9876543210fedcba9876543210"
+    store.create(
+        JobRecord(
+            job_id=older_start,
+            unit_name=f"serena-job-{older_start}.service",
+            project_root=str(tmp_path),
+            cwd=str(tmp_path),
+            status=JobStatus.COMPLETED,
+            created_at="2026-08-28T17:00:00+00:00",
+            finished_at="2026-08-28T19:00:00+00:00",
+            return_code=0,
+            label="finished later",
+        )
+    )
+    store.create(
+        JobRecord(
+            job_id=newer_start,
+            unit_name=f"serena-job-{newer_start}.service",
+            project_root=str(tmp_path),
+            cwd=str(tmp_path),
+            status=JobStatus.COMPLETED,
+            created_at="2026-08-28T18:00:00+00:00",
+            finished_at="2026-08-28T18:30:00+00:00",
+            return_code=0,
+            label="finished earlier",
+        )
+    )
+    manager = JobManager(store=store, backend=FakeJobBackend())
+
+    listed = manager.list_jobs(limit=20)
+
+    assert [record.label for record in listed] == ["finished later", "finished earlier"]
 
 
 def test_timeout_is_reported_as_distinct_terminal_state(tmp_path: Path) -> None:

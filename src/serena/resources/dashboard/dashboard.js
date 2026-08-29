@@ -266,6 +266,9 @@ class Dashboard {
         // Execution tracking
         this.cancelledExecutions = [];
         this.executionToCancel = null;
+        this.backgroundJobOutputState = new Map();
+        this.backgroundJobCards = new Map();
+        this.backgroundJobsById = new Map();
 
         // Tool names and stats
         this.toolNames = [];
@@ -912,6 +915,7 @@ class Dashboard {
             success: function (response) {
                 if (response.status === 'success') {
                     self.displayBackgroundJobs(response);
+                    self.pollExpandedBackgroundJobs();
                 } else {
                     console.error('Error loading background jobs:', response.message);
                 }
@@ -933,35 +937,363 @@ class Dashboard {
 
     displayBackgroundJobs(response) {
         const jobs = response.jobs || [];
-        if (jobs.length === 0) {
-            this.$backgroundJobsDisplay.html('<div class="loaded">No background jobs running · 0 / ' + response.max_concurrent_jobs + ' slots</div>');
+        const runningJobs = jobs.filter(job => job.status === 'running');
+        const recentJobs = jobs.filter(job => job.status !== 'running');
+        this.backgroundJobsById = new Map(jobs.map(job => [job.job_id, job]));
+
+        if (!this.$backgroundJobsDisplay.find('.background-jobs-layout').length) {
+            this.$backgroundJobsDisplay.html(
+                '<div class="background-jobs-layout">' +
+                '<div class="job-summary"></div>' +
+                '<div class="background-job-group background-job-running-group">' +
+                '<div class="background-job-group-title">Running</div>' +
+                '<div class="execution-list background-job-running-list"></div>' +
+                '<div class="background-job-empty background-job-running-empty">No jobs running</div>' +
+                '</div>' +
+                '<div class="background-job-group background-job-recent-group">' +
+                '<div class="background-job-group-title">Recent</div>' +
+                '<div class="execution-list background-job-recent-list"></div>' +
+                '<div class="background-job-empty background-job-recent-empty">No recent jobs</div>' +
+                '</div>' +
+                '<div class="job-persistence-note"></div>' +
+                '</div>'
+            );
+        }
+
+        this.$backgroundJobsDisplay.find('.job-summary').text(
+            runningJobs.length + ' / ' + response.max_concurrent_jobs + ' slots in use · ' + recentJobs.length + ' recent'
+        );
+        const $runningList = this.$backgroundJobsDisplay.find('.background-job-running-list');
+        const $recentList = this.$backgroundJobsDisplay.find('.background-job-recent-list');
+        const visibleJobIds = new Set();
+
+        jobs.forEach(job => {
+            visibleJobIds.add(job.job_id);
+            let $card = this.backgroundJobCards.get(job.job_id);
+            if (!$card) {
+                $card = this.createBackgroundJobCard(job.job_id);
+                this.backgroundJobCards.set(job.job_id, $card);
+            }
+
+            const state = this.backgroundJobOutputState.get(job.job_id);
+            const previousStatus = state ? state.status : null;
+            this.updateBackgroundJobCard($card, job);
+            (job.status === 'running' ? $runningList : $recentList).append($card);
+
+            if (state) {
+                state.status = job.status;
+                if (state.expanded && previousStatus === 'running' && job.status !== 'running') {
+                    state.finalPollPending = true;
+                    this.loadBackgroundJobOutput(job.job_id, 'after');
+                }
+            }
+        });
+
+        for (const [jobId, $card] of this.backgroundJobCards.entries()) {
+            if (!visibleJobIds.has(jobId)) {
+                $card.remove();
+                this.backgroundJobCards.delete(jobId);
+                this.backgroundJobOutputState.delete(jobId);
+            }
+        }
+
+        this.$backgroundJobsDisplay.find('.background-job-running-empty').toggle(runningJobs.length === 0);
+        this.$backgroundJobsDisplay.find('.background-job-recent-empty').toggle(recentJobs.length === 0);
+        const persistenceMessage = response.persistence && !response.persistence.survives_logout
+            ? 'Jobs survive Serena restarts, but user logout may stop them while systemd linger is disabled.'
+            : '';
+        this.$backgroundJobsDisplay.find('.job-persistence-note').text(persistenceMessage).toggle(Boolean(persistenceMessage));
+    }
+
+    createBackgroundJobCard(jobId) {
+        const $card = $(
+            '<div class="background-job-card">' +
+            '<button class="background-job-header" type="button">' +
+            '<span class="background-job-toggle" aria-hidden="true">▸</span>' +
+            '<span class="background-job-status-dot" aria-hidden="true"></span>' +
+            '<span class="execution-content">' +
+            '<span class="background-job-title-row">' +
+            '<span class="execution-name"></span>' +
+            '<span class="background-job-status"></span>' +
+            '</span>' +
+            '<span class="execution-meta"></span>' +
+            '</span>' +
+            '</button>' +
+            '<div class="background-job-output-panel">' +
+            '<div class="background-job-output-toolbar">' +
+            '<span class="background-job-output-note"></span>' +
+            '<button class="background-job-new-output" type="button"></button>' +
+            '</div>' +
+            '<div class="background-job-output-scroll"><pre class="background-job-output"></pre></div>' +
+            '</div>' +
+            '</div>'
+        );
+        $card.attr('data-job-id', jobId);
+        $card.find('.background-job-header').on('click', () => this.toggleBackgroundJob(jobId));
+        $card.find('.background-job-output-scroll').on('scroll', event => this.handleBackgroundJobOutputScroll(jobId, event.currentTarget));
+        $card.find('.background-job-new-output').on('click', () => this.scrollBackgroundJobToLatest(jobId));
+        return $card;
+    }
+
+    updateBackgroundJobCard($card, job) {
+        $card.removeClass('running completed failed cancelled timed_out').addClass(job.status);
+        $card.find('.execution-name').text(job.label || job.job_id);
+        $card.find('.background-job-status').text(job.status.replaceAll('_', ' '));
+        $card.find('.execution-meta').text(this.backgroundJobMeta(job));
+        $card.find('.background-job-header').attr('title', job.cwd || '');
+
+        const state = this.backgroundJobOutputState.get(job.job_id);
+        const expanded = Boolean(state && state.expanded);
+        $card.find('.background-job-toggle').text(expanded ? '▾' : '▸');
+        $card.find('.background-job-output-panel').toggle(expanded);
+    }
+
+    backgroundJobMeta(job) {
+        const parts = [];
+        if (job.status === 'running') {
+            parts.push(this.formatDuration(job.elapsed_seconds) + ' elapsed');
+            parts.push(job.seconds_since_last_output === null
+                ? 'no output yet'
+                : this.formatDuration(job.seconds_since_last_output) + ' since output');
+            if (job.memory_bytes !== null) parts.push(this.formatBytes(job.memory_bytes));
+            if (job.cpu_seconds !== null) parts.push(this.formatDuration(job.cpu_seconds) + ' CPU');
+            if (job.process_count !== null) parts.push(job.process_count + ' proc');
+            if (job.timeout_seconds !== null) parts.push('limit ' + this.formatDuration(job.timeout_seconds));
+        } else {
+            parts.push(this.formatDuration(job.elapsed_seconds) + ' runtime');
+            if (job.return_code !== null) parts.push('exit ' + job.return_code);
+        }
+        if (job.project) parts.push(job.project);
+        return parts.join(' · ');
+    }
+
+    toggleBackgroundJob(jobId) {
+        const job = this.backgroundJobsById.get(jobId);
+        const $card = this.backgroundJobCards.get(jobId);
+        if (!job || !$card) return;
+
+        let state = this.backgroundJobOutputState.get(jobId);
+        if (!state) {
+            state = {
+                expanded: false,
+                loaded: false,
+                status: job.status,
+                oldestCursor: null,
+                newestCursor: null,
+                hasEarlierOutput: false,
+                loadingForward: false,
+                loadingBefore: false,
+                follow: true,
+                restoringScroll: false,
+                newLines: 0,
+                finalPollPending: false,
+            };
+            this.backgroundJobOutputState.set(jobId, state);
+        }
+
+        state.expanded = !state.expanded;
+        $card.find('.background-job-toggle').text(state.expanded ? '▾' : '▸');
+        $card.find('.background-job-output-panel').toggle(state.expanded);
+        if (!state.expanded) return;
+
+        if (!state.loaded) {
+            $card.find('.background-job-output-note').text('Loading latest output…');
+            this.loadBackgroundJobOutput(jobId, 'latest');
+        } else if (job.status === 'running') {
+            this.loadBackgroundJobOutput(jobId, 'after');
+        }
+    }
+
+    loadBackgroundJobOutput(jobId, mode) {
+        const state = this.backgroundJobOutputState.get(jobId);
+        if (!state || !state.expanded) return;
+
+        let requestMode = mode;
+        let cursor = null;
+        if (requestMode === 'before') {
+            if (state.loadingBefore || state.loadingForward || !state.hasEarlierOutput || !state.oldestCursor) return;
+            state.loadingBefore = true;
+            cursor = state.oldestCursor;
+        } else {
+            if (state.loadingForward || state.loadingBefore) return;
+            if (requestMode === 'after' && !state.newestCursor) requestMode = 'latest';
+            state.loadingForward = true;
+            if (requestMode === 'after') cursor = state.newestCursor;
+        }
+
+        const data = { mode: requestMode };
+        if (cursor) data.cursor = cursor;
+        let continueForward = false;
+        let requestSucceeded = false;
+        const self = this;
+        $.ajax({
+            url: DASHBOARD_API_PREFIX + '/background_jobs/' + encodeURIComponent(jobId) + '/output',
+            type: 'GET',
+            data: data,
+            success: function (response) {
+                if (response.status !== 'success') {
+                    self.showBackgroundJobOutputNote(jobId, response.message || 'Unable to load output');
+                    return;
+                }
+                requestSucceeded = true;
+                self.applyBackgroundJobOutput(jobId, requestMode, response);
+                continueForward = requestMode === 'after' && response.has_more_output;
+            },
+            error: function () {
+                self.showBackgroundJobOutputNote(jobId, 'Unable to load job output');
+            },
+            complete: function () {
+                const currentState = self.backgroundJobOutputState.get(jobId);
+                if (!currentState) return;
+                if (requestMode === 'before') {
+                    currentState.loadingBefore = false;
+                } else {
+                    currentState.loadingForward = false;
+                }
+
+                if (continueForward && currentState.expanded) {
+                    self.loadBackgroundJobOutput(jobId, 'after');
+                } else if (requestSucceeded && currentState.finalPollPending && currentState.expanded && !currentState.loadingForward) {
+                    currentState.finalPollPending = false;
+                    self.loadBackgroundJobOutput(jobId, 'after');
+                }
+            }
+        });
+    }
+
+    applyBackgroundJobOutput(jobId, mode, response) {
+        const state = this.backgroundJobOutputState.get(jobId);
+        const $card = this.backgroundJobCards.get(jobId);
+        if (!state || !$card) return;
+        const $scroll = $card.find('.background-job-output-scroll');
+        const $output = $card.find('.background-job-output');
+
+        if (mode === 'before' && response.cursor_reset) {
+            state.hasEarlierOutput = false;
+            this.showBackgroundJobOutputNote(jobId, 'Earlier journal output is no longer available.');
             return;
         }
 
-        let html = '<div class="job-summary">' + jobs.length + ' / ' + response.max_concurrent_jobs + ' slots in use</div>';
-        html += '<div class="execution-list">';
-        let self = this;
-        jobs.forEach(function (job) {
-            const elapsed = self.formatDuration(job.elapsed_seconds);
-            const idle = job.seconds_since_last_output === null ? 'no output yet' : self.formatDuration(job.seconds_since_last_output) + ' since output';
-            const memory = job.memory_bytes === null ? '' : ' · ' + self.formatBytes(job.memory_bytes);
-            const cpu = job.cpu_seconds === null ? '' : ' · ' + self.formatDuration(job.cpu_seconds) + ' CPU';
-            const processes = job.process_count === null ? '' : ' · ' + job.process_count + ' proc';
-            const timeout = job.timeout_seconds === null ? '' : ' · limit ' + self.formatDuration(job.timeout_seconds);
-            const project = job.project ? ' · ' + self.escapeHtml(job.project) : '';
-            html += '<div class="execution-item running background-job-item">';
-            html += '<div class="execution-spinner"></div>';
-            html += '<div class="execution-content">';
-            html += '<div class="execution-name">' + self.escapeHtml(job.label || job.job_id) + '</div>';
-            html += '<div class="execution-meta">' + elapsed + ' elapsed · ' + idle + memory + cpu + processes + timeout + project + '</div>';
-            html += '</div>';
-            html += '</div>';
-        });
-        html += '</div>';
-        if (response.persistence && !response.persistence.survives_logout) {
-            html += '<div class="job-persistence-note">Jobs survive Serena restarts, but user logout may stop them while systemd linger is disabled.</div>';
+        if (mode === 'latest' || (mode === 'after' && response.cursor_reset)) {
+            $output.text(response.output || '');
+            state.loaded = true;
+            state.oldestCursor = response.oldest_cursor;
+            state.newestCursor = response.newest_cursor;
+            state.hasEarlierOutput = Boolean(response.has_earlier_output);
+            state.follow = true;
+            state.newLines = 0;
+            this.updateBackgroundJobNewOutputIndicator(jobId);
+            this.showBackgroundJobOutputNote(
+                jobId,
+                response.cursor_reset
+                    ? 'Output cursor expired; showing the latest retained output.'
+                    : state.hasEarlierOutput
+                        ? 'Scroll up to load older output'
+                        : response.output
+                            ? 'Start of retained output'
+                            : 'No output yet'
+            );
+            requestAnimationFrame(() => {
+                const element = $scroll.get(0);
+                if (element) element.scrollTop = element.scrollHeight;
+            });
+            return;
         }
-        this.$backgroundJobsDisplay.html(html);
+
+        if (mode === 'before') {
+            const element = $scroll.get(0);
+            const oldHeight = element ? element.scrollHeight : 0;
+            const oldTop = element ? element.scrollTop : 0;
+            const hasExistingOutput = $output.text().length > 0;
+            if (response.output) {
+                $output.prepend(document.createTextNode(response.output + (hasExistingOutput ? '\n' : '')));
+            }
+            state.oldestCursor = response.oldest_cursor || state.oldestCursor;
+            state.hasEarlierOutput = Boolean(response.has_earlier_output);
+            this.showBackgroundJobOutputNote(
+                jobId,
+                state.hasEarlierOutput ? 'Scroll up to load older output' : 'Start of retained output'
+            );
+            requestAnimationFrame(() => {
+                const currentElement = $scroll.get(0);
+                if (!currentElement) return;
+                state.restoringScroll = true;
+                currentElement.scrollTop = oldTop + (currentElement.scrollHeight - oldHeight);
+                state.restoringScroll = false;
+            });
+            return;
+        }
+
+        if (response.output) {
+            const hasExistingOutput = $output.text().length > 0;
+            $output.append(document.createTextNode((hasExistingOutput ? '\n' : '') + response.output));
+            state.newestCursor = response.newest_cursor || state.newestCursor;
+            if (state.follow) {
+                requestAnimationFrame(() => {
+                    const element = $scroll.get(0);
+                    if (element) element.scrollTop = element.scrollHeight;
+                });
+            } else {
+                state.newLines += response.output.split('\n').length;
+                this.updateBackgroundJobNewOutputIndicator(jobId);
+            }
+        } else if (response.newest_cursor) {
+            state.newestCursor = response.newest_cursor;
+        }
+    }
+
+    pollExpandedBackgroundJobs() {
+        for (const [jobId, state] of this.backgroundJobOutputState.entries()) {
+            if (!state.expanded) continue;
+            const job = this.backgroundJobsById.get(jobId);
+            if (job && job.status === 'running') {
+                this.loadBackgroundJobOutput(jobId, state.loaded ? 'after' : 'latest');
+            }
+        }
+    }
+
+    handleBackgroundJobOutputScroll(jobId, element) {
+        const state = this.backgroundJobOutputState.get(jobId);
+        if (!state || state.restoringScroll) return;
+        const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
+        state.follow = distanceFromBottom <= 32;
+        if (state.follow) {
+            state.newLines = 0;
+            this.updateBackgroundJobNewOutputIndicator(jobId);
+        }
+        if (element.scrollTop <= 48 && state.hasEarlierOutput && !state.loadingBefore) {
+            this.loadBackgroundJobOutput(jobId, 'before');
+        }
+    }
+
+    scrollBackgroundJobToLatest(jobId) {
+        const state = this.backgroundJobOutputState.get(jobId);
+        const $card = this.backgroundJobCards.get(jobId);
+        if (!state || !$card) return;
+        const element = $card.find('.background-job-output-scroll').get(0);
+        if (!element) return;
+        state.follow = true;
+        state.newLines = 0;
+        element.scrollTop = element.scrollHeight;
+        this.updateBackgroundJobNewOutputIndicator(jobId);
+    }
+
+    updateBackgroundJobNewOutputIndicator(jobId) {
+        const state = this.backgroundJobOutputState.get(jobId);
+        const $card = this.backgroundJobCards.get(jobId);
+        if (!state || !$card) return;
+        const $button = $card.find('.background-job-new-output');
+        if (!state.follow && state.newLines > 0) {
+            $button.text('↓ ' + state.newLines + ' new line' + (state.newLines === 1 ? '' : 's')).show();
+        } else {
+            $button.hide();
+        }
+    }
+
+    showBackgroundJobOutputNote(jobId, message) {
+        const $card = this.backgroundJobCards.get(jobId);
+        if (!$card) return;
+        $card.find('.background-job-output-note').text(message || '');
     }
 
     formatDuration(seconds) {

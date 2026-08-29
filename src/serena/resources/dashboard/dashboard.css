@@ -786,6 +786,156 @@ code, pre, kbd, samp,
     line-height: 1.4;
 }
 
+.background-job-group + .background-job-group {
+    margin-top: var(--space-3);
+}
+
+.background-job-group-title {
+    margin-bottom: 6px;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.background-job-empty {
+    padding: 8px 2px;
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.background-job-card {
+    overflow: hidden;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+}
+
+.background-job-card.running {
+    border-color: var(--btn-primary);
+}
+
+.background-job-header {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 9px 11px;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.background-job-header:hover {
+    background: var(--btn-secondary-bg);
+}
+
+.background-job-toggle {
+    width: 12px;
+    flex: 0 0 12px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.background-job-status-dot {
+    width: 9px;
+    height: 9px;
+    flex: 0 0 9px;
+    border-radius: 50%;
+    background: var(--text-muted);
+}
+
+.background-job-card.running .background-job-status-dot {
+    background: var(--btn-primary);
+}
+
+.background-job-card.completed .background-job-status-dot {
+    background: #22c55e;
+}
+
+.background-job-card.failed .background-job-status-dot,
+.background-job-card.timed_out .background-job-status-dot {
+    background: var(--log-error);
+}
+
+.background-job-title-row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    min-width: 0;
+}
+
+.background-job-card .execution-meta {
+    display: block;
+    margin-top: 2px;
+    white-space: normal;
+    line-height: 1.35;
+}
+
+.background-job-status {
+    flex-shrink: 0;
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.background-job-output-panel {
+    display: none;
+    border-top: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+}
+
+.background-job-output-toolbar {
+    min-height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: 5px 9px;
+    border-bottom: 1px solid var(--border-color);
+    color: var(--text-muted);
+    font-size: 10px;
+}
+
+.background-job-new-output {
+    display: none;
+    padding: 3px 7px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--border-radius-sm);
+    background: var(--btn-secondary-bg);
+    color: var(--text-secondary);
+    font: inherit;
+    cursor: pointer;
+}
+
+.background-job-new-output:hover {
+    background: var(--btn-secondary-hover);
+}
+
+.background-job-output-scroll {
+    height: 260px;
+    overflow: auto;
+    overscroll-behavior: contain;
+    background: var(--bg-primary);
+}
+
+.background-job-output {
+    min-height: 100%;
+    box-sizing: border-box;
+    margin: 0;
+    padding: 10px 12px;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
 .execution-cancel-btn {
     background: none;
     border: none;

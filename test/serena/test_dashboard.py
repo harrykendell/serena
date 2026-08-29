@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from serena.dashboard import SerenaDashboardAPI
-from serena.jobs import JobPersistenceInfo, JobRecord, JobRuntimeInfo, JobSnapshot, JobStatus
+from serena.jobs import JobOutputChunk, JobPersistenceInfo, JobRecord, JobRuntimeInfo, JobSnapshot, JobStatus
 from solidlsp.ls_config import LanguageServerId
 
 
@@ -64,7 +64,7 @@ def test_dashboard_redirect_preserves_reverse_proxy_host() -> None:
     assert response.headers["Location"] == "/dashboard/"
 
 
-def test_background_jobs_route_exposes_running_job_telemetry() -> None:
+def test_background_jobs_route_exposes_running_and_recent_jobs() -> None:
     dashboard = _make_dashboard(project_languages=None)
     job_manager = MagicMock()
     job_manager.max_concurrent_jobs = 6
@@ -94,7 +94,29 @@ def test_background_jobs_route_exposes_running_job_telemetry() -> None:
                 cpu_seconds=87.5,
                 process_count=5,
             ),
-        )
+        ),
+        JobSnapshot(
+            record=JobRecord(
+                job_id="fedcba9876543210fedcba9876543210",
+                unit_name="serena-job-fedcba9876543210fedcba9876543210.service",
+                project_root="/tmp/project",
+                cwd="/tmp/project",
+                status=JobStatus.COMPLETED,
+                created_at="2026-08-28T17:00:00+00:00",
+                finished_at="2026-08-28T17:02:00+00:00",
+                return_code=0,
+                project_name="demo",
+                label="Finished optimisation",
+                status_message="Job completed successfully.",
+            ),
+            runtime=JobRuntimeInfo(
+                elapsed_seconds=120.0,
+                seconds_since_last_output=60.0,
+                memory_bytes=None,
+                cpu_seconds=None,
+                process_count=None,
+            ),
+        ),
     ]
     dashboard._job_manager = job_manager
 
@@ -105,8 +127,61 @@ def test_background_jobs_route_exposes_running_job_telemetry() -> None:
     assert namespaced_response == response
     assert response["status"] == "success"
     assert response["running_jobs"] == 1
+    assert response["recent_jobs"] == 1
     assert response["max_concurrent_jobs"] == 6
-    assert response["jobs"][0]["label"] == "Long optimisation"
+    assert [job["label"] for job in response["jobs"]] == ["Long optimisation", "Finished optimisation"]
     assert response["jobs"][0]["memory_bytes"] == 256 * 1024 * 1024
     assert response["jobs"][0]["process_count"] == 5
+    assert response["jobs"][1]["return_code"] == 0
     assert response["persistence"]["survives_logout"] is False
+
+
+def test_background_job_output_route_supports_latest_forward_and_backward_pages() -> None:
+    dashboard = _make_dashboard(project_languages=None)
+    job_manager = MagicMock()
+    job_id = "0123456789abcdef0123456789abcdef"
+    snapshot = JobSnapshot(
+        record=JobRecord(
+            job_id=job_id,
+            unit_name=f"serena-job-{job_id}.service",
+            project_root="/tmp/project",
+            cwd="/tmp/project",
+            status=JobStatus.RUNNING,
+            created_at="2026-08-28T18:00:00+00:00",
+            label="Output test",
+        ),
+        runtime=JobRuntimeInfo(
+            elapsed_seconds=12.0,
+            seconds_since_last_output=1.0,
+            memory_bytes=1024,
+            cpu_seconds=2.0,
+            process_count=1,
+        ),
+        output=JobOutputChunk(
+            output="line two\nline three",
+            next_cursor="newest",
+            has_more_output=False,
+            oldest_cursor="oldest",
+            has_earlier_output=True,
+            earlier_output_omitted=True,
+        ),
+    )
+    job_manager.get_job.return_value = snapshot
+    job_manager.get_job_output_before.return_value = snapshot
+    dashboard._job_manager = job_manager
+    client = dashboard._app.test_client()
+
+    latest = client.get(f"/background_jobs/{job_id}/output").get_json()
+    after = client.get(f"/background_jobs/{job_id}/output?mode=after&cursor=new").get_json()
+    before = client.get(f"/dashboard/api/background_jobs/{job_id}/output?mode=before&cursor=old").get_json()
+
+    assert latest["status"] == "success"
+    assert latest["output"] == "line two\nline three"
+    assert latest["oldest_cursor"] == "oldest"
+    assert latest["newest_cursor"] == "newest"
+    assert latest["has_earlier_output"] is True
+    assert after["status"] == "success"
+    assert before["status"] == "success"
+    job_manager.get_job.assert_any_call(job_id)
+    job_manager.get_job.assert_any_call(job_id, cursor="new")
+    job_manager.get_job_output_before.assert_called_once_with(job_id, "old")

@@ -112,11 +112,13 @@ class JobRecord:
 
 @dataclass(frozen=True)
 class JobOutputChunk:
-    """Bounded journal output and the cursor from which later output should resume."""
+    """Bounded journal output together with its navigation cursors."""
 
     output: str
     next_cursor: str | None
     has_more_output: bool
+    oldest_cursor: str | None = None
+    has_earlier_output: bool = False
     output_truncated: bool = False
     earlier_output_omitted: bool = False
     cursor_reset: bool = False
@@ -180,6 +182,10 @@ class JobBackend(ABC):
         output_mode: Literal["latest", "start"] = "latest",
     ) -> JobOutputChunk:
         """Read bounded job output using the requested initial-output mode."""
+
+    @abstractmethod
+    def read_output_before(self, record: JobRecord, cursor: str, max_chars: int) -> JobOutputChunk:
+        """Read bounded job output immediately preceding ``cursor``."""
 
     @abstractmethod
     def runtime_info(self, record: JobRecord) -> JobRuntimeInfo:
@@ -292,6 +298,22 @@ class SystemdJobBackend(JobBackend):
             return self._read_from_start(record, max_chars)
         return self._read_recent_output(record, max_chars)
 
+    def read_output_before(self, record: JobRecord, cursor: str, max_chars: int) -> JobOutputChunk:
+        """Read bounded journal output immediately preceding ``cursor``."""
+        if len(cursor) > _MAX_CURSOR_LENGTH or "\x00" in cursor or "\n" in cursor:
+            raise ValueError("Invalid journal cursor")
+        try:
+            return self._read_previous_output(record, cursor, max_chars)
+        except RuntimeError as e:
+            if not self._is_stale_cursor_error(str(e)):
+                raise
+            return JobOutputChunk(
+                output="",
+                next_cursor=None,
+                has_more_output=False,
+                cursor_reset=True,
+            )
+
     def runtime_info(self, record: JobRecord) -> JobRuntimeInfo:
         now = datetime.now(UTC)
         created_at = datetime.fromisoformat(record.created_at)
@@ -301,6 +323,7 @@ class SystemdJobBackend(JobBackend):
         memory_bytes: int | None = None
         cpu_seconds: float | None = None
         process_count: int | None = None
+        seconds_since_last_output: float | None = None
         if record.status is JobStatus.RUNNING:
             main_pid = self._main_pid(record)
             processes = self._process_tree(main_pid) if main_pid is not None else self._owned_job_processes(record.job_id)
@@ -325,8 +348,9 @@ class SystemdJobBackend(JobBackend):
                 memory_bytes = memory_total if observed_memory else None
                 cpu_seconds = cpu_total if observed_cpu else None
 
-        last_output_at = self._last_output_at(record)
-        seconds_since_last_output = None if last_output_at is None else max(0.0, (now - last_output_at).total_seconds())
+            last_output_at = self._last_output_at(record)
+            seconds_since_last_output = None if last_output_at is None else max(0.0, (now - last_output_at).total_seconds())
+
         return JobRuntimeInfo(
             elapsed_seconds=elapsed_seconds,
             seconds_since_last_output=seconds_since_last_output,
@@ -362,6 +386,7 @@ class SystemdJobBackend(JobBackend):
         messages: list[str] = []
         output_chars = 0
         newest_cursor: str | None = None
+        oldest_cursor: str | None = None
         earlier_output_omitted = False
         output_truncated = False
 
@@ -390,6 +415,7 @@ class SystemdJobBackend(JobBackend):
                     output_truncated = True
                     earlier_output_omitted = True
 
+                oldest_cursor = entry_cursor
                 messages.append(message)
                 output_chars += separator_chars + len(message)
                 if output_truncated:
@@ -403,6 +429,8 @@ class SystemdJobBackend(JobBackend):
             output="\n".join(messages),
             next_cursor=newest_cursor,
             has_more_output=False,
+            oldest_cursor=oldest_cursor,
+            has_earlier_output=earlier_output_omitted,
             output_truncated=output_truncated,
             earlier_output_omitted=earlier_output_omitted,
         )
@@ -419,6 +447,69 @@ class SystemdJobBackend(JobBackend):
             recovered = self._read_recent_output(record, max_chars)
             return replace(recovered, cursor_reset=True)
 
+    def _read_previous_output(self, record: JobRecord, cursor: str, max_chars: int) -> JobOutputChunk:
+        # read backward from the oldest displayed entry while excluding that boundary entry itself
+        process = self._start_journal_reader(record, cursor=cursor, reverse=True)
+        assert process.stdout is not None
+        assert process.stderr is not None
+
+        messages: list[str] = []
+        output_chars = 0
+        oldest_cursor: str | None = None
+        newest_cursor: str | None = None
+        has_earlier_output = False
+        output_truncated = False
+        skipped_boundary = False
+
+        try:
+            for raw_line in process.stdout:
+                entry = json.loads(raw_line)
+                entry_cursor = entry.get("__CURSOR")
+                if not isinstance(entry_cursor, str):
+                    continue
+                if not skipped_boundary and entry_cursor == cursor:
+                    skipped_boundary = True
+                    continue
+                skipped_boundary = True
+
+                message = self._normalise_journal_message(entry.get("MESSAGE", ""))
+                separator_chars = 1 if messages else 0
+                prospective_chars = output_chars + separator_chars + len(message)
+                if messages and prospective_chars > max_chars:
+                    has_earlier_output = True
+                    break
+
+                if not messages and len(message) > max_chars:
+                    marker = "[earlier part of output line omitted]\n"
+                    if len(marker) < max_chars:
+                        message = marker + message[-(max_chars - len(marker)) :]
+                    else:
+                        message = message[-max_chars:]
+                    output_truncated = True
+                    has_earlier_output = True
+
+                if newest_cursor is None:
+                    newest_cursor = entry_cursor
+                oldest_cursor = entry_cursor
+                messages.append(message)
+                output_chars += separator_chars + len(message)
+                if output_truncated:
+                    break
+        finally:
+            self._finish_journal_reader(process, interrupted=has_earlier_output)
+
+        self._raise_for_journal_error(process, record, ignore_error=has_earlier_output)
+        messages.reverse()
+        return JobOutputChunk(
+            output="\n".join(messages),
+            next_cursor=newest_cursor,
+            has_more_output=False,
+            oldest_cursor=oldest_cursor,
+            has_earlier_output=has_earlier_output,
+            output_truncated=output_truncated,
+            earlier_output_omitted=has_earlier_output,
+        )
+
     def _read_forward_output(self, record: JobRecord, max_chars: int, after_cursor: str | None) -> JobOutputChunk:
         process = self._start_journal_reader(record, after_cursor=after_cursor)
         assert process.stdout is not None
@@ -427,6 +518,7 @@ class SystemdJobBackend(JobBackend):
         messages: list[str] = []
         output_chars = 0
         next_cursor = after_cursor
+        oldest_cursor: str | None = None
         has_more_output = False
         output_truncated = False
 
@@ -450,6 +542,8 @@ class SystemdJobBackend(JobBackend):
                     message = message[:keep] + marker if keep else message[:max_chars]
                     output_truncated = True
 
+                if oldest_cursor is None:
+                    oldest_cursor = entry_cursor
                 messages.append(message)
                 output_chars += separator_chars + len(message)
                 next_cursor = entry_cursor
@@ -461,6 +555,7 @@ class SystemdJobBackend(JobBackend):
             output="\n".join(messages),
             next_cursor=next_cursor,
             has_more_output=has_more_output,
+            oldest_cursor=oldest_cursor,
             output_truncated=output_truncated,
         )
 
@@ -468,8 +563,12 @@ class SystemdJobBackend(JobBackend):
         self,
         record: JobRecord,
         after_cursor: str | None = None,
+        cursor: str | None = None,
         reverse: bool = False,
     ) -> subprocess.Popen[str]:
+        if after_cursor is not None and cursor is not None:
+            raise ValueError("after_cursor and cursor are mutually exclusive")
+
         args = [
             "journalctl",
             "--user",
@@ -480,6 +579,8 @@ class SystemdJobBackend(JobBackend):
         ]
         if after_cursor is not None:
             args.append(f"--after-cursor={after_cursor}")
+        if cursor is not None:
+            args.append(f"--cursor={cursor}")
         if reverse:
             args.append("--reverse")
         return subprocess.Popen(
@@ -871,6 +972,12 @@ class JobManager:
         output = self._backend.read_output(record, cursor, self._output_char_limit, output_mode=output_mode)
         return JobSnapshot(record=record, runtime=self._backend.runtime_info(record), output=output)
 
+    def get_job_output_before(self, job_id: str, cursor: str) -> JobSnapshot:
+        """Return bounded output immediately preceding ``cursor`` for one job."""
+        record = self._reconcile_record(self._store.read(job_id))
+        output = self._backend.read_output_before(record, cursor, self._output_char_limit)
+        return JobSnapshot(record=record, runtime=self._backend.runtime_info(record), output=output)
+
     def list_jobs(self, limit: int = 20) -> list[JobRecord]:
         """List all running jobs followed by recent terminal jobs."""
         if limit <= 0:
@@ -886,7 +993,7 @@ class JobManager:
         )
         terminal = sorted(
             (record for record in records if record.status.is_terminal),
-            key=lambda record: record.created_at,
+            key=lambda record: record.finished_at or record.created_at,
             reverse=True,
         )
         terminal_limit = max(0, limit - len(running))
