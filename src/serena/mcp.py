@@ -20,6 +20,7 @@ from mcp.types import ToolAnnotations
 from pydantic_settings import SettingsConfigDict
 from sensai.util import logging
 
+from serena.activity import ACTIVITY_RESOURCE_URI, ActivityTracker, get_mcp_session_id, register_activity_resource
 from serena.agent import (
     SerenaAgent,
 )
@@ -51,7 +52,13 @@ class SerenaMCPRequestContext:
 
 
 class SerenaFastMCPTool(FastMCPTool):
-    def __init__(self, tool: Tool, openai_tool_compatible: bool, structured_output: bool | None):
+    def __init__(
+        self,
+        tool: Tool,
+        openai_tool_compatible: bool,
+        structured_output: bool | None,
+        activity_tracker: ActivityTracker | None = None,
+    ):
         """
         :param tool: the Serena tool
         :param openai_tool_compatible: whether to process the tool schema to be compatible with OpenAI tools
@@ -128,6 +135,7 @@ class SerenaFastMCPTool(FastMCPTool):
         )
 
         self._param_aliases = tool.get_param_aliases()
+        self._activity_tracker = activity_tracker
 
     async def run(
         self,
@@ -140,7 +148,21 @@ class SerenaFastMCPTool(FastMCPTool):
             if param_alias in arguments and param_name not in arguments:
                 arguments[param_name] = arguments.pop(param_alias)
 
-        return await super().run(arguments, context, convert_result)
+        # publish invocation lifecycle to an active ChatGPT activity run
+        call_id = None
+        if self._activity_tracker is not None:
+            call_id = self._activity_tracker.start_tool(get_mcp_session_id(context), self.name, arguments)
+
+        try:
+            result = await super().run(arguments, context, convert_result)
+        except BaseException:
+            if self._activity_tracker is not None:
+                self._activity_tracker.finish_tool(call_id, succeeded=False)
+            raise
+
+        if self._activity_tracker is not None:
+            self._activity_tracker.finish_tool(call_id, succeeded=True)
+        return result
 
 
 class SerenaMCPFactory:
@@ -168,6 +190,7 @@ class SerenaMCPFactory:
         self.project = project
         self.agent: SerenaAgent | None = None
         self.memory_log_handler = memory_log_handler
+        self._activity_tracker = ActivityTracker()
 
     @staticmethod
     def _sanitize_for_openai_tools(schema: dict) -> dict:
@@ -277,7 +300,12 @@ class SerenaMCPFactory:
         return walk(s)
 
     @staticmethod
-    def make_mcp_tool(tool: Tool, openai_tool_compatible: bool = True, structured_output: bool | None = None) -> SerenaFastMCPTool:
+    def make_mcp_tool(
+        tool: Tool,
+        openai_tool_compatible: bool = True,
+        structured_output: bool | None = None,
+        activity_tracker: ActivityTracker | None = None,
+    ) -> SerenaFastMCPTool:
         """
         Creates an MCP tool from a Serena Tool instance.
 
@@ -285,8 +313,14 @@ class SerenaMCPFactory:
         :param openai_tool_compatible: whether to process the tool schema to be compatible with OpenAI tools
             (doesn't accept integer, needs number instead, etc.). This allows using Serena MCP within codex.
         :param structured_output: whether to use structured output for the tool (None = auto)
+        :param activity_tracker: optional activity lifecycle recorder for ChatGPT UI integration
         """
-        return SerenaFastMCPTool(tool, openai_tool_compatible=openai_tool_compatible, structured_output=structured_output)
+        return SerenaFastMCPTool(
+            tool,
+            openai_tool_compatible=openai_tool_compatible,
+            structured_output=structured_output,
+            activity_tracker=activity_tracker,
+        )
 
     def _iter_tools(self) -> Iterator[Tool]:
         assert self.agent is not None
@@ -304,9 +338,59 @@ class SerenaMCPFactory:
         if mcp is not None:
             mcp._tool_manager._tools = {}
             for tool in self._iter_tools():
-                mcp_tool = self.make_mcp_tool(tool, openai_tool_compatible=openai_tool_compatible, structured_output=structured_output)
+                mcp_tool = self.make_mcp_tool(
+                    tool,
+                    openai_tool_compatible=openai_tool_compatible,
+                    structured_output=structured_output,
+                    activity_tracker=self._activity_tracker,
+                )
                 mcp._tool_manager._tools[tool.get_name()] = mcp_tool
+            if self.context.name == "chatgpt":
+                self._register_activity_tools(mcp)
             log.info(f"Starting MCP server with {len(mcp._tool_manager._tools)} tools: {list(mcp._tool_manager._tools.keys())}")
+
+    def _register_activity_tools(self, mcp: FastMCP) -> None:
+        """Registers ChatGPT-only activity tools outside Serena's serial executor."""
+        assert self.agent is not None
+        agent = self.agent
+
+        @mcp.tool(
+            name="show_activity",
+            title="Show Serena Activity",
+            description=(
+                "Shows a compact live Serena command panel. Call this once before the first substantive Serena tool "
+                "in a multi-step turn; do not call it for a single quick Serena lookup."
+            ),
+            annotations=ToolAnnotations(title="Show Serena Activity", readOnlyHint=True, destructiveHint=False),
+            meta={
+                "ui": {"resourceUri": ACTIVITY_RESOURCE_URI, "visibility": ["model", "app"]},
+                "openai/outputTemplate": ACTIVITY_RESOURCE_URI,
+                "openai/widgetAccessible": True,
+                "openai/toolInvocation/invoking": "Opening Serena activity...",
+                "openai/toolInvocation/invoked": "Serena activity",
+            },
+            structured_output=True,
+        )
+        def show_activity(mcp_ctx: Context) -> dict[str, Any]:
+            session_id = get_mcp_session_id(mcp_ctx)
+            project = agent.get_active_project()
+            project_name = project.project_name if project is not None else ""
+            return self._activity_tracker.start_run(session_id, project_name)
+
+        @mcp.tool(
+            name="get_activity",
+            title="Get Serena Activity",
+            description="Returns the current state of one Serena activity panel. Intended for the activity app only.",
+            annotations=ToolAnnotations(title="Get Serena Activity", readOnlyHint=True, destructiveHint=False),
+            meta={
+                "ui": {"visibility": ["app"]},
+                "openai/widgetAccessible": True,
+                "openai/visibility": "private",
+            },
+            structured_output=True,
+        )
+        def get_activity(run_id: str, mcp_ctx: Context) -> dict[str, Any]:
+            return self._activity_tracker.get_run(get_mcp_session_id(mcp_ctx), run_id)
 
     def _create_serena_agent(
         self,
@@ -405,6 +489,8 @@ class SerenaMCPFactory:
             instructions=instructions,
         )
         register_file_export_resource(mcp)
+        if self.context.name == "chatgpt":
+            register_activity_resource(mcp)
         return mcp
 
     @asynccontextmanager
