@@ -124,6 +124,21 @@ def test_activity_tracker_records_tool_lifecycle() -> None:
     assert snapshot["calls"][0]["finished_at"] is not None
 
 
+def test_activity_tracker_retains_long_command_history() -> None:
+    tracker = ActivityTracker(_FakeJobSource())
+    run = tracker.start_run("conversation-a", "serena")
+
+    for index in range(150):
+        call_id = tracker.start_tool("conversation-a", "echo_command", {"command": f"command {index}"})
+        tracker.finish_tool(call_id, succeeded=True)
+
+    snapshot = tracker.get_run("conversation-a", run["run_id"])
+
+    assert len(snapshot["calls"]) == 150
+    assert snapshot["calls"][0]["detail"] == "command 0"
+    assert snapshot["calls"][-1]["detail"] == "command 149"
+
+
 def test_activity_tracker_backfills_job_started_before_panel() -> None:
     source = _FakeJobSource([_job_record("abc123", label="full test suite")])
     tracker = ActivityTracker(source)

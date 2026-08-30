@@ -15,7 +15,7 @@ from serena.jobs import JobManager, JobRecord, JobStatus
 ACTIVITY_RESOURCE_URI = "ui://serena/activity-v2.html"
 _ACTIVITY_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
 _MAX_RUNS = 32
-_MAX_CALLS_PER_RUN = 100
+_MAX_CALLS_PER_RUN = 512
 _DETAIL_KEYS = (
     "command",
     "project",
@@ -124,7 +124,7 @@ class _ActiveToolInvocation:
 class ActivityTracker:
     """Tracks Serena activity per ChatGPT conversation and reconciles durable jobs."""
 
-    _MAX_JOBS_PER_SESSION = 100
+    _MAX_JOBS_PER_SESSION = 256
     _JOB_LIST_LIMIT = 100
 
     def __init__(self, job_source: ActivityJobSource | None = None) -> None:
@@ -449,7 +449,7 @@ def _activity_widget_html() -> str:
   .summary { min-width: 0; max-width: 48vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; opacity: .68; font-variant-numeric: tabular-nums; }
   .chevron { width: 14px; text-align: center; transition: transform .14s ease; opacity: .58; }
   .activity.collapsed .chevron { transform: rotate(-90deg); }
-  .body { border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent); padding: 4px 9px 7px; }
+  .body { max-height: min(44vh, 360px); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent); padding: 4px 9px 7px; }
   .activity.collapsed .body { display: none; }
   .calls { list-style: none; padding: 0; margin: 0; }
   .call { display: grid; grid-template-columns: 15px minmax(110px, auto) minmax(0, 1fr) auto; grid-template-areas: "status tool detail elapsed"; gap: 6px; align-items: baseline; min-height: 24px; padding: 3px 0; }
@@ -466,7 +466,7 @@ def _activity_widget_html() -> str:
     body { font-size: 12px; }
     .header { min-height: 34px; grid-template-columns: minmax(0, 1fr) minmax(0, auto) 12px; gap: 5px; padding: 6px 7px; }
     .summary { max-width: 45vw; font-size: 11px; }
-    .body { padding: 2px 7px 5px; }
+    .body { max-height: calc(12em + 28px); padding: 2px 7px 5px; }
     .call { grid-template-columns: 15px minmax(0, 1fr) auto; grid-template-areas: "status tool elapsed" ". detail detail"; column-gap: 5px; row-gap: 0; min-height: 0; padding: 2px 0; align-items: start; }
     .tool { line-height: 1.2; }
     .detail { margin-top: 1px; font-size: 11px; line-height: 1.2; min-height: 1.2em; }
@@ -487,6 +487,7 @@ def _activity_widget_html() -> str:
   const calls = document.getElementById("activity-calls");
   const empty = document.getElementById("activity-empty");
   const logo = document.getElementById("activity-logo");
+  const rowsByKey = new Map();
   let state = window.openai?.toolOutput ?? null;
   let lastChange = Date.now();
   let lastSignature = "";
@@ -547,13 +548,129 @@ def _activity_widget_html() -> str:
     ];
   }
 
-  function visibleEntries(next) {
+  function orderedEntries(next) {
     const entries = allEntries(next);
     const running = entries.filter(entry => entry.status === "running").sort((a, b) => b.started_at - a.started_at);
     const terminal = entries.filter(entry => entry.status !== "running").sort((a, b) => b.started_at - a.started_at);
-    const runningVisible = running.slice(0, 8);
-    const terminalSlots = Math.max(0, 8 - runningVisible.length);
-    return [...runningVisible, ...terminal.slice(0, terminalSlots)];
+    return [...running, ...terminal];
+  }
+
+  function captureScrollAnchor() {
+    if (root.classList.contains("collapsed") || body.scrollTop <= 2) return { atTop: true };
+    const bodyRect = body.getBoundingClientRect();
+    for (const row of calls.children) {
+      const rowRect = row.getBoundingClientRect();
+      if (rowRect.bottom > bodyRect.top + 1) {
+        return { atTop: false, key: row.dataset.entryKey, offset: rowRect.top - bodyRect.top, scrollTop: body.scrollTop };
+      }
+    }
+    return { atTop: false, scrollTop: body.scrollTop };
+  }
+
+  function restoreScrollAnchor(anchor) {
+    if (root.classList.contains("collapsed")) return;
+    if (anchor.atTop) {
+      body.scrollTop = 0;
+      return;
+    }
+    const row = anchor.key ? rowsByKey.get(anchor.key) : null;
+    if (row) {
+      const bodyRect = body.getBoundingClientRect();
+      body.scrollTop += row.getBoundingClientRect().top - bodyRect.top - anchor.offset;
+      return;
+    }
+    body.scrollTop = anchor.scrollTop ?? body.scrollTop;
+  }
+
+  function createEntryRow(entry) {
+    const row = document.createElement("li");
+    row.dataset.entryKey = entry.key;
+    const status = document.createElement("span");
+    status.className = "status";
+    const tool = document.createElement("span");
+    tool.className = "tool";
+    const detail = document.createElement("span");
+    detail.className = "detail";
+    const elapsedNode = document.createElement("span");
+    elapsedNode.className = "elapsed";
+    row.append(status, tool, detail, elapsedNode);
+    row._activityRefs = { status, tool, detail, elapsed: elapsedNode };
+    rowsByKey.set(entry.key, row);
+    return row;
+  }
+
+  function updateEntryRow(row, entry, now) {
+    const refs = row._activityRefs;
+    const detail = entry.detail || "";
+    const signature = JSON.stringify([entry.status, entry.tool_name, detail, entry.finished_at]);
+    if (row.dataset.entrySignature !== signature) {
+      row.dataset.entrySignature = signature;
+      row.className = `call ${entry.status}`;
+      refs.status.textContent = statusIcon(entry.status);
+      refs.tool.textContent = entry.tool_name;
+      refs.detail.textContent = detail;
+    }
+    if (entry.status === "running" || row.dataset.elapsedFinished !== signature) {
+      refs.elapsed.textContent = elapsed(entry, now);
+      row.dataset.elapsedFinished = signature;
+    }
+  }
+
+  function reconcileEntries(entries, now) {
+    const anchor = captureScrollAnchor();
+    const retainedKeys = new Set(entries.map(entry => entry.key));
+    const previousKeys = new Set(rowsByKey.keys());
+    const arrivingKeys = new Set(entries.filter(entry => !previousKeys.has(entry.key)).map(entry => entry.key));
+    const animateArrival = anchor.atTop && previousKeys.size > 0 && arrivingKeys.size > 0
+      && !window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+    const previousPositions = new Map();
+
+    // capture only visible rows so insertion animation stays cheap even with long histories
+    if (animateArrival) {
+      const bodyRect = body.getBoundingClientRect();
+      for (const [key, row] of rowsByKey) {
+        const rowRect = row.getBoundingClientRect();
+        if (rowRect.bottom >= bodyRect.top && rowRect.top <= bodyRect.bottom) previousPositions.set(key, rowRect.top);
+      }
+    }
+
+    entries.forEach((entry, index) => {
+      const row = rowsByKey.get(entry.key) || createEntryRow(entry);
+      updateEntryRow(row, entry, now);
+      const current = calls.children[index] || null;
+      if (current !== row) calls.insertBefore(row, current);
+    });
+
+    for (const [key, row] of rowsByKey) {
+      if (retainedKeys.has(key)) continue;
+      row.remove();
+      rowsByKey.delete(key);
+    }
+    restoreScrollAnchor(anchor);
+
+    // briefly replay the old positions so new activity visibly nudges existing rows downward
+    if (animateArrival) {
+      requestAnimationFrame(() => {
+        for (const [key, oldTop] of previousPositions) {
+          const row = rowsByKey.get(key);
+          if (!row) continue;
+          const delta = oldTop - row.getBoundingClientRect().top;
+          if (Math.abs(delta) < 1) continue;
+          row.animate(
+            [{ transform: `translateY(${delta}px)` }, { transform: "translateY(0)" }],
+            { duration: 180, easing: "cubic-bezier(.2,.7,.2,1)" },
+          );
+        }
+        for (const key of arrivingKeys) {
+          const row = rowsByKey.get(key);
+          if (!row) continue;
+          row.animate(
+            [{ opacity: .72, transform: "translateY(-4px)" }, { opacity: 1, transform: "translateY(0)" }],
+            { duration: 160, easing: "ease-out" },
+          );
+        }
+      });
+    }
   }
 
   function latestEntry(next) {
@@ -577,7 +694,6 @@ def _activity_widget_html() -> str:
       lastChange = Date.now();
     }
 
-    calls.replaceChildren();
     const now = Date.now() / 1000;
     const runningJobs = jobs.filter(job => job.status === "running");
     const runningCalls = (next.calls || []).filter(call => call.status === "running");
@@ -606,18 +722,9 @@ def _activity_widget_html() -> str:
       summary.textContent = "";
     }
 
-    const entries = visibleEntries(next);
+    const entries = orderedEntries(next);
     empty.hidden = entries.length > 0;
-    entries.forEach(entry => {
-      const row = document.createElement("li");
-      row.className = `call ${entry.status}`;
-      row.innerHTML = `<span class="status"></span><span class="tool"></span><span class="detail"></span><span class="elapsed"></span>`;
-      row.querySelector(".status").textContent = statusIcon(entry.status);
-      row.querySelector(".tool").textContent = entry.tool_name;
-      row.querySelector(".detail").textContent = entry.detail || "";
-      row.querySelector(".elapsed").textContent = elapsed(entry, now);
-      calls.appendChild(row);
-    });
+    reconcileEntries(entries, now);
 
   }
 
