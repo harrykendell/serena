@@ -148,6 +148,16 @@ class DashboardExecutionHistory:
         with self._lock:
             metadata = dict(self._metadata_by_task_name.get(task_info.name, {}))
         media = self._media_descriptor(task_info)
+
+        describe_output = getattr(self._agent, "describe_tool_execution_output", None)
+        descriptor = describe_output(task_info.name) if callable(describe_output) else None
+        stream_output_id = getattr(descriptor, "output_id", None)
+        if not isinstance(stream_output_id, str):
+            stream_output_id = None
+        stream_output_chars = getattr(descriptor, "total_chars", None)
+        if not isinstance(stream_output_chars, int):
+            stream_output_chars = None
+
         return {
             "task_id": task_info.task_id,
             "name": task_info.name,
@@ -157,6 +167,8 @@ class DashboardExecutionHistory:
             "result": None if media is not None else metadata.get("result"),
             "error": metadata.get("error"),
             "media": media,
+            "stream_output_id": stream_output_id,
+            "stream_output_chars": stream_output_chars,
         }
 
     def _capture_last_execution(self) -> None:
@@ -212,6 +224,26 @@ class DashboardExecutionHistory:
             media_type=media_type,
             file_name=file_link.name,
         )
+
+    def get_output(self, task_id: int) -> dict[str, Any]:
+        """Return the newest bounded retained-output tail for one exact tool execution."""
+        task_info = self._find_task_info(task_id)
+        read_output = getattr(self._agent, "read_tool_execution_tail", None)
+        if not callable(read_output):
+            raise ValueError(f"Tool execution {task_id} has no retained output")
+
+        page = read_output(task_info.name, _EXECUTION_FIELD_LIMIT)
+        if page is None:
+            raise ValueError(f"Tool execution {task_id} has no retained output")
+        return {
+            "status": "success",
+            "task_id": task_id,
+            "output_id": page.output_id,
+            "offset": page.offset,
+            "end_offset": page.offset + len(page.content),
+            "total_chars": page.total_chars,
+            "output": page.content,
+        }
 
     def get_executions(self) -> dict[str, Any]:
         """Returns current tool calls followed by completed session history, newest first."""
@@ -421,6 +453,13 @@ class CustomDashboard:
             response = Response(media.data, mimetype=media.mime_type)
             response.headers["Cache-Control"] = "private, max-age=3600"
             return response
+
+        @app.route("/dashboard/api/executions/<int:task_id>/output", methods=["GET"])
+        def get_execution_output(task_id: int) -> dict[str, Any]:
+            try:
+                return self._execution_history.get_output(task_id)
+            except (KeyError, ValueError):
+                abort(404)
 
         @app.route("/dashboard/api/jobs", methods=["GET"])
         def get_jobs() -> dict[str, Any]:

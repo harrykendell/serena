@@ -316,6 +316,8 @@ class Tool(Component):
                     candidate = f"{too_long_msg}\n{shortened}"
                     if len(candidate) <= max_answer_chars:
                         return candidate
+            if self.agent.tool_is_active("read_tool_output"):
+                return self.agent.retain_tool_output_with_tail(self.get_name(), result, max_answer_chars)
             result = too_long_msg
         return result
 

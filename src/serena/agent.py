@@ -47,6 +47,7 @@ from serena.memories.memory_manager import MemoryManager
 from serena.project import Project
 from serena.prompt_factory import SerenaPromptFactory
 from serena.task_executor import TaskExecutor
+from serena.tool_output import ToolOutputDescriptor, ToolOutputPage, ToolOutputStore, ToolOutputWriter
 from serena.tools import (
     ActivateProjectTool,
     GetCurrentConfigTool,
@@ -567,6 +568,7 @@ class SerenaAgent:
         self._project_activation_error: str | None = project_activation_error
         self._gui_log_viewer: Optional["GuiLogViewer"] = None
         self._dashboard_manager: DashboardManager | None = None
+        self._tool_output_store = ToolOutputStore()
         self._project_prompt_status = ProjectPromptProvisionStatus()
         self._session_mode_selection_definition = modes
         self.version = serena_version()
@@ -884,6 +886,44 @@ class SerenaAgent:
         output_str = str(tool_result)
         log.debug(f"Recording tool usage for tool '{tool_name}'")
         self._tool_usage_stats.record_tool_usage(tool_name, input_str, output_str)
+
+    def retain_tool_output_with_tail(self, tool_name: str, content: str, max_answer_chars: int) -> str:
+        """Retain an oversized tool result and return a bounded identified tail."""
+        return self._tool_output_store.retain_with_tail(tool_name, content, max_answer_chars)
+
+    def read_tool_output(self, output_id: str, offset: int, max_chars: int) -> ToolOutputPage:
+        """Read one page from a previously retained oversized tool result."""
+        return self._tool_output_store.read(output_id, offset, max_chars)
+
+    def open_tool_output(self, tool_name: str, execution_name: str | None = None) -> ToolOutputWriter:
+        """Open an append-only retained output stream for one tool execution."""
+        return self._tool_output_store.open(tool_name, execution_name)
+
+    def render_tool_output_tail(
+        self,
+        output_id: str,
+        max_answer_chars: int,
+        *,
+        answer_chars: int,
+        retained_label: str,
+        details: str | None = None,
+    ) -> str:
+        """Render an identified bounded tail from an already retained tool output."""
+        return self._tool_output_store.render_tail(
+            output_id,
+            max_answer_chars,
+            answer_chars=answer_chars,
+            retained_label=retained_label,
+            details=details,
+        )
+
+    def read_tool_execution_tail(self, execution_name: str, max_chars: int) -> ToolOutputPage | None:
+        """Read the newest retained output tail for one exact task execution."""
+        return self._tool_output_store.read_execution_tail(execution_name, max_chars)
+
+    def describe_tool_execution_output(self, execution_name: str) -> ToolOutputDescriptor | None:
+        """Return retained-output metadata for one exact task execution, if available."""
+        return self._tool_output_store.describe_execution(execution_name)
 
     def get_dashboard_url(self) -> str | None:
         """
@@ -1479,6 +1519,8 @@ class SerenaAgent:
         Shutdown handler of the agent, freeing resources and stopping background tasks.
         """
         log.info("SerenaAgent is shutting down ...")
+        if hasattr(self, "_tool_output_store"):
+            self._tool_output_store.close()
         # apply shutdown depending on allocated resources, handling quick ones first (dashboard manager & GUI viewer)
         if self._gui_log_viewer:
             log.info("Stopping the GUI log window ...")

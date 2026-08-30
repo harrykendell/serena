@@ -14,6 +14,7 @@ excluded_tools: []
 included_optional_tools:
   - start_job
   - job_status
+  - read_tool_output
   - cancel_job
   - git_status
   - git_fetch

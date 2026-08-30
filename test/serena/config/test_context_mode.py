@@ -55,6 +55,7 @@ def test_chatgpt_context_includes_fork_optional_tools() -> None:
     assert {
         "start_job",
         "job_status",
+        "read_tool_output",
         "cancel_job",
         "git_status",
         "git_fetch",

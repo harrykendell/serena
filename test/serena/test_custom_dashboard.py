@@ -10,6 +10,7 @@ from serena.custom_dashboard import DashboardExecutionHistory, DashboardJobOverv
 from serena.dashboard import SerenaDashboardAPI
 from serena.jobs import JobPersistenceInfo, JobRecord, JobRuntimeInfo, JobSnapshot, JobStatus
 from serena.task_executor import TaskExecutor
+from serena.tool_output import ToolOutputPage
 from serena.tools import FetchMediaFileTool
 
 
@@ -37,6 +38,9 @@ class _DashboardAgent:
         self.version = "0.0.0"
         self.callbacks = []
         self.project = project
+        self.current_tasks: list[TaskExecutor.TaskInfo] = []
+        self.output_descriptor: object | None = None
+        self.output_page: ToolOutputPage | None = None
 
     def register_config_changed_callback(self, callback) -> None:
         self.callbacks.append(callback)
@@ -45,7 +49,15 @@ class _DashboardAgent:
         return self.project
 
     def get_current_tasks(self):
-        return []
+        return list(self.current_tasks)
+
+    def describe_tool_execution_output(self, execution_name: str):
+        del execution_name
+        return self.output_descriptor
+
+    def read_tool_execution_tail(self, execution_name: str, max_chars: int):
+        del execution_name, max_chars
+        return self.output_page
 
     def get_last_executed_task(self):
         return None
@@ -94,6 +106,35 @@ def test_custom_dashboard_serves_fork_specific_frontend_and_session_api() -> Non
     assert b"Tool executions" in response.data
     assert session["status"] == "success"
     assert session["context"] == "chatgpt"
+
+
+def test_custom_dashboard_serves_live_execution_output_endpoint() -> None:
+    agent = _DashboardAgent()
+    running = _task_info("Task-7:ExecuteShellCommandTool", is_running=True, state="pending", task_id=7)
+    agent.current_tasks = [running]
+    agent.output_descriptor = SimpleNamespace(output_id="abc123", total_chars=5)
+    agent.output_page = ToolOutputPage(
+        output_id="abc123",
+        tool_name="execute_shell_command",
+        total_chars=5,
+        offset=0,
+        content="hello",
+        next_offset=None,
+    )
+    dashboard = SerenaDashboardAPI(
+        memory_log_handler=_DummyMemoryLogHandler(),
+        tool_names=[],
+        agent=agent,
+        tool_usage_stats=None,
+    )
+    client = dashboard._app.test_client()
+
+    executions = client.get("/dashboard/api/executions").get_json()
+    response = client.get("/dashboard/api/executions/7/output")
+
+    assert executions["executions"][0]["stream_output_id"] == "abc123"
+    assert response.status_code == 200
+    assert response.get_json()["output"] == "hello"
 
 
 def test_memory_endpoint_reads_active_project_memory() -> None:
@@ -167,6 +208,41 @@ def test_execution_history_captures_parameters_and_result_from_tool_logs() -> No
     assert execution["parameters"] == "project='serena'"
     assert execution["result"] == "Project activated"
     assert execution["error"] is None
+
+
+def test_execution_history_exposes_live_output_for_exact_running_task() -> None:
+    agent = MagicMock()
+    callbacks = []
+    agent.register_config_changed_callback.side_effect = callbacks.append
+    running = _task_info("Task-7:ExecuteShellCommandTool", is_running=True, state="pending", task_id=7)
+    agent.get_current_tasks.return_value = [running]
+    agent.get_last_executed_task.return_value = None
+    agent.describe_tool_execution_output.return_value = SimpleNamespace(output_id="abc123", total_chars=11)
+    agent.read_tool_execution_tail.return_value = ToolOutputPage(
+        output_id="abc123",
+        tool_name="execute_shell_command",
+        total_chars=11,
+        offset=0,
+        content="hello world",
+        next_offset=None,
+    )
+    history = DashboardExecutionHistory(agent, _DummyMemoryLogHandler())
+
+    execution = history.get_executions()["executions"][0]
+    output = history.get_output(7)
+
+    assert execution["stream_output_id"] == "abc123"
+    assert execution["stream_output_chars"] == 11
+    assert output == {
+        "status": "success",
+        "task_id": 7,
+        "output_id": "abc123",
+        "offset": 0,
+        "end_offset": 11,
+        "total_chars": 11,
+        "output": "hello world",
+    }
+    agent.read_tool_execution_tail.assert_called_once_with("Task-7:ExecuteShellCommandTool", 12_000)
 
 
 def test_execution_history_exposes_native_media_without_polling_binary_data() -> None:

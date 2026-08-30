@@ -4,6 +4,8 @@ const SCROLL_IDLE_MS = 350;
 
 const outputCache = new Map();
 const outputRequests = new Set();
+const executionOutputCache = new Map();
+const executionOutputRequests = new Set();
 const jobCpuSamples = new Map();
 const scrollerStates = new WeakMap();
 const expandedExecutionKeys = new Set();
@@ -482,6 +484,35 @@ function loadExecutionMedia(row) {
   media.loadedTaskId = media.taskId;
 }
 
+async function loadExecutionOutput(row, force = false) {
+  const stream = row._dashboardRefs?.stream;
+  const taskId = row.dataset.taskId;
+  const outputId = row.dataset.streamOutputId;
+  if (!row.open || !stream || !taskId || !outputId || executionOutputRequests.has(taskId)) return;
+
+  const cached = executionOutputCache.get(taskId);
+  if (cached !== undefined && !force) {
+    updateScrollableText(stream.output, cached, { defaultToBottom: true, live: true });
+    return;
+  }
+  if (cached === undefined) updateScrollableText(stream.output, "Loading…", { defaultToBottom: true, live: true });
+
+  executionOutputRequests.add(taskId);
+  try {
+    const data = await getJson(`/executions/${encodeURIComponent(taskId)}/output`);
+    if (data.output_id !== outputId) {
+      throw new Error("Execution output changed identity");
+    }
+    const text = data.output || "No output captured yet.";
+    executionOutputCache.set(taskId, text);
+    updateScrollableText(stream.output, text, { defaultToBottom: true, live: true });
+  } catch (error) {
+    updateScrollableText(stream.output, `Could not load live output: ${error.message}`, { defaultToBottom: true });
+  } finally {
+    executionOutputRequests.delete(taskId);
+  }
+}
+
 function createExecutionRow() {
   const details = makeElement("details", "execution-entry");
   const summary = makeElement("summary", "execution-summary");
@@ -491,13 +522,14 @@ function createExecutionRow() {
 
   const body = makeElement("div", "execution-body");
   const parameters = createOutputSection("Parameters", "execution-parameters");
+  const stream = createOutputSection("Live output", "execution-stream");
   const result = createOutputSection("Result", "execution-result");
   const error = createOutputSection("Error", "execution-error");
   const media = createMediaSection();
-  body.append(parameters.section, result.section, error.section, media.section);
+  body.append(parameters.section, stream.section, result.section, error.section, media.section);
   details.append(summary, body);
 
-  details._dashboardRefs = { title, badge, body, parameters, result, error, media };
+  details._dashboardRefs = { title, badge, body, parameters, stream, result, error, media };
   summary.addEventListener("click", (event) => {
     event.preventDefault();
     const key = details.dataset.itemKey;
@@ -507,7 +539,10 @@ function createExecutionRow() {
       if (nextOpen) expandedExecutionKeys.add(key);
       else expandedExecutionKeys.delete(key);
     }
-    if (nextOpen) loadExecutionMedia(details);
+    if (nextOpen) {
+      loadExecutionOutput(details, true);
+      loadExecutionMedia(details);
+    }
   });
   return details;
 }
@@ -534,6 +569,8 @@ function updateExecutionRow(row, execution) {
     execution.parameters,
     execution.result,
     execution.error,
+    execution.stream_output_id || null,
+    execution.stream_output_chars ?? null,
     execution.media?.type || null,
     execution.media?.name || null,
     execution.media?.mime_type || null,
@@ -544,6 +581,20 @@ function updateExecutionRow(row, execution) {
   setNodeText(refs.title, executionDisplayName(execution.name));
   updateStatusBadge(refs.badge, execution.status);
   updateExecutionSection(refs.parameters, execution.parameters);
+
+  const taskId = String(execution.task_id);
+  const streamOutputId = execution.stream_output_id || "";
+  row.dataset.taskId = taskId;
+  if (streamOutputId) {
+    if (row.dataset.streamOutputId !== streamOutputId) executionOutputCache.delete(taskId);
+    row.dataset.streamOutputId = streamOutputId;
+    refs.stream.section.hidden = false;
+    if (!refs.stream.output.textContent) refs.stream.output.textContent = "Open the tool call to load output.";
+  } else {
+    delete row.dataset.streamOutputId;
+    refs.stream.section.hidden = true;
+    executionOutputCache.delete(taskId);
+  }
 
   const mediaType = execution.media?.type || null;
   refs.media.section.hidden = !mediaType;
@@ -572,9 +623,11 @@ function updateExecutionRow(row, execution) {
     refs.media.loadedTaskId = null;
   }
 
-  updateExecutionSection(refs.result, mediaType ? null : execution.result);
+  updateExecutionSection(refs.result, mediaType || streamOutputId ? null : execution.result);
   updateExecutionSection(refs.error, execution.error);
-  refs.body.hidden = !execution.parameters && !execution.result && !execution.error && !mediaType;
+  refs.body.hidden =
+    !execution.parameters && !streamOutputId && !execution.result && !execution.error && !mediaType;
+  if (streamOutputId && row.open) loadExecutionOutput(row, true);
   if (mediaType && row.open) loadExecutionMedia(row);
 }
 
@@ -599,7 +652,10 @@ function renderExecutionsNow(data, snapshot) {
     if (!key) return;
     const shouldOpen = expandedExecutionKeys.has(key);
     if (row.open !== shouldOpen) row.open = shouldOpen;
-    if (shouldOpen) loadExecutionMedia(row);
+    if (shouldOpen) {
+      loadExecutionOutput(row, true);
+      loadExecutionMedia(row);
+    }
   });
   restoreExecutionViewportAnchor(viewportAnchor);
   executionRenderState.snapshot = snapshot;

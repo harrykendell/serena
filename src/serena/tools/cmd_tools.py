@@ -3,6 +3,7 @@ Tools supporting the execution of (external) commands
 """
 
 import os.path
+from threading import current_thread
 
 from serena.tools import Tool, ToolMarkerCanEdit
 from serena.util.shell import execute_shell_command
@@ -31,8 +32,7 @@ class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit):
         :param cwd: the working directory to execute the command in. If None, the project root will be used.
         :param capture_stderr: whether to capture and return stderr output
         :param max_answer_chars: if the output is longer than this number of characters,
-            no content will be returned. -1 means using the default value, don't adjust unless there is no other way to get the content
-            required for the task.
+            a retained output tail is returned when supported. -1 uses the configured default.
         :return: a JSON object containing the command's stdout and optionally stderr output
         """
         if cwd is None:
@@ -47,6 +47,26 @@ class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit):
                         f"Specified a relative working directory ({cwd}), but the resulting path is not a directory: {_cwd}"
                     )
 
-        result = execute_shell_command(command, cwd=_cwd, capture_stderr=capture_stderr)
-        result = result.model_dump_json()
-        return self._limit_length(result, max_answer_chars)
+        effective_max_answer_chars = max_answer_chars
+        if effective_max_answer_chars == -1:
+            effective_max_answer_chars = self.agent.serena_config.default_max_tool_answer_chars
+        if effective_max_answer_chars <= 0:
+            raise ValueError(f"Must be positive or the default (-1), got: {max_answer_chars=}")
+
+        # stream a live transcript keyed to this exact Serena task while preserving the structured final result
+        with self.agent.open_tool_output(self.get_name(), execution_name=current_thread().name) as output_writer:
+            result = execute_shell_command(command, cwd=_cwd, capture_stderr=capture_stderr, output_sink=output_writer)
+        result_json = result.model_dump_json()
+        if len(result_json) <= effective_max_answer_chars:
+            return result_json
+
+        if self.agent.tool_is_active("read_tool_output"):
+            details = f"return_code={result.return_code}; cwd={result.cwd}"
+            return self.agent.render_tool_output_tail(
+                output_writer.output_id,
+                effective_max_answer_chars,
+                answer_chars=len(result_json),
+                retained_label="Shell transcript",
+                details=details,
+            )
+        return self._limit_length(result_json, max_answer_chars)
