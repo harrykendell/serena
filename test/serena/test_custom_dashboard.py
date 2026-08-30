@@ -3,11 +3,14 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from mcp.server.fastmcp import Image
+from mcp.types import ResourceLink
+from pydantic import AnyUrl
 
 from serena.custom_dashboard import DashboardExecutionHistory, DashboardJobOverview
 from serena.dashboard import SerenaDashboardAPI
 from serena.jobs import JobPersistenceInfo, JobRecord, JobRuntimeInfo, JobSnapshot, JobStatus
 from serena.task_executor import TaskExecutor
+from serena.tools import FetchMediaFileTool
 
 
 class _DummyMemoryLogHandler:
@@ -191,6 +194,79 @@ def test_execution_history_exposes_native_media_without_polling_binary_data() ->
     assert media.media_type == "image"
     assert media.mime_type == "image/png"
     assert media.data == image_bytes
+
+
+def test_execution_history_exposes_wrapped_media_result(tmp_path) -> None:
+    image_bytes = b"\x89PNG\r\n\x1a\nwrapped-preview"
+    (tmp_path / "preview.png").write_bytes(image_bytes)
+    project = MagicMock()
+    project.project_root = tmp_path
+    project.project_name = "test"
+    tool_agent = MagicMock()
+    tool_agent.get_active_project_or_raise.return_value = project
+    wrapped_result = FetchMediaFileTool(tool_agent).apply("preview.png")
+
+    agent = MagicMock()
+    callbacks = []
+    agent.register_config_changed_callback.side_effect = callbacks.append
+    agent.get_current_tasks.return_value = []
+    completed = _task_info(
+        "Task-8:FetchMediaFileTool",
+        is_running=False,
+        state="completed",
+        task_id=8,
+        result=wrapped_result,
+    )
+    agent.get_last_executed_task.return_value = completed
+    history = DashboardExecutionHistory(agent, _DummyMemoryLogHandler())
+
+    callbacks[0]()
+    execution = history.get_executions()["executions"][0]
+    media = history.get_media(8)
+
+    assert execution["media"] == {"type": "image", "name": "preview.png", "mime_type": "image/png"}
+    assert execution["result"] is None
+    assert media.media_type == "image"
+    assert media.mime_type == "image/png"
+    assert media.file_name == "preview.png"
+    assert media.data == image_bytes
+
+
+def test_execution_history_exposes_exported_pdf_as_file(monkeypatch) -> None:
+    pdf_bytes = b"%PDF-1.4\npreview"
+    link = ResourceLink(
+        type="resource_link",
+        name="paper.pdf",
+        uri=AnyUrl("serena-file://export/test-token"),
+        mimeType="application/pdf",
+        size=len(pdf_bytes),
+    )
+    monkeypatch.setattr("serena.custom_dashboard.read_result_file_link", lambda file_link: pdf_bytes)
+
+    agent = MagicMock()
+    callbacks = []
+    agent.register_config_changed_callback.side_effect = callbacks.append
+    agent.get_current_tasks.return_value = []
+    completed = _task_info(
+        "Task-9:DownloadFileTool",
+        is_running=False,
+        state="completed",
+        task_id=9,
+        result=link,
+    )
+    agent.get_last_executed_task.return_value = completed
+    history = DashboardExecutionHistory(agent, _DummyMemoryLogHandler())
+
+    callbacks[0]()
+    execution = history.get_executions()["executions"][0]
+    media = history.get_media(9)
+
+    assert execution["media"] == {"type": "file", "name": "paper.pdf", "mime_type": "application/pdf"}
+    assert execution["result"] is None
+    assert media.media_type == "file"
+    assert media.mime_type == "application/pdf"
+    assert media.file_name == "paper.pdf"
+    assert media.data == pdf_bytes
 
 
 def test_execution_history_reports_failed_and_cancelled_tasks() -> None:

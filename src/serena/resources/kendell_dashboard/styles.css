@@ -342,6 +342,11 @@ button { font: inherit; }
   border-radius: 4px;
   background: var(--surface-2);
 }
+.media-preview-image-link {
+  display: block;
+  max-width: 100%;
+  line-height: 0;
+}
 .media-preview-image {
   display: block;
   width: auto;
@@ -349,6 +354,21 @@ button { font: inherit; }
   max-height: 640px;
   object-fit: contain;
 }
+.media-preview-file {
+  display: block;
+  max-width: calc(100% - 20px);
+  margin: 10px;
+  padding: 10px 12px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: inherit;
+  font-size: 11px;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.media-preview-file:hover { background: var(--surface-1); }
 .media-preview-audio {
   width: min(680px, calc(100% - 18px));
   margin: 10px;

@@ -12,13 +12,11 @@ from typing import Any, Literal, cast
 import docstring_parser
 from mcp.server.fastmcp import server
 from mcp.server.fastmcp.exceptions import ToolError
-from mcp.server.fastmcp.resources import TextResource
 from mcp.server.fastmcp.server import Context, FastMCP, Settings
 from mcp.server.fastmcp.tools.base import Tool as FastMCPTool
 from mcp.server.session import ServerSessionT
 from mcp.shared.context import LifespanContextT, RequestT
 from mcp.types import ToolAnnotations
-from pydantic import AnyUrl
 from pydantic_settings import SettingsConfigDict
 from sensai.util import logging
 
@@ -29,7 +27,7 @@ from serena.config.context_mode import SerenaAgentContext
 from serena.config.serena_config import LanguageBackend, ModeSelectionDefinition, SerenaConfig
 from serena.constants import DEFAULT_CONTEXT, SERENA_LOG_FORMAT
 from serena.tools import Tool, ToolCallError
-from serena.tools.media_tools import MEDIA_VIEWER_HTML, MEDIA_VIEWER_MIME_TYPE, MEDIA_VIEWER_URI
+from serena.tools.media_tools import register_file_export_resource
 from serena.util.exception import show_fatal_exception_safe
 from serena.util.logging import MemoryLogHandler
 
@@ -406,15 +404,7 @@ class SerenaMCPFactory:
             port=port,
             instructions=instructions,
         )
-        mcp.add_resource(
-            TextResource(
-                uri=AnyUrl(MEDIA_VIEWER_URI),
-                name="Serena media viewer",
-                description="Renders media returned by Serena media tools.",
-                mime_type=MEDIA_VIEWER_MIME_TYPE,
-                text=MEDIA_VIEWER_HTML,
-            )
-        )
+        register_file_export_resource(mcp)
         return mcp
 
     @asynccontextmanager

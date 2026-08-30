@@ -6,6 +6,13 @@ const outputCache = new Map();
 const outputRequests = new Set();
 const jobCpuSamples = new Map();
 const scrollerStates = new WeakMap();
+const expandedExecutionKeys = new Set();
+const executionRenderState = {
+  lastScrollAt: 0,
+  pending: null,
+  flushTimer: null,
+  snapshot: null,
+};
 let refreshInFlight = false;
 
 function byId(id) {
@@ -186,6 +193,64 @@ function reconcileKeyed(container, items, keyFor, createNode, updateNode) {
   });
 }
 
+function markExecutionScrollActivity() {
+  executionRenderState.lastScrollAt = performance.now();
+  schedulePendingExecutions();
+}
+
+function schedulePendingExecutions() {
+  if (!executionRenderState.pending) return;
+
+  window.clearTimeout(executionRenderState.flushTimer);
+  const elapsed = performance.now() - executionRenderState.lastScrollAt;
+  const delay = Math.max(0, SCROLL_IDLE_MS - elapsed);
+  executionRenderState.flushTimer = window.setTimeout(() => {
+    const idleFor = performance.now() - executionRenderState.lastScrollAt;
+    if (idleFor < SCROLL_IDLE_MS) {
+      schedulePendingExecutions();
+      return;
+    }
+
+    const pending = executionRenderState.pending;
+    if (!pending) return;
+    executionRenderState.pending = null;
+    renderExecutionsNow(pending.data, pending.snapshot);
+  }, delay);
+}
+
+function setupExecutionRenderStability() {
+  const list = byId("executions-list");
+  const markListActivity = () => markExecutionScrollActivity();
+  ["touchstart", "touchmove", "touchend", "wheel"].forEach((eventName) => {
+    list.addEventListener(eventName, markListActivity, { passive: true });
+  });
+  list.addEventListener("scroll", markListActivity, { capture: true, passive: true });
+  window.addEventListener("scroll", () => {
+    if (!byId("tools-panel").hidden) markExecutionScrollActivity();
+  }, { passive: true });
+}
+
+function captureExecutionViewportAnchor(list) {
+  if (byId("tools-panel").hidden) return null;
+
+  const tabs = document.querySelector(".tabs");
+  const viewportTop = Math.max(0, tabs?.getBoundingClientRect().bottom || 0);
+  const listRect = list.getBoundingClientRect();
+  if (listRect.top >= viewportTop || listRect.bottom <= viewportTop) return null;
+
+  for (const child of list.children) {
+    const rect = child.getBoundingClientRect();
+    if (rect.bottom > viewportTop) return { node: child, top: rect.top };
+  }
+  return null;
+}
+
+function restoreExecutionViewportAnchor(anchor) {
+  if (!anchor?.node?.isConnected) return;
+  const delta = anchor.node.getBoundingClientRect().top - anchor.top;
+  if (Math.abs(delta) > 0.5) window.scrollBy(0, delta);
+}
+
 function activateTab(name, updateHash = true) {
   const selected = name === "jobs" ? "jobs" : "tools";
   document.querySelectorAll("[data-tab]").forEach((button) => {
@@ -342,17 +407,37 @@ function createMediaSection() {
   const section = makeElement("section", "execution-section execution-media");
   const heading = makeElement("div", "execution-section-label", "Preview");
   const preview = makeElement("div", "media-preview");
+  const imageLink = makeElement("a", "media-preview-image-link");
+  imageLink.target = "_blank";
+  imageLink.rel = "noopener";
   const image = makeElement("img", "media-preview-image");
   image.alt = "Serena tool media result";
+  imageLink.appendChild(image);
   const audio = makeElement("audio", "media-preview-audio");
   audio.controls = true;
   audio.preload = "metadata";
+  const file = makeElement("a", "media-preview-file");
+  file.target = "_blank";
+  file.rel = "noopener";
   const note = makeElement("div", "media-preview-note", "Open the tool call to load preview.");
-  image.hidden = true;
+  imageLink.hidden = true;
   audio.hidden = true;
-  preview.append(image, audio, note);
+  file.hidden = true;
+  preview.append(imageLink, audio, file, note);
   section.append(heading, preview);
-  return { section, image, audio, note, taskId: null, mediaType: null, loadedTaskId: null };
+  return {
+    section,
+    imageLink,
+    image,
+    audio,
+    file,
+    note,
+    taskId: null,
+    mediaType: null,
+    fileName: null,
+    mimeType: null,
+    loadedTaskId: null,
+  };
 }
 
 function loadExecutionMedia(row) {
@@ -361,21 +446,38 @@ function loadExecutionMedia(row) {
 
   const url = `${API_PREFIX}/executions/${encodeURIComponent(media.taskId)}/media`;
   media.note.textContent = "Loading preview…";
+  media.file.hidden = true;
+  media.file.removeAttribute("href");
   if (media.mediaType === "image") {
     media.audio.pause();
     media.audio.removeAttribute("src");
     media.audio.hidden = true;
+    media.imageLink.hidden = false;
+    media.imageLink.href = url;
     media.image.hidden = false;
     media.image.onload = () => { media.note.textContent = ""; };
     media.image.onerror = () => { media.note.textContent = "Could not load media preview."; };
     media.image.src = url;
   } else if (media.mediaType === "audio") {
     media.image.removeAttribute("src");
-    media.image.hidden = true;
+    media.imageLink.removeAttribute("href");
+    media.imageLink.hidden = true;
     media.audio.hidden = false;
     media.audio.onloadedmetadata = () => { media.note.textContent = ""; };
     media.audio.onerror = () => { media.note.textContent = "Could not load media preview."; };
     media.audio.src = url;
+  } else if (media.mediaType === "file") {
+    media.image.removeAttribute("src");
+    media.imageLink.removeAttribute("href");
+    media.imageLink.hidden = true;
+    media.audio.pause();
+    media.audio.removeAttribute("src");
+    media.audio.hidden = true;
+    media.file.hidden = false;
+    media.file.href = url;
+    const name = media.fileName || "Open file";
+    media.file.textContent = media.mimeType ? `${name} · ${media.mimeType}` : name;
+    media.note.textContent = "";
   }
   media.loadedTaskId = media.taskId;
 }
@@ -396,18 +498,49 @@ function createExecutionRow() {
   details.append(summary, body);
 
   details._dashboardRefs = { title, badge, body, parameters, result, error, media };
-  details.addEventListener("toggle", () => loadExecutionMedia(details));
+  summary.addEventListener("click", (event) => {
+    event.preventDefault();
+    const key = details.dataset.itemKey;
+    const nextOpen = !details.open;
+    details.open = nextOpen;
+    if (key) {
+      if (nextOpen) expandedExecutionKeys.add(key);
+      else expandedExecutionKeys.delete(key);
+    }
+    if (nextOpen) loadExecutionMedia(details);
+  });
   return details;
 }
 
-function updateExecutionSection(sectionRefs, value, { live = false, defaultToBottom = false } = {}) {
+function updateExecutionSection(sectionRefs, value) {
   const visible = Boolean(value);
-  sectionRefs.section.hidden = !visible;
-  if (visible) updateScrollableText(sectionRefs.output, value, { live, defaultToBottom });
+  const hidden = !visible;
+  if (sectionRefs.section.hidden !== hidden) sectionRefs.section.hidden = hidden;
+  if (!visible) return;
+
+  const text = normaliseOutputText(value);
+  if (sectionRefs.output.textContent !== text) sectionRefs.output.textContent = text;
 }
 
 function updateExecutionRow(row, execution) {
   const refs = row._dashboardRefs;
+  const key = String(execution.task_id);
+  const shouldOpen = expandedExecutionKeys.has(key);
+  if (row.open !== shouldOpen) row.open = shouldOpen;
+
+  const snapshot = JSON.stringify([
+    execution.name,
+    execution.status,
+    execution.parameters,
+    execution.result,
+    execution.error,
+    execution.media?.type || null,
+    execution.media?.name || null,
+    execution.media?.mime_type || null,
+  ]);
+  if (row._dashboardSnapshot === snapshot) return;
+  row._dashboardSnapshot = snapshot;
+
   setNodeText(refs.title, executionDisplayName(execution.name));
   updateStatusBadge(refs.badge, execution.status);
   updateExecutionSection(refs.parameters, execution.parameters);
@@ -417,40 +550,79 @@ function updateExecutionRow(row, execution) {
   if (mediaType) {
     refs.media.taskId = execution.task_id;
     refs.media.mediaType = mediaType;
+    refs.media.fileName = execution.media?.name || null;
+    refs.media.mimeType = execution.media?.mime_type || null;
     if (refs.media.loadedTaskId !== execution.task_id) {
       refs.media.note.textContent = "Open the tool call to load preview.";
       refs.media.image.removeAttribute("src");
+      refs.media.imageLink.removeAttribute("href");
       refs.media.audio.pause();
       refs.media.audio.removeAttribute("src");
-      refs.media.image.hidden = true;
+      refs.media.file.removeAttribute("href");
+      refs.media.file.textContent = "";
+      refs.media.imageLink.hidden = true;
       refs.media.audio.hidden = true;
+      refs.media.file.hidden = true;
     }
   } else {
     refs.media.taskId = null;
     refs.media.mediaType = null;
+    refs.media.fileName = null;
+    refs.media.mimeType = null;
     refs.media.loadedTaskId = null;
   }
 
-  updateExecutionSection(refs.result, mediaType ? null : execution.result, { defaultToBottom: true });
-  updateExecutionSection(refs.error, execution.error, { defaultToBottom: true });
+  updateExecutionSection(refs.result, mediaType ? null : execution.result);
+  updateExecutionSection(refs.error, execution.error);
   refs.body.hidden = !execution.parameters && !execution.result && !execution.error && !mediaType;
   if (mediaType && row.open) loadExecutionMedia(row);
 }
 
-function renderExecutions(data) {
+function renderExecutionsNow(data, snapshot) {
   setText("execution-running", data.running || 0);
   setText("execution-queued", data.queued || 0);
   setText("execution-done", data.done || 0);
 
   const list = byId("executions-list");
   const executions = data.executions || [];
+  const viewportAnchor = captureExecutionViewportAnchor(list);
   setText("tools-tab-count", executions.length);
   if (!executions.length) {
     if (!list.querySelector(".empty-card")) clearAndAppend(list, [makeElement("div", "empty-card", "No tool executions recorded yet.")]);
+    executionRenderState.snapshot = snapshot;
     return;
   }
 
   reconcileKeyed(list, executions, (execution) => execution.task_id, createExecutionRow, updateExecutionRow);
+  Array.from(list.children).forEach((row) => {
+    const key = row.dataset.itemKey;
+    if (!key) return;
+    const shouldOpen = expandedExecutionKeys.has(key);
+    if (row.open !== shouldOpen) row.open = shouldOpen;
+    if (shouldOpen) loadExecutionMedia(row);
+  });
+  restoreExecutionViewportAnchor(viewportAnchor);
+  executionRenderState.snapshot = snapshot;
+}
+
+function renderExecutions(data) {
+  const snapshot = JSON.stringify([
+    data.running || 0,
+    data.queued || 0,
+    data.done || 0,
+    data.executions || [],
+  ]);
+  if (snapshot === executionRenderState.snapshot || snapshot === executionRenderState.pending?.snapshot) return;
+
+  const recentlyScrolled = performance.now() - executionRenderState.lastScrollAt < SCROLL_IDLE_MS;
+  if (recentlyScrolled) {
+    executionRenderState.pending = { data, snapshot };
+    schedulePendingExecutions();
+    return;
+  }
+
+  executionRenderState.pending = null;
+  renderExecutionsNow(data, snapshot);
 }
 
 function formatDuration(seconds) {
@@ -658,5 +830,6 @@ async function refresh() {
 setupTabs();
 setupResourceDialog();
 setupMemoryDialog();
+setupExecutionRenderStability();
 refresh();
 setInterval(refresh, POLL_INTERVAL_MS);

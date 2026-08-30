@@ -25,6 +25,8 @@ included_optional_tools:
   - git_push
   - fetch_media_file
   - render_pdf_page
+  - download_file
+  - upload_file
 
 tool_description_overrides:
   find_symbol: |

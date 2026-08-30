@@ -66,6 +66,8 @@ def test_chatgpt_context_includes_fork_optional_tools() -> None:
         "git_push",
         "fetch_media_file",
         "render_pdf_page",
+        "download_file",
+        "upload_file",
     } <= set(context.included_optional_tools)
 
 

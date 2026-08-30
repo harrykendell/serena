@@ -4,13 +4,13 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from mcp.server.fastmcp import Image
-from mcp.types import CallToolResult
+import requests
+from mcp.types import CallToolResult, ResourceLink
 
 from serena.config.serena_config import SerenaConfig
 from serena.project import Project
-from serena.tools import FetchMediaFileTool, RenderPdfPageTool
-from serena.tools.media_tools import MEDIA_VIEWER_URI
+from serena.tools import DownloadFileTool, FetchMediaFileTool, RenderPdfPageTool, UploadFileTool
+from serena.tools.media_tools import OpenAIFile, get_result_file_link
 
 _ONE_PIXEL_PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
 
@@ -51,10 +51,18 @@ def _write_minimal_pdf(path: Path) -> None:
 
 def test_fetch_media_file_returns_native_mcp_image(project: Project, tmp_path: Path) -> None:
     (tmp_path / "pixel.png").write_bytes(_ONE_PIXEL_PNG)
+    tool = _make_tool(FetchMediaFileTool, project)
 
-    result = _make_tool(FetchMediaFileTool, project).apply("pixel.png")
+    result = tool.prepare_mcp_result(tool.apply("pixel.png"))
 
-    assert isinstance(result, Image)
+    assert isinstance(result, CallToolResult)
+    assert result.content[0].type == "image"
+    assert result.content[0].mimeType == "image/png"
+    assert base64.b64decode(result.content[0].data) == _ONE_PIXEL_PNG
+    assert result.content[1].type == "resource_link"
+    assert result.content[1].mimeType == result.content[0].mimeType
+    assert result.content[2].type == "text"
+    assert "Markdown image syntax" in result.content[2].text
 
 
 def test_fetch_media_file_preserves_svg_mime_type(project: Project, tmp_path: Path) -> None:
@@ -68,30 +76,88 @@ def test_fetch_media_file_preserves_svg_mime_type(project: Project, tmp_path: Pa
     assert result.content[0].type == "image"
     assert result.content[0].mimeType == "image/svg+xml"
     assert base64.b64decode(result.content[0].data) == svg
-    assert result.meta is not None
-    assert result.meta["serena/media"]["mimeType"] == "image/svg+xml"
+    assert result.content[1].type == "resource_link"
+    assert result.content[1].mimeType == result.content[0].mimeType
+    assert result.content[2].type == "text"
+    assert "Markdown image syntax" in result.content[2].text
 
 
-def test_media_tool_prepares_chatgpt_preview_result(project: Project, tmp_path: Path) -> None:
-    (tmp_path / "pixel.png").write_bytes(_ONE_PIXEL_PNG)
-    tool = _make_tool(FetchMediaFileTool, project)
+def test_download_file_returns_resource_link(project: Project, tmp_path: Path) -> None:
+    data = b"transfer me exactly"
+    (tmp_path / "notes.txt").write_bytes(data)
+    tool = _make_tool(DownloadFileTool, project)
 
-    result = tool.prepare_mcp_result(tool.apply("pixel.png"))
+    raw_result = tool.apply("notes.txt")
+    result = tool.prepare_mcp_result(raw_result)
 
+    assert isinstance(raw_result, ResourceLink)
     assert isinstance(result, CallToolResult)
-    assert result.content[0].type == "image"
-    assert result.meta is not None
-    assert result.meta["serena/media"]["mimeType"] == "image/png"
-    assert tool.get_mcp_tool_meta() == {
-        "ui": {"resourceUri": MEDIA_VIEWER_URI},
-        "openai/outputTemplate": MEDIA_VIEWER_URI,
-    }
+    assert result.content == [raw_result]
+    assert result.structuredContent is None
+    assert raw_result.name == "notes.txt"
+    assert raw_result.mimeType == "text/plain"
+    assert raw_result.size == len(data)
+    assert get_result_file_link(raw_result) == raw_result
+
+    output_schema = DownloadFileTool.get_apply_fn_metadata_from_cls().output_schema
+    assert output_schema is None
+    assert DownloadFileTool.get_mcp_tool_meta() is None
+
+
+def test_download_file_rejects_path_outside_project(project: Project) -> None:
+    with pytest.raises(ValueError):
+        _make_tool(DownloadFileTool, project).apply("../outside.txt")
+
+
+def test_upload_file_writes_chatgpt_file_inside_project(project: Project, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    data = b"edited in chat\n"
+
+    class FakeResponse:
+        is_redirect = False
+        is_permanent_redirect = False
+        headers = {"Content-Length": str(len(data))}
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def iter_content(chunk_size: int):
+            del chunk_size
+            yield data
+
+        @staticmethod
+        def close() -> None:
+            return None
+
+    monkeypatch.setattr(
+        "serena.tools.media_tools.socket.getaddrinfo",
+        lambda *args, **kwargs: [(None, None, None, None, ("1.1.1.1", 443))],
+    )
+    monkeypatch.setattr(requests.Session, "get", lambda self, *args, **kwargs: FakeResponse())
+
+    tool = _make_tool(UploadFileTool, project)
+    source = OpenAIFile(
+        download_url="https://files.example.test/file",
+        file_id="file_test",
+        mime_type="text/plain",
+        file_name="edited.txt",
+    )
+
+    result = tool.apply(source, "incoming/edited.txt")
+
+    assert (tmp_path / "incoming" / "edited.txt").read_bytes() == data
+    assert "Uploaded edited.txt" in result
+    assert tool.get_mcp_tool_meta() == {"openai/fileParams": ["file"]}
+
+    with pytest.raises(FileExistsError):
+        tool.apply(source, "incoming/edited.txt")
 
 
 def test_fetch_media_file_rejects_non_media(project: Project, tmp_path: Path) -> None:
     (tmp_path / "notes.txt").write_text("not media")
 
-    with pytest.raises(ValueError, match="Unsupported media type"):
+    with pytest.raises(ValueError, match="use download_file"):
         _make_tool(FetchMediaFileTool, project).apply("notes.txt")
 
 
@@ -103,10 +169,18 @@ def test_fetch_media_file_rejects_path_outside_project(project: Project) -> None
 @pytest.mark.skipif(shutil.which("pdftoppm") is None, reason="Poppler is not installed")
 def test_render_pdf_page_returns_native_mcp_image(project: Project, tmp_path: Path) -> None:
     _write_minimal_pdf(tmp_path / "one-page.pdf")
+    tool = _make_tool(RenderPdfPageTool, project)
 
-    result = _make_tool(RenderPdfPageTool, project).apply("one-page.pdf", page=1, dpi=72)
+    result = tool.prepare_mcp_result(tool.apply("one-page.pdf", page=1, dpi=72))
 
-    assert isinstance(result, Image)
+    assert isinstance(result, CallToolResult)
+    assert result.content[0].type == "image"
+    assert result.content[0].mimeType == "image/png"
+    assert base64.b64decode(result.content[0].data).startswith(b"\x89PNG\r\n\x1a\n")
+    assert result.content[1].type == "resource_link"
+    assert result.content[1].mimeType == result.content[0].mimeType
+    assert result.content[2].type == "text"
+    assert "Markdown image syntax" in result.content[2].text
 
 
 def test_render_pdf_page_bounds_resolution(project: Project, tmp_path: Path) -> None:

@@ -14,6 +14,7 @@ from mcp.server.fastmcp import Audio, Image
 
 from serena.jobs import JobManager, JobStatus
 from serena.task_executor import TaskExecutor
+from serena.tools.media_tools import get_result_file_link, get_result_media, read_result_file_link
 from serena.util.logging import MemoryLogHandler
 
 if TYPE_CHECKING:
@@ -39,11 +40,12 @@ def _bounded(value: str) -> str:
 
 @dataclass(frozen=True)
 class DashboardMediaContent:
-    """Binary media returned by one completed Serena tool execution."""
+    """Binary media or file content returned by one completed Serena tool execution."""
 
     data: bytes
     mime_type: str
     media_type: str
+    file_name: str | None = None
 
 
 class DashboardExecutionHistory:
@@ -81,16 +83,32 @@ class DashboardExecutionHistory:
 
     @staticmethod
     def _media_descriptor(task_info: TaskExecutor.TaskInfo) -> dict[str, str] | None:
-        """Returns lightweight media metadata without materialising binary content."""
+        """Returns lightweight artifact metadata without materialising binary content."""
         if not task_info.finished_successfully():
             return None
 
         result = task_info.future.result()
-        if isinstance(result, Image):
-            return {"type": "image"}
-        if isinstance(result, Audio):
-            return {"type": "audio"}
-        return None
+        media = get_result_media(result)
+        file_link = get_result_file_link(result)
+        if isinstance(media, Image):
+            descriptor = {"type": "image"}
+        elif isinstance(media, Audio):
+            descriptor = {"type": "audio"}
+        elif file_link is not None:
+            mime_type = file_link.mimeType or "application/octet-stream"
+            if mime_type.startswith("image/"):
+                descriptor = {"type": "image"}
+            elif mime_type.startswith("audio/"):
+                descriptor = {"type": "audio"}
+            else:
+                descriptor = {"type": "file"}
+        else:
+            return None
+
+        if file_link is not None:
+            descriptor["name"] = file_link.name
+            descriptor["mime_type"] = file_link.mimeType or "application/octet-stream"
+        return descriptor
 
     def _find_task_info(self, task_id: int) -> TaskExecutor.TaskInfo:
         """Returns one retained task execution by its session-local identifier."""
@@ -154,23 +172,45 @@ class DashboardExecutionHistory:
             self._completed.append(task_info)
 
     def get_media(self, task_id: int) -> DashboardMediaContent:
-        """Returns native media from one successful retained tool execution."""
+        """Returns media or transferable file content from one successful retained tool execution."""
         task_info = self._find_task_info(task_id)
         if not task_info.finished_successfully():
             raise ValueError(f"Tool execution {task_id} has no completed media result")
 
         result = task_info.future.result()
-        if isinstance(result, Image):
-            content = result.to_image_content()
-        elif isinstance(result, Audio):
-            content = result.to_audio_content()
-        else:
-            raise ValueError(f"Tool execution {task_id} did not return media")
+        media = get_result_media(result)
+        file_link = get_result_file_link(result)
+        if isinstance(media, Image):
+            content = media.to_image_content()
+            return DashboardMediaContent(
+                data=base64.b64decode(content.data, validate=True),
+                mime_type=content.mimeType,
+                media_type=content.type,
+                file_name=file_link.name if file_link is not None else None,
+            )
+        if isinstance(media, Audio):
+            content = media.to_audio_content()
+            return DashboardMediaContent(
+                data=base64.b64decode(content.data, validate=True),
+                mime_type=content.mimeType,
+                media_type=content.type,
+                file_name=file_link.name if file_link is not None else None,
+            )
+        if file_link is None:
+            raise ValueError(f"Tool execution {task_id} did not return media or a file")
 
+        mime_type = file_link.mimeType or "application/octet-stream"
+        if mime_type.startswith("image/"):
+            media_type = "image"
+        elif mime_type.startswith("audio/"):
+            media_type = "audio"
+        else:
+            media_type = "file"
         return DashboardMediaContent(
-            data=base64.b64decode(content.data, validate=True),
-            mime_type=content.mimeType,
-            media_type=content.type,
+            data=read_result_file_link(file_link),
+            mime_type=mime_type,
+            media_type=media_type,
+            file_name=file_link.name,
         )
 
     def get_executions(self) -> dict[str, Any]:
