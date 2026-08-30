@@ -1,5 +1,7 @@
 import base64
 import shutil
+import stat
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -10,7 +12,7 @@ from mcp.types import CallToolResult, ResourceLink
 from serena.config.serena_config import SerenaConfig
 from serena.project import Project
 from serena.tools import DownloadFileTool, FetchMediaFileTool, RenderPdfPageTool, UploadFileTool
-from serena.tools.media_tools import OpenAIFile, get_result_file_link
+from serena.tools.media_tools import OpenAIFile, get_result_file_link, read_result_file_link
 
 _ONE_PIXEL_PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
 
@@ -61,8 +63,7 @@ def test_fetch_media_file_returns_native_mcp_image(project: Project, tmp_path: P
     assert base64.b64decode(result.content[0].data) == _ONE_PIXEL_PNG
     assert result.content[1].type == "resource_link"
     assert result.content[1].mimeType == result.content[0].mimeType
-    assert result.content[2].type == "text"
-    assert "Markdown image syntax" in result.content[2].text
+    assert len(result.content) == 2
 
 
 def test_fetch_media_file_preserves_svg_mime_type(project: Project, tmp_path: Path) -> None:
@@ -78,8 +79,7 @@ def test_fetch_media_file_preserves_svg_mime_type(project: Project, tmp_path: Pa
     assert base64.b64decode(result.content[0].data) == svg
     assert result.content[1].type == "resource_link"
     assert result.content[1].mimeType == result.content[0].mimeType
-    assert result.content[2].type == "text"
-    assert "Markdown image syntax" in result.content[2].text
+    assert len(result.content) == 2
 
 
 def test_download_file_returns_resource_link(project: Project, tmp_path: Path) -> None:
@@ -102,6 +102,17 @@ def test_download_file_returns_resource_link(project: Project, tmp_path: Path) -
     output_schema = DownloadFileTool.get_apply_fn_metadata_from_cls().output_schema
     assert output_schema is None
     assert DownloadFileTool.get_mcp_tool_meta() is None
+
+
+def test_download_file_is_snapshot_of_invocation_time(project: Project, tmp_path: Path) -> None:
+    original = b"original bytes\n"
+    source = tmp_path / "notes.txt"
+    source.write_bytes(original)
+    link = _make_tool(DownloadFileTool, project).apply("notes.txt")
+
+    source.write_bytes(b"changed after export\n")
+
+    assert read_result_file_link(link) == original
 
 
 def test_download_file_rejects_path_outside_project(project: Project) -> None:
@@ -143,15 +154,58 @@ def test_upload_file_writes_chatgpt_file_inside_project(project: Project, tmp_pa
         mime_type="text/plain",
         file_name="edited.txt",
     )
+    mode_reference = tmp_path / "mode-reference.txt"
+    mode_reference.write_bytes(b"")
+    expected_new_mode = stat.S_IMODE(mode_reference.stat().st_mode)
 
     result = tool.apply(source, "incoming/edited.txt")
+    destination = tmp_path / "incoming" / "edited.txt"
 
-    assert (tmp_path / "incoming" / "edited.txt").read_bytes() == data
+    assert destination.read_bytes() == data
+    assert stat.S_IMODE(destination.stat().st_mode) == expected_new_mode
     assert "Uploaded edited.txt" in result
     assert tool.get_mcp_tool_meta() == {"openai/fileParams": ["file"]}
 
     with pytest.raises(FileExistsError):
         tool.apply(source, "incoming/edited.txt")
+
+    destination.chmod(0o751)
+    tool.apply(source, "incoming/edited.txt", overwrite=True)
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o751
+
+
+def test_upload_file_enforces_total_transfer_timeout(project: Project, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeResponse:
+        is_redirect = False
+        is_permanent_redirect = False
+        headers = {"Content-Length": "1"}
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def iter_content(chunk_size: int):
+            del chunk_size
+            yield b"x"
+
+        @staticmethod
+        def close() -> None:
+            return None
+
+    monkeypatch.setattr(
+        "serena.tools.media_tools.socket.getaddrinfo",
+        lambda *args, **kwargs: [(None, None, None, None, ("1.1.1.1", 443))],
+    )
+    monkeypatch.setattr(requests.Session, "get", lambda self, *args, **kwargs: FakeResponse())
+    times = iter([0.0, 0.0, 121.0])
+    monkeypatch.setattr("serena.tools.media_tools.time.monotonic", lambda: next(times))
+
+    source = OpenAIFile(download_url="https://files.example.test/file", file_id="file_test")
+    with pytest.raises(TimeoutError, match="120 seconds"):
+        _make_tool(UploadFileTool, project).apply(source, "incoming/slow.txt")
+
+    assert not (tmp_path / "incoming" / "slow.txt").exists()
 
 
 def test_fetch_media_file_rejects_non_media(project: Project, tmp_path: Path) -> None:
@@ -179,8 +233,25 @@ def test_render_pdf_page_returns_native_mcp_image(project: Project, tmp_path: Pa
     assert base64.b64decode(result.content[0].data).startswith(b"\x89PNG\r\n\x1a\n")
     assert result.content[1].type == "resource_link"
     assert result.content[1].mimeType == result.content[0].mimeType
-    assert result.content[2].type == "text"
-    assert "Markdown image syntax" in result.content[2].text
+    assert read_result_file_link(result.content[1]).startswith(b"\x89PNG\r\n\x1a\n")
+    assert len(result.content) == 2
+    assert not (tmp_path / ".serena" / "chat_renders").exists()
+
+
+def test_render_pdf_page_enforces_wall_clock_timeout(project: Project, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_minimal_pdf(tmp_path / "one-page.pdf")
+    monkeypatch.setattr("serena.tools.media_tools.shutil.which", lambda executable: "/usr/bin/pdftoppm")
+
+    def timeout_run(*args, **kwargs):
+        del args, kwargs
+        raise subprocess.TimeoutExpired(cmd="pdftoppm", timeout=30)
+
+    monkeypatch.setattr("serena.tools.media_tools.subprocess.run", timeout_run)
+
+    with pytest.raises(RuntimeError, match="30 seconds"):
+        _make_tool(RenderPdfPageTool, project).apply("one-page.pdf", page=1, dpi=72)
+
+    assert not (tmp_path / ".serena" / "chat_renders").exists()
 
 
 def test_render_pdf_page_bounds_resolution(project: Project, tmp_path: Path) -> None:
