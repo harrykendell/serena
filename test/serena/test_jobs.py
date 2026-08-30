@@ -170,6 +170,19 @@ def test_start_requires_distinctive_nonempty_label(tmp_path: Path) -> None:
         manager.start_job("echo hello", str(tmp_path), label="  ")
 
 
+def test_activity_owner_token_is_persisted_with_job_metadata(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    manager = JobManager(store=JobStore(jobs_dir), backend=FakeJobBackend())
+    record, _ = manager.start_job("echo hello", str(tmp_path), label="owned job")
+    owner_token = "ab" * 32
+
+    updated = manager.set_activity_owner(record.job_id, owner_token)
+    recovered = JobStore(jobs_dir).read(record.job_id)
+
+    assert updated.activity_owner_token == owner_token
+    assert recovered.activity_owner_token == owner_token
+
+
 def test_failed_start_becomes_terminal_and_removes_private_command(tmp_path: Path) -> None:
     jobs_dir = tmp_path / "jobs"
     manager = JobManager(store=JobStore(jobs_dir), backend=FailingJobBackend())

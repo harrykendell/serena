@@ -161,7 +161,7 @@ class SerenaFastMCPTool(FastMCPTool):
             raise
 
         if self._activity_tracker is not None:
-            self._activity_tracker.finish_tool(call_id, succeeded=True)
+            self._activity_tracker.finish_tool(call_id, succeeded=True, result=result)
         return result
 
 
