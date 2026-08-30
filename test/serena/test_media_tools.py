@@ -1,7 +1,9 @@
 import base64
+import os
 import shutil
 import stat
 import subprocess
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -24,7 +26,8 @@ def _make_tool(tool_cls, project: Project):
 
 
 @pytest.fixture
-def project(tmp_path: Path) -> Project:
+def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Project:
+    monkeypatch.setenv("SERENA_HOME", str(tmp_path / ".serena-home"))
     return Project.load(str(tmp_path), serena_config=SerenaConfig(gui_log_window=False, web_dashboard=False))
 
 
@@ -61,9 +64,11 @@ def test_fetch_media_file_returns_native_mcp_image(project: Project, tmp_path: P
     assert result.content[0].type == "image"
     assert result.content[0].mimeType == "image/png"
     assert base64.b64decode(result.content[0].data) == _ONE_PIXEL_PNG
+    assert result.content[0].annotations is None
     assert result.content[1].type == "resource_link"
-    assert result.content[1].mimeType == result.content[0].mimeType
-    assert len(result.content) == 2
+    assert result.content[2].type == "text"
+    assert "embed the materialized file" in result.content[2].text
+    assert len(result.content) == 3
 
 
 def test_fetch_media_file_preserves_svg_mime_type(project: Project, tmp_path: Path) -> None:
@@ -77,9 +82,11 @@ def test_fetch_media_file_preserves_svg_mime_type(project: Project, tmp_path: Pa
     assert result.content[0].type == "image"
     assert result.content[0].mimeType == "image/svg+xml"
     assert base64.b64decode(result.content[0].data) == svg
+    assert result.content[0].annotations is None
     assert result.content[1].type == "resource_link"
-    assert result.content[1].mimeType == result.content[0].mimeType
-    assert len(result.content) == 2
+    assert result.content[2].type == "text"
+    assert "embed the materialized file" in result.content[2].text
+    assert len(result.content) == 3
 
 
 def test_download_file_returns_resource_link(project: Project, tmp_path: Path) -> None:
@@ -113,6 +120,21 @@ def test_download_file_is_snapshot_of_invocation_time(project: Project, tmp_path
     source.write_bytes(b"changed after export\n")
 
     assert read_result_file_link(link) == original
+
+
+def test_download_file_snapshot_remains_readable_after_old_mtime(project: Project, tmp_path: Path) -> None:
+    data = b"persistent download bytes\n"
+    source = tmp_path / "report.pdf"
+    source.write_bytes(data)
+    link = _make_tool(DownloadFileTool, project).apply("report.pdf")
+
+    token = str(link.uri).rsplit("/", maxsplit=1)[1]
+    snapshot = tmp_path / ".serena-home" / "chat_file_snapshots" / token
+    old_timestamp = time.time() - 30 * 24 * 60 * 60
+    os.utime(snapshot, (old_timestamp, old_timestamp))
+    source.unlink()
+
+    assert read_result_file_link(link) == data
 
 
 def test_download_file_rejects_path_outside_project(project: Project) -> None:
@@ -225,16 +247,21 @@ def test_render_pdf_page_returns_native_mcp_image(project: Project, tmp_path: Pa
     _write_minimal_pdf(tmp_path / "one-page.pdf")
     tool = _make_tool(RenderPdfPageTool, project)
 
-    result = tool.prepare_mcp_result(tool.apply("one-page.pdf", page=1, dpi=72))
+    raw_result = tool.apply("one-page.pdf", page=1, dpi=72)
+    result = tool.prepare_mcp_result(raw_result)
 
     assert isinstance(result, CallToolResult)
     assert result.content[0].type == "image"
     assert result.content[0].mimeType == "image/png"
     assert base64.b64decode(result.content[0].data).startswith(b"\x89PNG\r\n\x1a\n")
+    assert result.content[0].annotations is None
     assert result.content[1].type == "resource_link"
-    assert result.content[1].mimeType == result.content[0].mimeType
-    assert read_result_file_link(result.content[1]).startswith(b"\x89PNG\r\n\x1a\n")
-    assert len(result.content) == 2
+    assert result.content[2].type == "text"
+    assert "embed the materialized file" in result.content[2].text
+    assert len(result.content) == 3
+    file_link = get_result_file_link(raw_result)
+    assert file_link is not None
+    assert read_result_file_link(file_link).startswith(b"\x89PNG\r\n\x1a\n")
     assert not (tmp_path / ".serena" / "chat_renders").exists()
 
 

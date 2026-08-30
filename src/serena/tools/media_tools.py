@@ -19,7 +19,7 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 from mcp.server.fastmcp import Audio, FastMCP, Image
-from mcp.types import CallToolResult, ResourceLink
+from mcp.types import CallToolResult, ContentBlock, ResourceLink, TextContent
 from pydantic import AnyUrl, BaseModel, ConfigDict
 
 from serena.tools.tools_base import Tool, ToolMarkerCanEdit, ToolMarkerOptional
@@ -41,44 +41,73 @@ class OpenAIFile(BaseModel):
 
 @dataclass(frozen=True, kw_only=True)
 class _FileSnapshot:
-    """Represents one immutable file snapshot retained in temporary storage."""
+    """Represents one immutable file snapshot retained in private Serena storage."""
 
     path: Path
     link: ResourceLink
 
 
-class _TemporaryFileStore:
-    """Owns short-lived immutable snapshots used by ChatGPT file resources."""
+class _FileSnapshotStore:
+    """Owns immutable snapshots backing ChatGPT file resources.
 
-    _MAX_AGE_SECONDS = 24 * 60 * 60
+    Snapshots are kept in Serena's persistent user-data directory rather than the
+    system temporary directory. This lets a chat reopen an exported file after an
+    MCP restart or temporary-directory cleanup. Storage remains bounded by evicting
+    least-recently-used snapshots only when new snapshots are created.
+    """
+
     _TOKEN_BYTES = 24
+    _MAX_TOTAL_SIZE = 2 * 1024 * 1024 * 1024
+    _MAX_SNAPSHOTS = 2048
     _LOCK: ClassVar[threading.Lock] = threading.Lock()
 
     @classmethod
     def _root(cls) -> Path:
-        """Returns the private system-temporary directory used for snapshots."""
-        root = Path(tempfile.gettempdir(), f"serena-chat-files-{os.getuid()}")
+        """Returns the private persistent directory used for file snapshots."""
+        configured_home = os.getenv("SERENA_HOME", "").strip()
+        serena_home = Path(configured_home).expanduser() if configured_home else Path.home() / ".serena"
+        root = serena_home / "chat_file_snapshots"
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         if root.is_symlink() or not root.is_dir():
-            raise RuntimeError("Serena temporary file store is not a private directory")
+            raise RuntimeError("Serena file snapshot store is not a private directory")
         if stat.S_IMODE(root.stat().st_mode) != 0o700:
             root.chmod(0o700)
         return root
 
     @classmethod
-    def _prune(cls, root: Path) -> None:
-        """Removes snapshots that have not been used within the retention window."""
-        cutoff = time.time() - cls._MAX_AGE_SECONDS
+    def _legacy_root(cls) -> Path:
+        """Returns the former temporary snapshot directory for compatibility reads."""
+        return Path(tempfile.gettempdir(), f"serena-chat-files-{os.getuid()}")
+
+    @classmethod
+    def _prune(cls, root: Path, incoming_size: int) -> None:
+        """Evicts least-recently-used snapshots until a new snapshot fits within bounds."""
+        snapshots: list[tuple[Path, os.stat_result]] = []
+        total_size = 0
         for path in root.iterdir():
+            if path.name.startswith("."):
+                continue
             try:
-                if path.is_file() and path.stat().st_mtime < cutoff:
-                    path.unlink()
+                file_stat = path.stat()
             except FileNotFoundError:
                 continue
+            if not stat.S_ISREG(file_stat.st_mode):
+                continue
+            snapshots.append((path, file_stat))
+            total_size += file_stat.st_size
+
+        snapshots.sort(key=lambda item: item[1].st_mtime)
+        while snapshots and (len(snapshots) >= cls._MAX_SNAPSHOTS or total_size + incoming_size > cls._MAX_TOTAL_SIZE):
+            path, file_stat = snapshots.pop(0)
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            total_size -= file_stat.st_size
 
     @classmethod
     def _validate_token(cls, token: str) -> None:
-        """Rejects tokens that cannot name one snapshot in the temporary store."""
+        """Rejects tokens that cannot name one snapshot in the private store."""
         if len(token) != cls._TOKEN_BYTES * 2:
             raise ValueError("Invalid Serena file resource")
         try:
@@ -92,10 +121,10 @@ class _TemporaryFileStore:
         source_path: Path,
         *,
         display_name: str | None = None,
-        description: str = "Temporary file snapshot exported by Serena",
+        description: str = "Immutable file snapshot exported by Serena",
         max_size: int = _FILE_EXPORT_MAX_SIZE,
     ) -> _FileSnapshot:
-        """Copies one file into temporary storage and returns its immutable resource link."""
+        """Copies one file into persistent private storage and returns its immutable resource link."""
         if not source_path.is_file():
             raise FileNotFoundError(f"File does not exist: {source_path}")
 
@@ -109,7 +138,7 @@ class _TemporaryFileStore:
 
         with cls._LOCK:
             root = cls._root()
-            cls._prune(root)
+            cls._prune(root, size)
             snapshot_path = root / token
             temporary_path = root / f".{token}.tmp"
 
@@ -141,7 +170,7 @@ class _TemporaryFileStore:
 
     @classmethod
     def snapshot_project_file(cls, project, relative_path: str) -> _FileSnapshot:
-        """Snapshots one confined project file into temporary storage."""
+        """Snapshots one confined project file into persistent private storage."""
         project.validate_relative_path(relative_path)
         path = Path(project.project_root, relative_path)
         return cls.snapshot(
@@ -151,15 +180,33 @@ class _TemporaryFileStore:
         )
 
     @classmethod
+    def _migrate_legacy_snapshot(cls, token: str, destination: Path) -> bool:
+        """Copies one still-present legacy temporary snapshot into persistent storage."""
+        legacy_path = cls._legacy_root() / token
+        if not legacy_path.is_file():
+            return False
+        if legacy_path.stat().st_size > _FILE_EXPORT_MAX_SIZE:
+            raise ValueError(f"File exceeds the {_FILE_EXPORT_MAX_SIZE // (1024 * 1024)} MiB export limit")
+
+        temporary_path = destination.parent / f".{token}.legacy.tmp"
+        try:
+            shutil.copyfile(legacy_path, temporary_path)
+            temporary_path.chmod(0o600)
+            os.replace(temporary_path, destination)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+        legacy_path.unlink(missing_ok=True)
+        return True
+
+    @classmethod
     def read(cls, token: str) -> bytes:
-        """Reads one temporary snapshot identified by an opaque resource token."""
+        """Reads one persistent snapshot identified by an opaque resource token."""
         cls._validate_token(token)
         with cls._LOCK:
             root = cls._root()
-            cls._prune(root)
             path = root / token
-            if not path.is_file():
-                raise FileNotFoundError("Serena file snapshot has expired or no longer exists")
+            if not path.is_file() and not cls._migrate_legacy_snapshot(token, path):
+                raise FileNotFoundError("Serena file snapshot no longer exists")
             if path.stat().st_size > _FILE_EXPORT_MAX_SIZE:
                 raise ValueError(f"File exceeds the {_FILE_EXPORT_MAX_SIZE // (1024 * 1024)} MiB export limit")
             data = path.read_bytes()
@@ -168,16 +215,16 @@ class _TemporaryFileStore:
 
 
 def register_file_export_resource(mcp: FastMCP) -> None:
-    """Registers the binary resource used to read temporary file snapshots."""
+    """Registers the binary resource used to read immutable file snapshots."""
 
     @mcp.resource(
         _FILE_RESOURCE_URI_TEMPLATE,
         name="Serena exported file snapshot",
-        description="Reads a short-lived immutable file snapshot exported by Serena.",
+        description="Reads an immutable file snapshot exported by Serena.",
         mime_type="application/octet-stream",
     )
     def read_exported_file(token: str) -> bytes:
-        return _TemporaryFileStore.read(token)
+        return _FileSnapshotStore.read(token)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -212,11 +259,11 @@ def read_result_file_link(link: ResourceLink) -> bytes:
     prefix = _FILE_RESOURCE_URI_TEMPLATE.split("{token}", 1)[0]
     if not uri.startswith(prefix):
         raise ValueError("Resource link is not a Serena exported project file")
-    return _TemporaryFileStore.read(uri.removeprefix(prefix))
+    return _FileSnapshotStore.read(uri.removeprefix(prefix))
 
 
 class _McpMediaTool(Tool, ToolMarkerOptional):
-    """Base for tools returning native media with a transferable snapshot link."""
+    """Base for tools returning native media for direct user-visible presentation."""
 
     @classmethod
     def get_apply_fn_metadata_from_cls(cls, structured_output: bool | None = None):
@@ -224,7 +271,7 @@ class _McpMediaTool(Tool, ToolMarkerOptional):
         return super().get_apply_fn_metadata_from_cls(structured_output=False)
 
     def prepare_mcp_result(self, result: object) -> CallToolResult:
-        """Returns native media plus the same snapshot as a transferable resource link."""
+        """Returns native media plus the same file as a transferable resource link."""
         if isinstance(result, ResourceLink):
             return CallToolResult(content=[result])
         if not isinstance(result, _NativeMediaResult):
@@ -233,12 +280,23 @@ class _McpMediaTool(Tool, ToolMarkerOptional):
         media = result.media
         if isinstance(media, Image):
             media_content = media.to_image_content()
+            display_hint = TextContent(
+                type="text",
+                text=(
+                    "If showing this image is relevant to the user's request, embed the materialized file in the assistant "
+                    "response using normal Markdown image syntax."
+                ),
+            )
         elif isinstance(media, Audio):
             media_content = media.to_audio_content()
+            display_hint = None
         else:
             raise TypeError(f"Unexpected MCP media result: {type(media).__name__}")
 
-        return CallToolResult(content=[media_content, result.file_link])
+        content: list[ContentBlock] = [media_content, result.file_link]
+        if display_hint is not None:
+            content.append(display_hint)
+        return CallToolResult(content=content)
 
 
 class DownloadFileTool(Tool, ToolMarkerOptional):
@@ -259,7 +317,7 @@ class DownloadFileTool(Tool, ToolMarkerOptional):
         :param relative_path: project-relative path to the file
         :return: standard MCP resource link for the exported file
         """
-        return _TemporaryFileStore.snapshot_project_file(self.project, relative_path).link
+        return _FileSnapshotStore.snapshot_project_file(self.project, relative_path).link
 
     def prepare_mcp_result(self, result: object) -> CallToolResult:
         """Returns the exported project file as a standard MCP resource link."""
@@ -421,10 +479,12 @@ class FetchMediaFileTool(_McpMediaTool):
     _MAX_FILE_SIZE = 25 * 1024 * 1024
 
     def apply(self, relative_path: str) -> _NativeMediaResult:
-        """Returns one project media file as native content backed by a temporary snapshot.
+        """Returns one project image or audio file as native MCP media for inline presentation.
+
+        Use :class:`DownloadFileTool` separately when the original file is also needed as a download.
 
         :param relative_path: project-relative path to the media file
-        :return: native media with a transferable snapshot link
+        :return: native media prepared for direct user-visible presentation
         """
         self.project.validate_relative_path(relative_path)
         path = Path(self.get_project_root(), relative_path)
@@ -437,7 +497,7 @@ class FetchMediaFileTool(_McpMediaTool):
         if mime_type is not None:
             media_type, _, media_format = mime_type.partition("/")
             if media_type in {"image", "audio"}:
-                snapshot = _TemporaryFileStore.snapshot(
+                snapshot = _FileSnapshotStore.snapshot(
                     path,
                     display_name=path.name,
                     description=f"Media exported from Serena project {self.project.project_name}",
@@ -458,12 +518,14 @@ class RenderPdfPageTool(_McpMediaTool):
     _MAX_RENDERED_FILE_SIZE = 25 * 1024 * 1024
 
     def apply(self, relative_path: str, page: int, dpi: int = 150) -> _NativeMediaResult:
-        """Renders one PDF page into a temporary transferable snapshot.
+        """Renders one PDF page as native MCP image media for inline presentation.
+
+        Use :class:`DownloadFileTool` separately when the source PDF is also needed as a download.
 
         :param relative_path: project-relative path to the PDF file
         :param page: 1-based page number to render
         :param dpi: rendering resolution in dots per inch, from 72 through 300
-        :return: rendered PNG as native media with a transferable snapshot link
+        :return: rendered PNG prepared for direct user-visible presentation
         """
         self.project.validate_relative_path(relative_path)
         path = Path(self.get_project_root(), relative_path)
@@ -515,7 +577,7 @@ class RenderPdfPageTool(_McpMediaTool):
                 raise RuntimeError(f"PDF page {page} does not exist or could not be rendered")
 
             display_name = f"{path.stem}-p{page}-{dpi}dpi.png"
-            snapshot = _TemporaryFileStore.snapshot(
+            snapshot = _FileSnapshotStore.snapshot(
                 temporary_output,
                 display_name=display_name,
                 description=f"PDF page rendered from Serena project {self.project.project_name}",
