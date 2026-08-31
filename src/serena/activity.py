@@ -1,4 +1,3 @@
-import hashlib
 import json
 import threading
 import time
@@ -12,10 +11,10 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from serena.jobs import JobManager, JobRecord, JobStatus
 
-ACTIVITY_RESOURCE_URI = "ui://serena/activity-v2.html"
+ACTIVITY_RESOURCE_URI = "ui://serena/activity-v14.html"
 _ACTIVITY_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
 _MAX_RUNS = 32
-_MAX_CALLS_PER_RUN = 512
+_MAX_CALLS_PER_RUN = 100
 _DETAIL_KEYS = (
     "command",
     "project",
@@ -55,13 +54,15 @@ class ActivityCall:
     tool_name: str
     detail: str
     started_at: float
+    arguments: str = field(default="{}", repr=False)
     finished_at: float | None = None
     status: str = "running"
+    result: str | None = field(default=None, repr=False)
     job_id: str | None = None
     job_label: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        """Serializes the call for the activity widget."""
+        """Serializes the lightweight call state used by the activity widget."""
         payload: dict[str, Any] = {
             "call_id": self.call_id,
             "tool_name": self.tool_name,
@@ -90,7 +91,7 @@ class ActivityRun:
     superseded: bool = False
 
     def as_dict(self) -> dict[str, Any]:
-        """Serializes the run-local state for the activity widget."""
+        """Serializes the run-local state used by the activity widget."""
         return {
             "run_id": self.run_id,
             "project_name": self.project_name,
@@ -101,216 +102,154 @@ class ActivityRun:
 
 
 class ActivityJobSource(Protocol):
-    """Provides retained durable-job metadata and activity ownership persistence."""
+    """Provides retained durable-job metadata for the activity panel."""
 
     def list_jobs(self, limit: int = 20) -> list[JobRecord]:
         """Returns running jobs followed by recent terminal jobs."""
         ...
 
-    def set_activity_owner(self, job_id: str, owner_token: str) -> JobRecord:
-        """Persists the opaque activity owner token for one durable job."""
-        ...
-
-
-@dataclass(frozen=True)
-class _ActiveToolInvocation:
-    """One currently executing Serena tool, including calls outside an activity panel."""
-
-    session_id: str
-    run_id: str | None
-    call: ActivityCall
-
 
 class ActivityTracker:
-    """Tracks Serena activity per ChatGPT conversation and reconciles durable jobs."""
+    """Tracks Serena tool activity and lightweight durable-job state per ChatGPT conversation."""
 
-    _MAX_JOBS_PER_SESSION = 256
     _JOB_LIST_LIMIT = 100
+    _JOB_CACHE_SECONDS = 2.0
 
     def __init__(self, job_source: ActivityJobSource | None = None) -> None:
         self._lock = threading.RLock()
         self._runs: OrderedDict[str, ActivityRun] = OrderedDict()
         self._current_run_by_session: dict[str, str] = {}
-        self._active_tools: dict[str, _ActiveToolInvocation] = {}
-        self._job_ids_by_session: dict[str, OrderedDict[str, None]] = {}
         self._job_source = job_source or JobManager()
+        self._job_cache_at = 0.0
+        self._job_cache: list[JobRecord] = []
 
     def start_run(self, session_id: str, project_name: str) -> dict[str, Any]:
-        """Starts a new activity run with run-local history.
+        """Starts a new activity run for ``session_id`` and returns its initial snapshot.
 
-        Durable jobs are reconciled in :meth:`get_run`; only jobs running while this
-        panel is active are backfilled into its history. Any tool already running in
-        this chat is attached immediately so the new panel does not miss it.
+        Any tool still running in the superseded panel is carried into the new run so
+        opening another activity panel cannot orphan its live state.
         """
         with self._lock:
             previous_run_id = self._current_run_by_session.get(session_id)
-            if previous_run_id is not None and previous_run_id in self._runs:
-                self._runs[previous_run_id].superseded = True
+            previous_run = self._runs.get(previous_run_id) if previous_run_id is not None else None
+            continuing_calls: list[ActivityCall] = []
+            if previous_run is not None:
+                previous_run.superseded = True
+                continuing_calls = [call for call in previous_run.calls if call.status == "running"]
 
             run = ActivityRun(
                 run_id=uuid.uuid4().hex,
                 session_id=session_id,
                 project_name=project_name,
                 started_at=time.time(),
+                calls=continuing_calls,
             )
             self._runs[run.run_id] = run
             self._current_run_by_session[session_id] = run.run_id
-
-            for call_id, invocation in list(self._active_tools.items()):
-                if invocation.session_id != session_id:
-                    continue
-                run.calls.append(invocation.call)
-                self._active_tools[call_id] = _ActiveToolInvocation(
-                    session_id=invocation.session_id,
-                    run_id=run.run_id,
-                    call=invocation.call,
-                )
-
-            if len(run.calls) > _MAX_CALLS_PER_RUN:
-                del run.calls[: len(run.calls) - _MAX_CALLS_PER_RUN]
             self._prune_runs()
             run_id = run.run_id
 
         return self.get_run(session_id, run_id)
 
-    def start_tool(self, session_id: str, tool_name: str, arguments: dict[str, Any]) -> str:
-        """Records one tool invocation, including calls made outside an open activity panel."""
-        call = ActivityCall(
-            call_id=uuid.uuid4().hex,
-            tool_name=tool_name,
-            detail=self._summarize_arguments(arguments),
-            started_at=time.time(),
-        )
-
+    def start_tool(self, session_id: str, tool_name: str, arguments: dict[str, Any]) -> str | None:
+        """Records one tool invocation when an activity run is active for ``session_id``."""
         with self._lock:
             run_id = self._current_run_by_session.get(session_id)
             run = self._runs.get(run_id) if run_id is not None else None
+            if run is None:
+                return None
 
-            # retain a specific durable-job identifier so a successful status/cancel call can reclaim it
-            job_id = arguments.get("job_id")
-            if tool_name in {"job_status", "cancel_job"} and isinstance(job_id, str) and job_id:
-                call.job_id = job_id
-
-            if run is not None:
-                run.calls.append(call)
-                if len(run.calls) > _MAX_CALLS_PER_RUN:
-                    del run.calls[: len(run.calls) - _MAX_CALLS_PER_RUN]
-
-            self._active_tools[call.call_id] = _ActiveToolInvocation(
-                session_id=session_id,
-                run_id=run.run_id if run is not None else None,
-                call=call,
+            call = ActivityCall(
+                call_id=uuid.uuid4().hex,
+                tool_name=tool_name,
+                detail=self._summarize_arguments(arguments),
+                started_at=time.time(),
+                arguments=self._serialize_value(arguments),
             )
-        return call.call_id
+            run.calls.append(call)
+            if len(run.calls) > _MAX_CALLS_PER_RUN:
+                del run.calls[: len(run.calls) - _MAX_CALLS_PER_RUN]
+            return call.call_id
 
     def finish_tool(self, call_id: str | None, succeeded: bool, result: object | None = None) -> None:
-        """Marks a tool terminal and associates jobs dispatched by ``start_job`` with their chat."""
+        """Marks one tracked call terminal and associates any newly submitted durable job with its run."""
         if call_id is None:
             return
 
-        job_to_claim: str | None = None
-        owner_session: str | None = None
         with self._lock:
-            invocation = self._active_tools.pop(call_id, None)
-            if invocation is None:
-                return
+            for run in reversed(self._runs.values()):
+                for call in reversed(run.calls):
+                    if call.call_id != call_id:
+                        continue
 
-            call = invocation.call
-            call.status = "completed" if succeeded else "failed"
-            call.finished_at = time.time()
-
-            if succeeded and call.tool_name == "start_job":
-                job_id, label = self._extract_job_identity(result)
-                if job_id is not None:
-                    call.job_id = job_id
-                    call.job_label = label
-                    job_to_claim = job_id
-
-            if job_to_claim is not None:
-                run = self._runs.get(invocation.run_id) if invocation.run_id is not None else None
-                self._remember_job_locked(invocation.session_id, job_to_claim, run)
-                owner_session = invocation.session_id
-
-        if job_to_claim is not None and owner_session is not None:
-            self._claim_job_safely(job_to_claim, self._owner_token(owner_session))
+                    call.status = "completed" if succeeded else "failed"
+                    call.finished_at = time.time()
+                    call.result = self._serialize_value(result) if result is not None else None
+                    if succeeded and call.tool_name == "start_job":
+                        job_id, label = self._extract_job_identity(result)
+                        if job_id is not None:
+                            call.job_id = job_id
+                            call.job_label = label
+                            if job_id not in run.job_ids:
+                                run.job_ids.append(job_id)
+                            self._job_cache_at = 0.0
+                    return
 
     def get_run(self, session_id: str, run_id: str) -> dict[str, Any]:
-        """Returns one session-owned run enriched with durable jobs and global busy state."""
+        """Returns one session-owned run enriched with current-turn jobs and globally running jobs."""
         with self._lock:
             run = self._runs.get(run_id)
             if run is None or run.session_id != session_id:
                 raise ValueError("Activity run is not available in this session")
-
             payload = run.as_dict()
-            known_job_ids = set(self._job_ids_by_session.get(session_id, OrderedDict()).keys())
-            run_job_ids = set(run.job_ids)
-            active_this_chat = sum(invocation.session_id == session_id for invocation in self._active_tools.values())
-            active_elsewhere = len(self._active_tools) - active_this_chat
+            current_job_ids = set(run.job_ids)
 
         records = self._list_jobs_safely()
-        owner_token = self._owner_token(session_id)
-        persisted_running_ids = {
-            record.job_id for record in records if record.activity_owner_token == owner_token and record.status is JobStatus.RUNNING
-        }
-
-        newly_running_ids = persisted_running_ids - run_job_ids
-        if newly_running_ids:
-            with self._lock:
-                current_run = self._runs.get(run_id)
-                for job_id in newly_running_ids:
-                    self._remember_job_locked(session_id, job_id, current_run)
-                run_job_ids = set(current_run.job_ids) if current_run is not None else run_job_ids | newly_running_ids
-
-        visible_job_ids = run_job_ids
-        jobs = [self._job_payload(record) for record in records if record.job_id in visible_job_ids]
-        jobs.sort(key=lambda job: float(job["started_at"]))
-
-        running_job_ids = {record.job_id for record in records if record.status is JobStatus.RUNNING}
-        local_running_jobs = len(running_job_ids & (known_job_ids | persisted_running_ids))
-        other_running_jobs = len(running_job_ids - (known_job_ids | persisted_running_ids))
-
-        payload["jobs"] = jobs
-        payload["busy"] = {
-            "this_chat": bool(active_this_chat or local_running_jobs),
-            "elsewhere": bool(active_elsewhere or other_running_jobs),
-            "active_tools": active_this_chat,
-            "running_jobs": local_running_jobs,
-            "other_active_tools": active_elsewhere,
-            "other_running_jobs": other_running_jobs,
-        }
+        visible_records = [record for record in records if record.job_id in current_job_ids or record.status is JobStatus.RUNNING]
+        visible_records.sort(key=lambda record: record.created_at, reverse=True)
+        payload["jobs"] = [self._job_payload(record) | {"current_turn": record.job_id in current_job_ids} for record in visible_records]
         return payload
 
-    @staticmethod
-    def _owner_token(session_id: str) -> str:
-        """Returns a non-reversible token used to persist job ownership across Serena restarts."""
-        return hashlib.sha256(session_id.encode("utf-8")).hexdigest()
-
-    def _claim_job_safely(self, job_id: str, owner_token: str) -> None:
-        """Persists job ownership without allowing activity bookkeeping to fail a successful tool call."""
-        try:
-            self._job_source.set_activity_owner(job_id, owner_token)
-        except (OSError, RuntimeError, ValueError):
-            pass
-
-    def _remember_job_locked(self, session_id: str, job_id: str, run: ActivityRun | None) -> None:
-        """Associates one durable job with a chat and its current panel, preserving recency."""
-        jobs = self._job_ids_by_session.setdefault(session_id, OrderedDict())
-        jobs[job_id] = None
-        jobs.move_to_end(job_id)
-        while len(jobs) > self._MAX_JOBS_PER_SESSION:
-            jobs.popitem(last=False)
-
-        if run is not None and job_id not in run.job_ids:
-            run.job_ids.append(job_id)
-            if len(run.job_ids) > self._MAX_JOBS_PER_SESSION:
-                del run.job_ids[: len(run.job_ids) - self._MAX_JOBS_PER_SESSION]
+    def get_call_detail(self, session_id: str, run_id: str, call_id: str) -> dict[str, Any]:
+        """Returns bounded parameters and result detail for one call in a session-owned run."""
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None or run.session_id != session_id:
+                raise ValueError("Activity run is not available in this session")
+            for call in run.calls:
+                if call.call_id == call_id:
+                    return {
+                        "call_id": call.call_id,
+                        "tool_name": call.tool_name,
+                        "status": call.status,
+                        "arguments": call.arguments,
+                        "result": call.result,
+                    }
+        raise ValueError("Activity call is not available in this run")
 
     def _list_jobs_safely(self) -> list[JobRecord]:
-        """Returns retained jobs without making activity polling fail when the job backend is unavailable."""
+        """Returns cached durable-job metadata without allowing job-backend failures to break activity polling."""
+        now = time.monotonic()
+        with self._lock:
+            if self._job_cache and now - self._job_cache_at < self._JOB_CACHE_SECONDS:
+                return list(self._job_cache)
+
         try:
-            return self._job_source.list_jobs(limit=self._JOB_LIST_LIMIT)
+            records = self._job_source.list_jobs(limit=self._JOB_LIST_LIMIT)
         except (OSError, RuntimeError, ValueError):
             return []
+
+        with self._lock:
+            self._job_cache_at = now
+            self._job_cache = list(records)
+        return records
+
+    def _prune_runs(self) -> None:
+        """Bounds retained activity state while preserving current runs."""
+        while len(self._runs) > _MAX_RUNS:
+            run_id, run = self._runs.popitem(last=False)
+            if self._current_run_by_session.get(run.session_id) == run_id:
+                self._current_run_by_session.pop(run.session_id, None)
 
     @staticmethod
     def _job_payload(record: JobRecord) -> dict[str, Any]:
@@ -326,7 +265,7 @@ class ActivityTracker:
 
     @staticmethod
     def _extract_job_identity(result: object | None) -> tuple[str | None, str | None]:
-        """Extracts a durable job identifier from the normal ``start_job`` result shape."""
+        """Extracts a durable-job identifier from the normal ``start_job`` result shape."""
         payload: object = result
         if isinstance(payload, str):
             try:
@@ -374,12 +313,16 @@ class ActivityTracker:
             label if isinstance(label, str) and label else None,
         )
 
-    def _prune_runs(self) -> None:
-        """Bounds retained activity state while preserving current runs."""
-        while len(self._runs) > _MAX_RUNS:
-            run_id, run = self._runs.popitem(last=False)
-            if self._current_run_by_session.get(run.session_id) == run_id:
-                self._current_run_by_session.pop(run.session_id, None)
+    @staticmethod
+    def _serialize_value(value: object) -> str:
+        """Serializes bounded activity detail without making tool execution depend on display formatting."""
+        try:
+            text = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+        except (TypeError, ValueError):
+            text = str(value)
+        if len(text) <= 8000:
+            return text
+        return f"{text[:3900]}\n... detail omitted ...\n{text[-3900:]}"
 
     @staticmethod
     def _summarize_arguments(arguments: dict[str, Any]) -> str:
@@ -400,11 +343,11 @@ def register_activity_resource(mcp: FastMCP) -> None:
     @mcp.resource(
         ACTIVITY_RESOURCE_URI,
         name="Serena activity",
-        description="Compact live view of Serena tool calls and durable jobs associated with the current ChatGPT conversation.",
+        description="Compact live view of Serena tool calls with lightweight durable-job visibility.",
         mime_type=_ACTIVITY_RESOURCE_MIME_TYPE,
         meta={
             "ui": {"prefersBorder": True},
-            "openai/widgetDescription": "Shows Serena tool calls, durable jobs, and whether Serena is busy elsewhere.",
+            "openai/widgetDescription": "Shows Serena tool calls, current-turn jobs, and a compact indicator for other running jobs.",
         },
     )
     def activity_resource() -> str:
@@ -414,71 +357,95 @@ def register_activity_resource(mcp: FastMCP) -> None:
 def _activity_widget_html() -> str:
     """Returns the self-contained activity widget HTML."""
     return r"""
-<div id="serena-activity" class="activity collapsed">
-  <button id="activity-header" class="header" type="button" aria-expanded="false">
+<div id="serena-activity" class="activity">
+  <button id="activity-header" class="header" type="button" aria-expanded="true">
     <span class="title">
       <span id="activity-logo" class="logo" aria-hidden="true">
         <svg viewBox="0 0 256 256" focusable="false">
-          <rect x="24" y="24" width="208" height="208" rx="48" fill="none" stroke="currentColor" stroke-width="12"/>
-          <path d="M104 76 64 128l40 52M152 76l40 52-40 52" fill="none" stroke="currentColor" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M116 128h24" fill="none" stroke="currentColor" stroke-width="18" stroke-linecap="round"/>
-          <circle cx="128" cy="128" r="9" fill="currentColor"/>
+          <rect x="24" y="24" width="208" height="208" rx="48" fill="#ffffff" stroke="#00491e" stroke-width="12"/>
+          <path d="M104 76 64 128l40 52M152 76l40 52-40 52" fill="none" stroke="#00491e" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M116 128h24" fill="none" stroke="#00491e" stroke-width="18" stroke-linecap="round"/>
+          <circle cx="128" cy="128" r="9" fill="#00491e"/>
         </svg>
       </span>
-      <span class="latest-block">
-        <strong id="activity-latest">Waiting for activity</strong>
-        <span id="activity-latest-detail" class="latest-detail"></span>
+      <span class="header-tool">
+        <strong id="activity-header-tool">Waiting for activity</strong>
+        <span id="activity-header-detail" class="header-detail"></span>
       </span>
     </span>
-    <span id="activity-summary" class="summary"></span>
+    <span id="activity-header-elapsed" class="summary"></span>
     <span id="activity-chevron" class="chevron" aria-hidden="true">⌄</span>
   </button>
-  <div id="activity-body" class="body" aria-live="polite" hidden>
-    <div id="activity-empty" class="empty">Waiting for commands...</div>
+  <div id="activity-body" class="body" aria-live="polite">
+    <div id="activity-empty" class="empty">Waiting for Serena commands...</div>
     <ol id="activity-calls" class="calls"></ol>
+    <button id="activity-other-jobs" class="other-jobs" type="button" aria-expanded="false" hidden>
+      <span id="activity-other-jobs-label"></span><span class="other-jobs-chevron" aria-hidden="true">⌄</span>
+    </button>
+    <ol id="activity-background-jobs" class="calls background-jobs"></ol>
   </div>
 </div>
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body { margin: 0; font: 13px/1.35 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: CanvasText; background: transparent; }
+  button { font: inherit; }
   .activity { width: 100%; min-width: 0; }
-  .header { width: 100%; min-height: 44px; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 6px 9px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
-  .title { min-width: 0; display: flex; gap: 7px; align-items: center; overflow: hidden; }
-  .latest-block { min-width: 0; display: grid; gap: 1px; overflow: hidden; }
-  #activity-latest { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 620; }
-  .latest-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .62; }
-  .latest-detail:empty { display: none; }
-  .logo { width: 20px; height: 20px; flex: 0 0 auto; opacity: .72; transform-origin: center; }
+  .header { width: 100%; min-height: 42px; display: grid; grid-template-columns: minmax(0, 1fr) auto 14px; gap: 8px; align-items: center; padding: 7px 9px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+  .title { min-width: 0; display: flex; gap: 7px; align-items: center; white-space: nowrap; overflow: hidden; }
+  .logo { width: 21px; height: 21px; flex: 0 0 auto; color: #00491e; opacity: .82; transform-origin: center; }
   .logo svg { display: block; width: 100%; height: 100%; }
   .logo.running { animation: logo-work .85s ease-in-out infinite alternate; opacity: 1; }
-  .summary { min-width: 0; max-width: 48vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; opacity: .68; font-variant-numeric: tabular-nums; }
-  .chevron { width: 14px; text-align: center; transition: transform .14s ease; opacity: .58; }
-  .activity.collapsed .chevron { transform: rotate(-90deg); }
-  .body { max-height: min(44vh, 360px); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent); padding: 4px 9px 7px; }
+  .header-tool { min-width: 0; display: grid; gap: 1px; overflow: hidden; }
+  #activity-header-tool { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .header-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .58; }
+  .summary { white-space: nowrap; font-size: 12px; opacity: .66; font-variant-numeric: tabular-nums; }
+  .activity:not(.collapsed) .header-detail, .activity:not(.collapsed) .summary { display: none; }
+  .chevron, .other-jobs-chevron { width: 14px; text-align: center; transition: transform .14s ease; opacity: .58; }
+  .activity.collapsed .chevron, .other-jobs[aria-expanded="false"] .other-jobs-chevron { transform: rotate(-90deg); }
+  .body { max-height: 146px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent); padding: 4px 9px 7px; }
   .activity.collapsed .body { display: none; }
   .calls { list-style: none; padding: 0; margin: 0; }
-  .call { display: grid; grid-template-columns: 15px minmax(110px, auto) minmax(0, 1fr) auto; grid-template-areas: "status tool detail elapsed"; gap: 6px; align-items: baseline; min-height: 24px; padding: 3px 0; }
-  .status { grid-area: status; width: 15px; text-align: center; opacity: .74; }
-  .call.running .status { animation: pulse 1.1s ease-in-out infinite; }
-  .activity.retired .call.running .status, .activity.retired .logo.running { animation: none; }
+  .call { min-width: 0; }
+  .row-header { width: 100%; display: grid; grid-template-columns: 15px minmax(110px, auto) minmax(0, 1fr) auto 14px; grid-template-areas: "status tool detail elapsed chevron"; gap: 6px; align-items: baseline; min-height: 24px; padding: 3px 0; border: 0; background: transparent; color: inherit; text-align: left; }
+  button.row-header { cursor: pointer; }
+  .job-entry { margin: 1px 0; border-radius: 6px; background: color-mix(in srgb, #00491e 5%, transparent); }
+  .job-entry .row-header { padding-left: 4px; padding-right: 4px; }
+  .status { grid-area: status; width: 15px; text-align: center; opacity: .78; }
+  .call.running .status { color: #d97706; animation: pulse 1.1s ease-in-out infinite; }
+  .call.completed .status { color: #16a34a; }
+  .call.failed .status, .call.timed_out .status { color: #dc2626; }
+  .call.cancelled .status { opacity: .5; }
+  .job-entry.running .status { color: #00491e; }
   .tool { grid-area: tool; min-width: 0; font-weight: 590; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .detail { grid-area: detail; min-width: 0; font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .72; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .job-entry .tool { font-weight: 560; }
+  .detail { grid-area: detail; min-width: 0; font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .70; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .job-entry .detail { opacity: .56; }
   .elapsed { grid-area: elapsed; white-space: nowrap; font-size: 11px; opacity: .56; font-variant-numeric: tabular-nums; }
+  .row-chevron { grid-area: chevron; width: 14px; text-align: center; opacity: .46; transition: transform .14s ease; }
+  .call:not(.expanded) .row-chevron { transform: rotate(-90deg); }
+  .detail-panel { margin: 1px 0 5px 21px; padding: 5px 7px 6px; border-left: 2px solid color-mix(in srgb, #00491e 28%, transparent); border-radius: 0 6px 6px 0; background: color-mix(in srgb, CanvasText 3%, transparent); }
+  .detail-block + .detail-block { margin-top: 5px; }
+  .detail-label { display: block; margin-bottom: 2px; color: color-mix(in srgb, #00491e 82%, CanvasText); font-size: 10px; font-weight: 700; letter-spacing: .035em; text-transform: uppercase; }
+  .detail-value { margin: 0; max-height: 9em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 10.5px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .78; }
+  .detail-loading { font-size: 11px; opacity: .58; }
+  .other-jobs { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 14px; gap: 6px; align-items: center; margin-top: 3px; padding: 4px 0 2px 21px; border: 0; border-top: 1px solid color-mix(in srgb, CanvasText 8%, transparent); background: transparent; color: inherit; text-align: left; cursor: pointer; font-size: 11px; opacity: .58; }
+  .other-jobs:hover { opacity: .78; }
   .empty { padding: 5px 0 2px; opacity: .58; }
   @keyframes pulse { 50% { opacity: .28; } }
-  @keyframes logo-work { from { transform: scale(.90); opacity: .58; } to { transform: scale(1.04); opacity: 1; } }
-  @media (prefers-reduced-motion: reduce) { .call.running .status, .logo.running { animation: none; } .chevron { transition: none; } }
+  @keyframes logo-work { from { transform: scale(.92); opacity: .62; } to { transform: scale(1.05); opacity: 1; } }
+  @media (prefers-color-scheme: dark) { .logo { color: #70c990; } .job-entry.running .status { color: #70c990; } }
+  @media (prefers-reduced-motion: reduce) { .call.running .status, .logo.running { animation: none; } .chevron, .other-jobs-chevron, .row-chevron { transition: none; } }
   @media (max-width: 520px) {
     body { font-size: 12px; }
-    .header { min-height: 42px; grid-template-columns: minmax(0, 1fr) minmax(0, auto) 12px; gap: 5px; padding: 5px 7px; }
-    .summary { max-width: 45vw; font-size: 11px; }
-    .body { max-height: calc(12em + 28px); padding: 2px 7px 5px; }
-    .call { grid-template-columns: 15px minmax(0, 1fr) auto; grid-template-areas: "status tool elapsed" ". detail detail"; column-gap: 5px; row-gap: 0; min-height: 0; padding: 2px 0; align-items: start; }
-    .tool { line-height: 1.2; }
-    .detail { margin-top: 1px; font-size: 11px; line-height: 1.2; min-height: 1.2em; }
-    .elapsed { line-height: 1.2; align-self: start; }
-    .empty { padding: 4px 0 2px; }
+    .header { min-height: 42px; grid-template-columns: minmax(0, 1fr) auto 12px; gap: 5px; padding: 6px 7px; }
+    .header-detail { font-size: 10.5px; }
+    .summary { font-size: 11px; }
+    .body { max-height: 202px; padding: 3px 7px 6px; }
+    .row-header { grid-template-columns: 15px minmax(0, 1fr) auto 12px; grid-template-areas: "status tool elapsed chevron" ". detail detail chevron"; column-gap: 5px; row-gap: 0; min-height: 0; padding: 3px 0; align-items: start; }
+    .detail { margin-top: 1px; font-size: 11px; min-height: 1.2em; }
+    .detail-panel { margin-left: 20px; }
   }
 </style>
 <script>
@@ -489,19 +456,22 @@ def _activity_widget_html() -> str:
 
   const header = document.getElementById("activity-header");
   const body = document.getElementById("activity-body");
-  const latest = document.getElementById("activity-latest");
-  const latestDetail = document.getElementById("activity-latest-detail");
-  const summary = document.getElementById("activity-summary");
+  const headerTool = document.getElementById("activity-header-tool");
+  const headerDetail = document.getElementById("activity-header-detail");
+  const headerElapsed = document.getElementById("activity-header-elapsed");
   const calls = document.getElementById("activity-calls");
   const empty = document.getElementById("activity-empty");
   const logo = document.getElementById("activity-logo");
+  const otherJobsButton = document.getElementById("activity-other-jobs");
+  const otherJobsLabel = document.getElementById("activity-other-jobs-label");
+  const backgroundJobsList = document.getElementById("activity-background-jobs");
   const rowsByKey = new Map();
+  const expandedRows = new Set();
   let state = window.openai?.toolOutput ?? null;
-  let lastChange = Date.now();
-  let lastSignature = "";
+  let otherJobsExpanded = false;
   let timer = null;
-  let collapseStateInitialized = false;
-  let collapseStateTouched = false;
+  let clockTimer = null;
+  let clockDelay = null;
 
   function setCollapsed(collapsed) {
     root.classList.toggle("collapsed", collapsed);
@@ -510,22 +480,14 @@ def _activity_widget_html() -> str:
     window.openai?.notifyIntrinsicHeight?.();
   }
 
-  function retirePanel() {
-    if (timer !== null) {
-      clearTimeout(timer);
-      timer = null;
-    }
-    root.classList.add("retired");
-    root.classList.remove("busy-elsewhere");
-    logo.classList.remove("running");
-    summary.textContent = "";
-    for (const row of rowsByKey.values()) row.classList.remove("running");
-    setCollapsed(true);
-  }
-
   header.addEventListener("click", () => {
-    collapseStateTouched = true;
+    if (root.classList.contains("retired")) return;
     setCollapsed(!root.classList.contains("collapsed"));
+  });
+  otherJobsButton.addEventListener("click", event => {
+    event.stopPropagation();
+    otherJobsExpanded = !otherJobsExpanded;
+    if (state?.run_id) render(state);
   });
 
   function elapsed(entry, nowSeconds) {
@@ -533,16 +495,26 @@ def _activity_widget_html() -> str:
     const seconds = Math.max(0, end - entry.started_at);
     if (seconds < 10) return `${seconds.toFixed(1)}s`;
     if (seconds < 120) return `${Math.round(seconds)}s`;
-    const minutes = Math.floor(seconds / 60);
-    const remainder = Math.round(seconds % 60);
-    return `${minutes}m ${String(remainder).padStart(2, "0")}s`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${String(Math.round(seconds % 60)).padStart(2, "0")}s`;
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    return `${hours}h ${String(minutes).padStart(2, "0")}m`;
   }
 
   function statusIcon(status) {
     if (status === "running") return "●";
     if (status === "failed" || status === "timed_out") return "!";
-    if (status === "cancelled") return "x";
+    if (status === "cancelled") return "\u00d7";
+    if (status === "queued" || status === "waiting") return "○";
     return "✓";
+  }
+
+  function currentTurnJobs(next) {
+    return (next.jobs || []).filter(job => Boolean(job.current_turn));
+  }
+
+  function otherRunningJobs(next) {
+    return (next.jobs || []).filter(job => !job.current_turn && job.status === "running");
   }
 
   function callEntry(call) {
@@ -551,64 +523,80 @@ def _activity_widget_html() -> str:
 
   function jobEntry(job) {
     return {
+      ...job,
       key: `job:${job.job_id}`,
       kind: "job",
       tool_name: job.label || "background job",
-      detail: job.project ? `job · ${job.project}` : "background job",
-      started_at: job.started_at,
-      finished_at: job.finished_at,
-      status: job.status,
+      detail: job.project || "background job",
     };
   }
 
-  function allEntries(next) {
-    const jobs = next.jobs || [];
-    const durableIds = new Set(jobs.map(job => job.job_id));
-    return [
-      ...jobs.map(jobEntry),
-      ...(next.calls || [])
-        .filter(call => !(call.tool_name === "start_job" && call.job_id && durableIds.has(call.job_id)))
-        .map(callEntry),
-    ];
+  function visibleCalls(next) {
+    const currentJobIds = new Set(currentTurnJobs(next).map(job => job.job_id));
+    return (next.calls || [])
+      .filter(call => !(call.tool_name === "start_job" && call.job_id && currentJobIds.has(call.job_id)))
+      .map(callEntry);
   }
 
-  function orderedEntries(next) {
-    const entries = allEntries(next);
+  function headerCall(next) {
+    const toolCalls = next.calls || [];
+    const running = toolCalls.filter(call => call.status === "running").sort((a, b) => b.started_at - a.started_at);
+    if (running.length > 0) return running[0];
+    return [...toolCalls].sort((a, b) => b.started_at - a.started_at)[0] || null;
+  }
+
+  function primaryEntries(next) {
+    const entries = [...visibleCalls(next), ...currentTurnJobs(next).map(jobEntry)];
     const running = entries.filter(entry => entry.status === "running").sort((a, b) => b.started_at - a.started_at);
     const terminal = entries.filter(entry => entry.status !== "running").sort((a, b) => b.started_at - a.started_at);
     return [...running, ...terminal];
   }
 
-  function captureScrollAnchor() {
-    if (root.classList.contains("collapsed") || body.scrollTop <= 2) return { atTop: true };
-    const bodyRect = body.getBoundingClientRect();
-    for (const row of calls.children) {
-      const rowRect = row.getBoundingClientRect();
-      if (rowRect.bottom > bodyRect.top + 1) {
-        return { atTop: false, key: row.dataset.entryKey, offset: rowRect.top - bodyRect.top, scrollTop: body.scrollTop };
-      }
-    }
-    return { atTop: false, scrollTop: body.scrollTop };
+  function displayedEntries(next) {
+    return primaryEntries(next);
   }
 
-  function restoreScrollAnchor(anchor) {
-    if (root.classList.contains("collapsed")) return;
-    if (anchor.atTop) {
-      body.scrollTop = 0;
-      return;
-    }
-    const row = anchor.key ? rowsByKey.get(anchor.key) : null;
-    if (row) {
-      const bodyRect = body.getBoundingClientRect();
-      body.scrollTop += row.getBoundingClientRect().top - bodyRect.top - anchor.offset;
-      return;
-    }
-    body.scrollTop = anchor.scrollTop ?? body.scrollTop;
+  function displayedBackgroundJobs(next) {
+    if (!otherJobsExpanded) return [];
+    return otherRunningJobs(next).map(jobEntry).sort((a, b) => b.started_at - a.started_at);
   }
 
-  function createEntryRow(entry) {
+  async function loadToolDetail(row) {
+    const refs = row._activityRefs;
+    const callId = row.dataset.callId;
+    if (!state?.run_id || !callId || !window.openai?.callTool || !refs.panel) return;
+
+    refs.loading.hidden = false;
+    refs.loading.textContent = "Loading details...";
+    refs.content.hidden = true;
+    try {
+      const result = await window.openai.callTool("get_activity_detail", { run_id: state.run_id, call_id: callId });
+      const detail = result?.structuredContent ?? result?.structured_content ?? result;
+      if (!detail?.call_id || detail.call_id !== callId) throw new Error("Mismatched activity detail");
+      refs.arguments.textContent = detail.arguments || "{}";
+      refs.result.textContent = detail.result ?? (detail.status === "running" ? "Tool is still running." : "No result returned.");
+      refs.loading.hidden = true;
+      refs.content.hidden = false;
+      row.dataset.detailStatus = detail.status || "";
+    } catch (_) {
+      refs.loading.hidden = false;
+      refs.loading.textContent = "Details unavailable.";
+      refs.content.hidden = true;
+    }
+    window.openai?.notifyIntrinsicHeight?.();
+  }
+
+  function createRow(entry) {
+    const isJob = entry.kind === "job";
     const row = document.createElement("li");
-    row.dataset.entryKey = entry.key;
+    row.dataset.scrollKey = entry.key;
+
+    const rowHeader = document.createElement(isJob ? "div" : "button");
+    rowHeader.className = "row-header";
+    if (!isJob) {
+      rowHeader.type = "button";
+      rowHeader.setAttribute("aria-expanded", "false");
+    }
     const status = document.createElement("span");
     status.className = "status";
     const tool = document.createElement("span");
@@ -617,146 +605,186 @@ def _activity_widget_html() -> str:
     detail.className = "detail";
     const elapsedNode = document.createElement("span");
     elapsedNode.className = "elapsed";
-    row.append(status, tool, detail, elapsedNode);
-    row._activityRefs = { status, tool, detail, elapsed: elapsedNode };
+    const chevron = document.createElement("span");
+    chevron.className = "row-chevron";
+    chevron.setAttribute("aria-hidden", "true");
+    chevron.textContent = "⌄";
+    if (isJob) chevron.hidden = true;
+    rowHeader.append(status, tool, detail, elapsedNode, chevron);
+    row.append(rowHeader);
+
+    let panel = null;
+    let loading = null;
+    let content = null;
+    let argumentsValue = null;
+    let resultValue = null;
+    if (!isJob) {
+      panel = document.createElement("div");
+      panel.className = "detail-panel";
+      panel.hidden = true;
+      loading = document.createElement("div");
+      loading.className = "detail-loading";
+      loading.textContent = "Loading details...";
+      content = document.createElement("div");
+      content.hidden = true;
+      const argumentsBlock = document.createElement("div");
+      argumentsBlock.className = "detail-block";
+      const argumentsLabel = document.createElement("span");
+      argumentsLabel.className = "detail-label";
+      argumentsLabel.textContent = "Parameters";
+      argumentsValue = document.createElement("pre");
+      argumentsValue.className = "detail-value";
+      argumentsBlock.append(argumentsLabel, argumentsValue);
+      const resultBlock = document.createElement("div");
+      resultBlock.className = "detail-block";
+      const resultLabel = document.createElement("span");
+      resultLabel.className = "detail-label";
+      resultLabel.textContent = "Result";
+      resultValue = document.createElement("pre");
+      resultValue.className = "detail-value";
+      resultBlock.append(resultLabel, resultValue);
+      content.append(argumentsBlock, resultBlock);
+      panel.append(loading, content);
+      row.append(panel);
+
+      rowHeader.addEventListener("click", () => {
+        const key = row.dataset.scrollKey;
+        if (!key) return;
+        const expanded = !expandedRows.has(key);
+        if (expanded) expandedRows.add(key);
+        else expandedRows.delete(key);
+        row.classList.toggle("expanded", expanded);
+        rowHeader.setAttribute("aria-expanded", String(expanded));
+        panel.hidden = !expanded;
+        if (expanded) void loadToolDetail(row);
+        window.openai?.notifyIntrinsicHeight?.();
+      });
+    }
+
+    row._activityRefs = {
+      header: rowHeader,
+      status,
+      tool,
+      detail,
+      elapsed: elapsedNode,
+      chevron,
+      panel,
+      loading,
+      content,
+      arguments: argumentsValue,
+      result: resultValue,
+    };
     rowsByKey.set(entry.key, row);
     return row;
   }
 
-  function updateEntryRow(row, entry, now) {
+  function updateRow(row, entry, now) {
     const refs = row._activityRefs;
-    const detail = entry.detail || "";
-    const signature = JSON.stringify([entry.status, entry.tool_name, detail, entry.finished_at]);
-    if (row.dataset.entrySignature !== signature) {
-      row.dataset.entrySignature = signature;
-      row.className = `call ${entry.status}`;
-      refs.status.textContent = statusIcon(entry.status);
-      refs.tool.textContent = entry.tool_name;
-      refs.detail.textContent = detail;
-    }
-    if (entry.status === "running" || row.dataset.elapsedFinished !== signature) {
-      refs.elapsed.textContent = elapsed(entry, now);
-      row.dataset.elapsedFinished = signature;
+    const isJob = entry.kind === "job";
+    const previousDetailStatus = row.dataset.detailStatus;
+    row.dataset.callId = entry.call_id || "";
+    row.dataset.entryKind = entry.kind;
+    row._activityEntry = entry;
+    row.className = `call ${entry.status}${isJob ? " job-entry" : ""}`;
+    refs.status.textContent = statusIcon(entry.status);
+    refs.tool.textContent = entry.tool_name;
+    refs.tool.title = entry.tool_name;
+    refs.detail.textContent = entry.detail || "";
+    refs.detail.title = entry.detail || "";
+    refs.elapsed.textContent = elapsed(entry, now);
+
+    if (!isJob) {
+      const expanded = expandedRows.has(entry.key);
+      row.classList.toggle("expanded", expanded);
+      refs.header.setAttribute("aria-expanded", String(expanded));
+      refs.panel.hidden = !expanded;
+      if (expanded && previousDetailStatus && previousDetailStatus !== entry.status) void loadToolDetail(row);
     }
   }
 
-  function reconcileEntries(entries, now) {
-    const anchor = captureScrollAnchor();
-    const retainedKeys = new Set(entries.map(entry => entry.key));
-    const previousKeys = new Set(rowsByKey.keys());
-    const arrivingKeys = new Set(entries.filter(entry => !previousKeys.has(entry.key)).map(entry => entry.key));
-    const animateArrival = anchor.atTop && previousKeys.size > 0 && arrivingKeys.size > 0
-      && !window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
-    const previousPositions = new Map();
-
-    // capture only visible rows so insertion animation stays cheap even with long histories
-    if (animateArrival) {
-      const bodyRect = body.getBoundingClientRect();
-      for (const [key, row] of rowsByKey) {
-        const rowRect = row.getBoundingClientRect();
-        if (rowRect.bottom >= bodyRect.top && rowRect.top <= bodyRect.bottom) previousPositions.set(key, rowRect.top);
-      }
-    }
-
+  function reconcileInto(container, entries, now) {
     entries.forEach((entry, index) => {
-      const row = rowsByKey.get(entry.key) || createEntryRow(entry);
-      updateEntryRow(row, entry, now);
-      const current = calls.children[index] || null;
-      if (current !== row) calls.insertBefore(row, current);
+      const row = rowsByKey.get(entry.key) || createRow(entry);
+      updateRow(row, entry, now);
+      const current = container.children[index] || null;
+      if (current !== row) container.insertBefore(row, current);
     });
+  }
 
+  function reconcileRows(primary, background, now) {
+    const retained = new Set([...primary, ...background].map(entry => entry.key));
+    const oldScrollTop = body.scrollTop;
+    reconcileInto(calls, primary, now);
+    reconcileInto(backgroundJobsList, background, now);
     for (const [key, row] of rowsByKey) {
-      if (retainedKeys.has(key)) continue;
+      if (retained.has(key)) continue;
       row.remove();
       rowsByKey.delete(key);
+      expandedRows.delete(key);
     }
-    restoreScrollAnchor(anchor);
+    if (oldScrollTop > 0) body.scrollTop = oldScrollTop;
+  }
 
-    // briefly replay the old positions so new activity visibly nudges existing rows downward
-    if (animateArrival) {
-      requestAnimationFrame(() => {
-        for (const [key, oldTop] of previousPositions) {
-          const row = rowsByKey.get(key);
-          if (!row) continue;
-          const delta = oldTop - row.getBoundingClientRect().top;
-          if (Math.abs(delta) < 1) continue;
-          row.animate(
-            [{ transform: `translateY(${delta}px)` }, { transform: "translateY(0)" }],
-            { duration: 180, easing: "cubic-bezier(.2,.7,.2,1)" },
-          );
-        }
-        for (const key of arrivingKeys) {
-          const row = rowsByKey.get(key);
-          if (!row) continue;
-          row.animate(
-            [{ opacity: .72, transform: "translateY(-4px)" }, { opacity: 1, transform: "translateY(0)" }],
-            { duration: 160, easing: "ease-out" },
-          );
-        }
-      });
+  function refreshDurations() {
+    if (!state?.run_id) return;
+    const now = Date.now() / 1000;
+    const activeHeaderCall = headerCall(state);
+    if (activeHeaderCall) headerElapsed.textContent = elapsed(activeHeaderCall, now);
+    for (const row of rowsByKey.values()) {
+      const entry = row._activityEntry;
+      if (entry?.status === "running") row._activityRefs.elapsed.textContent = elapsed(entry, now);
     }
   }
 
-  function latestEntry(next) {
-    const entries = allEntries(next);
-    if (!entries.length) return null;
-    return entries.reduce((latestEntry, entry) => entry.started_at >= latestEntry.started_at ? entry : latestEntry);
+  function syncClockTimer() {
+    const hasRunningTool = (state?.calls || []).some(call => call.status === "running");
+    const hasRunningJob = (state?.jobs || []).some(job => job.status === "running");
+    const nextDelay = hasRunningTool ? 100 : hasRunningJob ? 1000 : null;
+    if (nextDelay === clockDelay) return;
+    if (clockTimer !== null) clearInterval(clockTimer);
+    clockTimer = null;
+    clockDelay = nextDelay;
+    if (nextDelay !== null) clockTimer = setInterval(refreshDurations, nextDelay);
   }
 
   function render(next) {
     if (!next || !next.run_id) return;
     state = next;
-    const jobs = next.jobs || [];
-    const busy = next.busy || {};
-    const signature = JSON.stringify([
-      (next.calls || []).map(call => [call.call_id, call.status, call.finished_at, call.job_id]),
-      jobs.map(job => [job.job_id, job.status, job.finished_at]),
-      busy,
-    ]);
-    if (signature !== lastSignature) {
-      lastSignature = signature;
-      lastChange = Date.now();
-    }
-
     const now = Date.now() / 1000;
-    const runningJobs = jobs.filter(job => job.status === "running");
-    const runningCalls = (next.calls || []).filter(call => call.status === "running");
-    const localRunningCount = Math.max(runningJobs.length, Number(busy.running_jobs || 0))
-      + Math.max(runningCalls.length, Number(busy.active_tools || 0));
-    const otherRunningCount = Number(busy.other_active_tools || 0) + Number(busy.other_running_jobs || 0);
-    const totalRunningCount = localRunningCount + otherRunningCount;
-    const busyThisChat = Boolean(busy.this_chat || localRunningCount);
-    const busyElsewhere = Boolean(busy.elsewhere || otherRunningCount);
-    const newest = latestEntry(next);
+    const activeHeaderCall = headerCall(next);
+    const backgroundJobs = otherRunningJobs(next);
 
-    logo.classList.toggle("running", totalRunningCount > 0);
-    root.classList.toggle("busy-elsewhere", !busyThisChat && busyElsewhere);
+    headerTool.textContent = activeHeaderCall?.tool_name || "Waiting for activity";
+    headerDetail.textContent = activeHeaderCall?.detail || "";
+    headerDetail.title = activeHeaderCall?.detail || "";
+    headerElapsed.textContent = activeHeaderCall ? elapsed(activeHeaderCall, now) : "";
+    logo.classList.toggle("running", activeHeaderCall?.status === "running");
 
-    if (newest) {
-      latest.textContent = newest.tool_name;
-      latestDetail.textContent = newest.detail || "";
-      const extraRunning = Math.max(0, totalRunningCount - (newest.status === "running" ? 1 : 0));
-      const parts = [elapsed(newest, now)];
-      if (extraRunning > 0) parts.push(`+${extraRunning}`);
-      summary.textContent = parts.join(" · ");
-    } else if (otherRunningCount > 0) {
-      latest.textContent = "Busy elsewhere";
-      latestDetail.textContent = "";
-      summary.textContent = `+${otherRunningCount}`;
-    } else {
-      latest.textContent = "Waiting for activity";
-      latestDetail.textContent = "";
-      summary.textContent = "";
-    }
+    if (backgroundJobs.length === 0) otherJobsExpanded = false;
+    otherJobsButton.hidden = backgroundJobs.length === 0;
+    otherJobsButton.setAttribute("aria-expanded", String(otherJobsExpanded));
+    otherJobsLabel.textContent = backgroundJobs.length === 1 ? "1 other job running" : `${backgroundJobs.length} other jobs running`;
 
-    const entries = orderedEntries(next).filter(entry => entry.key !== newest?.key);
-    if (!collapseStateInitialized && !collapseStateTouched && entries.length > 0) {
-      collapseStateInitialized = true;
-      setCollapsed(false);
-    }
-    empty.hidden = entries.length > 0 || newest !== null;
-    reconcileEntries(entries, now);
+    const primary = primaryEntries(next);
+    empty.hidden = primary.length > 0 || backgroundJobs.length > 0;
+    reconcileRows(displayedEntries(next), displayedBackgroundJobs(next), now);
+    syncClockTimer();
+    window.openai?.notifyIntrinsicHeight?.();
+  }
 
+  function retire() {
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    if (clockTimer !== null) clearInterval(clockTimer);
+    clockTimer = null;
+    clockDelay = null;
+    root.classList.add("retired");
+    logo.classList.remove("running");
+    for (const row of rowsByKey.values()) row.classList.remove("running");
+    headerTool.textContent = "Continued in newer Serena panel";
+    headerDetail.textContent = "";
+    headerElapsed.textContent = "";
+    setCollapsed(true);
   }
 
   async function poll() {
@@ -768,17 +796,17 @@ def _activity_widget_html() -> str:
       const result = await window.openai.callTool("get_activity", { run_id: state.run_id });
       const next = result?.structuredContent ?? result?.structured_content ?? result;
       if (next?.superseded) {
-        retirePanel();
+        if (next?.run_id) render(next);
+        retire();
         return;
       }
       if (next?.run_id) render(next);
     } catch (_) {
       // Keep the last useful state; transient bridge/server failures are non-fatal.
     }
-    const busy = state?.busy || {};
-    const hasActivity = Boolean(busy.this_chat || busy.elsewhere || state?.calls?.some(call => call.status === "running"));
-    const idleFor = Date.now() - lastChange;
-    const delay = hasActivity || idleFor < 5000 ? 500 : idleFor < 120000 ? 2000 : 10000;
+    const hasRunningTool = (state?.calls || []).some(call => call.status === "running");
+    const hasRunningJob = (state?.jobs || []).some(job => job.status === "running");
+    const delay = hasRunningTool ? 500 : hasRunningJob ? 3000 : 5000;
     timer = setTimeout(poll, delay);
   }
 
@@ -787,7 +815,8 @@ def _activity_widget_html() -> str:
     if (!next?.run_id) return;
     if (state?.run_id && next.run_id !== state.run_id) return;
     if (next.superseded) {
-      retirePanel();
+      render(next);
+      retire();
       return;
     }
     render(next);

@@ -2,6 +2,7 @@
 The Serena Model Context Protocol (MCP) Server
 """
 
+import asyncio
 import base64
 import sys
 from collections.abc import AsyncIterator, Iterator
@@ -18,6 +19,7 @@ from mcp.server.fastmcp.server import Context, FastMCP, Settings
 from mcp.server.fastmcp.tools.base import Tool as FastMCPTool
 from mcp.server.session import ServerSessionT
 from mcp.shared.context import LifespanContextT, RequestT
+from mcp.shared.exceptions import UrlElicitationRequiredError
 from mcp.types import Icon, ToolAnnotations
 from pydantic_settings import SettingsConfigDict
 from sensai.util import logging
@@ -86,8 +88,7 @@ class SerenaFastMCPTool(FastMCPTool):
 
         docstring = docstring_parser.parse(func_doc)
 
-        # Mount the tool description as a combination of the docstring description and
-        # the return value description, if it exists.
+        # mount the tool description from the docstring and return description
         overridden_description = tool.agent.get_context().tool_description_overrides.get(func_name, None)
 
         if overridden_description is not None:
@@ -100,12 +101,10 @@ class SerenaFastMCPTool(FastMCPTool):
         if func_doc:
             func_doc += "."
         if docstring.returns and (docstring_returns_descr := docstring.returns.description):
-            # Only add a space before "Returns" if func_doc is not empty
             prefix = " " if func_doc else ""
             func_doc = f"{func_doc}{prefix}Returns {docstring_returns_descr.strip().strip('.')}."
 
-        # Parse the parameter descriptions from the docstring and add pass its description
-        # to the parameter schema.
+        # add parameter descriptions from the parsed docstring
         docstring_params = {param.arg_name: param for param in docstring.params}
         parameters_properties: dict[str, dict[str, Any]] = parameters["properties"]
         for parameter, properties in parameters_properties.items():
@@ -119,10 +118,8 @@ class SerenaFastMCPTool(FastMCPTool):
             except ToolCallError as e:
                 raise ToolError(e.get_error_message()) from e
 
-        # Generate human-readable title from snake_case tool name
+        # derive a readable title and MCP capability hints
         tool_title = " ".join(word.capitalize() for word in func_name.split("_"))
-
-        # Create annotations with appropriate hints based on tool capabilities
         can_edit = tool.can_edit()
         annotations = ToolAnnotations(
             title=tool_title,
@@ -137,8 +134,7 @@ class SerenaFastMCPTool(FastMCPTool):
             parameters=parameters,
             fn_metadata=func_arg_metadata,
             is_async=is_async,
-            # keep the value in sync with the kwarg name in Tool.apply_ex. The mcp sdk uses reflection to infer this
-            # when the tool is constructed via from_function (which is a bit crazy IMO, but well...)
+            # keep the value in sync with the kwarg name in Tool.apply_ex
             context_kwarg="mcp_ctx",
             annotations=annotations,
             title=tool_title,
@@ -154,7 +150,7 @@ class SerenaFastMCPTool(FastMCPTool):
         context: Context[ServerSessionT, LifespanContextT, RequestT] | None = None,
         convert_result: bool = False,
     ) -> Any:
-        # apply parameter aliases
+        # apply parameter aliases before validation and activity display
         for param_alias, param_name in self._param_aliases.items():
             if param_alias in arguments and param_name not in arguments:
                 arguments[param_name] = arguments.pop(param_alias)
@@ -164,8 +160,25 @@ class SerenaFastMCPTool(FastMCPTool):
         if self._activity_tracker is not None:
             call_id = self._activity_tracker.start_tool(get_mcp_session_id(context), self.name, arguments)
 
+        # keep the MCP event loop free while Serena's synchronous executor waits
         try:
-            result = await super().run(arguments, context, convert_result)
+            arguments_pre_parsed = self.fn_metadata.pre_parse_json(arguments)
+            arguments_model = self.fn_metadata.arg_model.model_validate(arguments_pre_parsed)
+            arguments_parsed = arguments_model.model_dump_one_level()
+            if self.context_kwarg is not None:
+                arguments_parsed[self.context_kwarg] = context
+
+            result = await asyncio.to_thread(self.fn, **arguments_parsed)
+            if convert_result:
+                result = self.fn_metadata.convert_result(result)
+        except UrlElicitationRequiredError:
+            if self._activity_tracker is not None:
+                self._activity_tracker.finish_tool(call_id, succeeded=False)
+            raise
+        except Exception as e:
+            if self._activity_tracker is not None:
+                self._activity_tracker.finish_tool(call_id, succeeded=False, result=e)
+            raise ToolError(f"Error executing tool {self.name}: {e}") from e
         except BaseException:
             if self._activity_tracker is not None:
                 self._activity_tracker.finish_tool(call_id, succeeded=False)
@@ -382,11 +395,11 @@ class SerenaMCPFactory:
             },
             structured_output=True,
         )
-        def show_activity(mcp_ctx: Context) -> dict[str, Any]:
+        async def show_activity(mcp_ctx: Context) -> dict[str, Any]:
             session_id = get_mcp_session_id(mcp_ctx)
             project = agent.get_active_project()
             project_name = project.project_name if project is not None else ""
-            return self._activity_tracker.start_run(session_id, project_name)
+            return await asyncio.to_thread(self._activity_tracker.start_run, session_id, project_name)
 
         @mcp.tool(
             name="get_activity",
@@ -400,8 +413,23 @@ class SerenaMCPFactory:
             },
             structured_output=True,
         )
-        def get_activity(run_id: str, mcp_ctx: Context) -> dict[str, Any]:
-            return self._activity_tracker.get_run(get_mcp_session_id(mcp_ctx), run_id)
+        async def get_activity(run_id: str, mcp_ctx: Context) -> dict[str, Any]:
+            return await asyncio.to_thread(self._activity_tracker.get_run, get_mcp_session_id(mcp_ctx), run_id)
+
+        @mcp.tool(
+            name="get_activity_detail",
+            title="Get Serena Activity Detail",
+            description="Returns bounded detail for one Serena tool call. Intended for the activity app only.",
+            annotations=ToolAnnotations(title="Get Serena Activity Detail", readOnlyHint=True, destructiveHint=False),
+            meta={
+                "ui": {"visibility": ["app"]},
+                "openai/widgetAccessible": True,
+                "openai/visibility": "private",
+            },
+            structured_output=True,
+        )
+        def get_activity_detail(run_id: str, call_id: str, mcp_ctx: Context) -> dict[str, Any]:
+            return self._activity_tracker.get_call_detail(get_mcp_session_id(mcp_ctx), run_id, call_id)
 
     def _create_serena_agent(
         self,

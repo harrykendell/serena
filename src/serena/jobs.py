@@ -22,7 +22,7 @@ from filelock import FileLock
 
 from serena.config.serena_config import SerenaPaths
 
-DEFAULT_MAX_CONCURRENT_JOBS = 10
+DEFAULT_MAX_CONCURRENT_JOBS = 12
 DEFAULT_OUTPUT_CHAR_LIMIT = 12_000
 DEFAULT_JOB_RETENTION = timedelta(days=7)
 _MAX_CURSOR_LENGTH = 4096
@@ -83,7 +83,6 @@ class JobRecord:
     finished_at: str | None = None
     return_code: int | None = None
     status_message: str | None = None
-    activity_owner_token: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """:return: JSON-serialisable representation of the record."""
@@ -108,7 +107,6 @@ class JobRecord:
             finished_at=str(data["finished_at"]) if data.get("finished_at") is not None else None,
             return_code=int(data["return_code"]) if data.get("return_code") is not None else None,
             status_message=str(data["status_message"]) if data.get("status_message") is not None else None,
-            activity_owner_token=str(data["activity_owner_token"]) if data.get("activity_owner_token") is not None else None,
         )
 
 
@@ -1007,18 +1005,6 @@ class JobManager:
         if running_only:
             records = [record for record in records if record.status is JobStatus.RUNNING]
         return [JobSnapshot(record=record, runtime=self._backend.runtime_info(record)) for record in records]
-
-    def set_activity_owner(self, job_id: str, owner_token: str) -> JobRecord:
-        """Persist the opaque ChatGPT activity owner token for one durable job."""
-        if len(owner_token) != 64:
-            raise ValueError("Activity owner token must be a SHA-256 hex digest")
-        try:
-            decoded = bytes.fromhex(owner_token)
-        except ValueError as exc:
-            raise ValueError("Activity owner token must be a SHA-256 hex digest") from exc
-        if len(decoded) != 32 or owner_token != owner_token.lower():
-            raise ValueError("Activity owner token must be a SHA-256 hex digest")
-        return self._store.update(job_id, activity_owner_token=owner_token)
 
     def cancel_job(self, job_id: str) -> JobRecord:
         """Cancel a running job and its complete process tree."""

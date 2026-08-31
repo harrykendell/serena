@@ -146,21 +146,21 @@ def _manager(
     )
 
 
-def test_job_limit_is_ten_and_cancelled_job_frees_capacity(tmp_path: Path) -> None:
+def test_job_limit_is_twelve_and_cancelled_job_frees_capacity(tmp_path: Path) -> None:
     backend = FakeJobBackend()
     manager = _manager(tmp_path, backend)
 
-    records = [manager.start_job(f"echo {index}", str(tmp_path), label=f"job {index}")[0] for index in range(10)]
+    records = [manager.start_job(f"echo {index}", str(tmp_path), label=f"job {index}")[0] for index in range(12)]
 
-    with pytest.raises(JobLimitError, match="limit of 10"):
-        manager.start_job("echo eleventh", str(tmp_path), label="eleventh")
+    with pytest.raises(JobLimitError, match="limit of 12"):
+        manager.start_job("echo thirteenth", str(tmp_path), label="thirteenth")
 
     cancelled = manager.cancel_job(records[0].job_id)
     replacement, running_jobs = manager.start_job("echo replacement", str(tmp_path), label="replacement")
 
     assert cancelled.status is JobStatus.CANCELLED
     assert replacement.status is JobStatus.RUNNING
-    assert running_jobs == 10
+    assert running_jobs == 12
 
 
 def test_start_requires_distinctive_nonempty_label(tmp_path: Path) -> None:
@@ -168,19 +168,6 @@ def test_start_requires_distinctive_nonempty_label(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="label must not be empty"):
         manager.start_job("echo hello", str(tmp_path), label="  ")
-
-
-def test_activity_owner_token_is_persisted_with_job_metadata(tmp_path: Path) -> None:
-    jobs_dir = tmp_path / "jobs"
-    manager = JobManager(store=JobStore(jobs_dir), backend=FakeJobBackend())
-    record, _ = manager.start_job("echo hello", str(tmp_path), label="owned job")
-    owner_token = "ab" * 32
-
-    updated = manager.set_activity_owner(record.job_id, owner_token)
-    recovered = JobStore(jobs_dir).read(record.job_id)
-
-    assert updated.activity_owner_token == owner_token
-    assert recovered.activity_owner_token == owner_token
 
 
 def test_failed_start_becomes_terminal_and_removes_private_command(tmp_path: Path) -> None:
@@ -370,7 +357,7 @@ def test_job_tools_return_chat_friendly_telemetry_and_persistence(tmp_path: Path
     listed = json.loads(status_tool.apply())
     cancelled = json.loads(cancel_tool.apply(started["job_id"]))
 
-    assert started["max_concurrent_jobs"] == 10
+    assert started["max_concurrent_jobs"] == 12
     assert started["running_jobs"] == 1
     assert started["timeout_seconds"] == 60
     assert started["persistence"]["survives_serena_restart"] is True
