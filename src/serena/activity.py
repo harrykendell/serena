@@ -414,8 +414,8 @@ def register_activity_resource(mcp: FastMCP) -> None:
 def _activity_widget_html() -> str:
     """Returns the self-contained activity widget HTML."""
     return r"""
-<div id="serena-activity" class="activity">
-  <button id="activity-header" class="header" type="button" aria-expanded="true">
+<div id="serena-activity" class="activity collapsed">
+  <button id="activity-header" class="header" type="button" aria-expanded="false">
     <span class="title">
       <span id="activity-logo" class="logo" aria-hidden="true">
         <svg viewBox="0 0 256 256" focusable="false">
@@ -425,12 +425,15 @@ def _activity_widget_html() -> str:
           <circle cx="128" cy="128" r="9" fill="currentColor"/>
         </svg>
       </span>
-      <strong id="activity-latest">Waiting for activity</strong>
+      <span class="latest-block">
+        <strong id="activity-latest">Waiting for activity</strong>
+        <span id="activity-latest-detail" class="latest-detail"></span>
+      </span>
     </span>
     <span id="activity-summary" class="summary"></span>
     <span id="activity-chevron" class="chevron" aria-hidden="true">⌄</span>
   </button>
-  <div id="activity-body" class="body" aria-live="polite">
+  <div id="activity-body" class="body" aria-live="polite" hidden>
     <div id="activity-empty" class="empty">Waiting for commands...</div>
     <ol id="activity-calls" class="calls"></ol>
   </div>
@@ -440,9 +443,12 @@ def _activity_widget_html() -> str:
   * { box-sizing: border-box; }
   body { margin: 0; font: 13px/1.35 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: CanvasText; background: transparent; }
   .activity { width: 100%; min-width: 0; }
-  .header { width: 100%; min-height: 36px; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 7px 9px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
-  .title { min-width: 0; display: flex; gap: 7px; align-items: center; white-space: nowrap; overflow: hidden; }
-  #activity-latest { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 620; }
+  .header { width: 100%; min-height: 44px; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 6px 9px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+  .title { min-width: 0; display: flex; gap: 7px; align-items: center; overflow: hidden; }
+  .latest-block { min-width: 0; display: grid; gap: 1px; overflow: hidden; }
+  #activity-latest { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 620; }
+  .latest-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .62; }
+  .latest-detail:empty { display: none; }
   .logo { width: 20px; height: 20px; flex: 0 0 auto; opacity: .72; transform-origin: center; }
   .logo svg { display: block; width: 100%; height: 100%; }
   .logo.running { animation: logo-work .85s ease-in-out infinite alternate; opacity: 1; }
@@ -455,6 +461,7 @@ def _activity_widget_html() -> str:
   .call { display: grid; grid-template-columns: 15px minmax(110px, auto) minmax(0, 1fr) auto; grid-template-areas: "status tool detail elapsed"; gap: 6px; align-items: baseline; min-height: 24px; padding: 3px 0; }
   .status { grid-area: status; width: 15px; text-align: center; opacity: .74; }
   .call.running .status { animation: pulse 1.1s ease-in-out infinite; }
+  .activity.retired .call.running .status, .activity.retired .logo.running { animation: none; }
   .tool { grid-area: tool; min-width: 0; font-weight: 590; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .detail { grid-area: detail; min-width: 0; font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .72; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .elapsed { grid-area: elapsed; white-space: nowrap; font-size: 11px; opacity: .56; font-variant-numeric: tabular-nums; }
@@ -464,7 +471,7 @@ def _activity_widget_html() -> str:
   @media (prefers-reduced-motion: reduce) { .call.running .status, .logo.running { animation: none; } .chevron { transition: none; } }
   @media (max-width: 520px) {
     body { font-size: 12px; }
-    .header { min-height: 34px; grid-template-columns: minmax(0, 1fr) minmax(0, auto) 12px; gap: 5px; padding: 6px 7px; }
+    .header { min-height: 42px; grid-template-columns: minmax(0, 1fr) minmax(0, auto) 12px; gap: 5px; padding: 5px 7px; }
     .summary { max-width: 45vw; font-size: 11px; }
     .body { max-height: calc(12em + 28px); padding: 2px 7px 5px; }
     .call { grid-template-columns: 15px minmax(0, 1fr) auto; grid-template-areas: "status tool elapsed" ". detail detail"; column-gap: 5px; row-gap: 0; min-height: 0; padding: 2px 0; align-items: start; }
@@ -483,6 +490,7 @@ def _activity_widget_html() -> str:
   const header = document.getElementById("activity-header");
   const body = document.getElementById("activity-body");
   const latest = document.getElementById("activity-latest");
+  const latestDetail = document.getElementById("activity-latest-detail");
   const summary = document.getElementById("activity-summary");
   const calls = document.getElementById("activity-calls");
   const empty = document.getElementById("activity-empty");
@@ -492,6 +500,8 @@ def _activity_widget_html() -> str:
   let lastChange = Date.now();
   let lastSignature = "";
   let timer = null;
+  let collapseStateInitialized = false;
+  let collapseStateTouched = false;
 
   function setCollapsed(collapsed) {
     root.classList.toggle("collapsed", collapsed);
@@ -500,7 +510,21 @@ def _activity_widget_html() -> str:
     window.openai?.notifyIntrinsicHeight?.();
   }
 
+  function retirePanel() {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    root.classList.add("retired");
+    root.classList.remove("busy-elsewhere");
+    logo.classList.remove("running");
+    summary.textContent = "";
+    for (const row of rowsByKey.values()) row.classList.remove("running");
+    setCollapsed(true);
+  }
+
   header.addEventListener("click", () => {
+    collapseStateTouched = true;
     setCollapsed(!root.classList.contains("collapsed"));
   });
 
@@ -710,20 +734,27 @@ def _activity_widget_html() -> str:
 
     if (newest) {
       latest.textContent = newest.tool_name;
+      latestDetail.textContent = newest.detail || "";
       const extraRunning = Math.max(0, totalRunningCount - (newest.status === "running" ? 1 : 0));
       const parts = [elapsed(newest, now)];
       if (extraRunning > 0) parts.push(`+${extraRunning}`);
       summary.textContent = parts.join(" · ");
     } else if (otherRunningCount > 0) {
       latest.textContent = "Busy elsewhere";
+      latestDetail.textContent = "";
       summary.textContent = `+${otherRunningCount}`;
     } else {
       latest.textContent = "Waiting for activity";
+      latestDetail.textContent = "";
       summary.textContent = "";
     }
 
-    const entries = orderedEntries(next);
-    empty.hidden = entries.length > 0;
+    const entries = orderedEntries(next).filter(entry => entry.key !== newest?.key);
+    if (!collapseStateInitialized && !collapseStateTouched && entries.length > 0) {
+      collapseStateInitialized = true;
+      setCollapsed(false);
+    }
+    empty.hidden = entries.length > 0 || newest !== null;
     reconcileEntries(entries, now);
 
   }
@@ -736,8 +767,11 @@ def _activity_widget_html() -> str:
     try {
       const result = await window.openai.callTool("get_activity", { run_id: state.run_id });
       const next = result?.structuredContent ?? result?.structured_content ?? result;
+      if (next?.superseded) {
+        retirePanel();
+        return;
+      }
       if (next?.run_id) render(next);
-      if (next?.superseded) return;
     } catch (_) {
       // Keep the last useful state; transient bridge/server failures are non-fatal.
     }
@@ -750,7 +784,13 @@ def _activity_widget_html() -> str:
 
   function acceptGlobals(event) {
     const next = event?.detail?.globals?.toolOutput;
-    if (next?.run_id) render(next);
+    if (!next?.run_id) return;
+    if (state?.run_id && next.run_id !== state.run_id) return;
+    if (next.superseded) {
+      retirePanel();
+      return;
+    }
+    render(next);
   }
   window.addEventListener("openai:set_globals", acceptGlobals, { passive: true });
 

@@ -2,11 +2,13 @@
 The Serena Model Context Protocol (MCP) Server
 """
 
+import base64
 import sys
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, cast
 
 import docstring_parser
@@ -16,7 +18,7 @@ from mcp.server.fastmcp.server import Context, FastMCP, Settings
 from mcp.server.fastmcp.tools.base import Tool as FastMCPTool
 from mcp.server.session import ServerSessionT
 from mcp.shared.context import LifespanContextT, RequestT
-from mcp.types import ToolAnnotations
+from mcp.types import Icon, ToolAnnotations
 from pydantic_settings import SettingsConfigDict
 from sensai.util import logging
 
@@ -33,6 +35,15 @@ from serena.util.exception import show_fatal_exception_safe
 from serena.util.logging import MemoryLogHandler
 
 log = logging.getLogger(__name__)
+
+
+_SERVER_ICON_PATH = Path(__file__).parent / "resources" / "kendell_dashboard" / "serena-icon-128.png"
+
+
+def _server_icons() -> list[Icon]:
+    """Returns the Serena server icon embedded as a credential-free data URI."""
+    encoded = base64.b64encode(_SERVER_ICON_PATH.read_bytes()).decode("ascii")
+    return [Icon(src=f"data:image/png;base64,{encoded}", mimeType="image/png", sizes=["128x128"])]
 
 
 def configure_logging(*args, **kwargs) -> None:
@@ -358,8 +369,8 @@ class SerenaMCPFactory:
             name="show_activity",
             title="Show Serena Activity",
             description=(
-                "Shows a compact live Serena command panel. Call this once before the first substantive Serena tool "
-                "in a multi-step turn; do not call it for a single quick Serena lookup."
+                "Shows a compact live Serena command panel. Call this once in each multi-step assistant turn, before "
+                "the first substantive Serena tool; do not reuse a panel from an earlier turn or call it for a single quick lookup."
             ),
             annotations=ToolAnnotations(title="Show Serena Activity", readOnlyHint=True, destructiveHint=False),
             meta={
@@ -484,6 +495,7 @@ class SerenaMCPFactory:
             name="Serena",
             lifespan=self.server_lifespan,
             website_url="https://oraios.github.io/serena",
+            icons=_server_icons(),
             host=host,
             port=port,
             instructions=instructions,

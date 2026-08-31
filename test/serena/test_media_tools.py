@@ -67,6 +67,7 @@ def test_fetch_media_file_returns_native_mcp_image(project: Project, tmp_path: P
     assert result.content[0].annotations is None
     assert result.content[1].type == "resource_link"
     assert result.content[2].type == "text"
+    assert "scientific figures" in result.content[2].text
     assert "embed the materialized file" in result.content[2].text
     assert len(result.content) == 3
 
@@ -85,6 +86,7 @@ def test_fetch_media_file_preserves_svg_mime_type(project: Project, tmp_path: Pa
     assert result.content[0].annotations is None
     assert result.content[1].type == "resource_link"
     assert result.content[2].type == "text"
+    assert "scientific figures" in result.content[2].text
     assert "embed the materialized file" in result.content[2].text
     assert len(result.content) == 3
 
@@ -257,6 +259,7 @@ def test_render_pdf_page_returns_native_mcp_image(project: Project, tmp_path: Pa
     assert result.content[0].annotations is None
     assert result.content[1].type == "resource_link"
     assert result.content[2].type == "text"
+    assert "scientific figures" in result.content[2].text
     assert "embed the materialized file" in result.content[2].text
     assert len(result.content) == 3
     file_link = get_result_file_link(raw_result)

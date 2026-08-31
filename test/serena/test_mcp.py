@@ -1,5 +1,7 @@
 """Tests for the mcp.py module in serena."""
 
+from unittest.mock import MagicMock
+
 import pytest
 from mcp.server.fastmcp.tools.base import Tool as MCPTool
 
@@ -26,6 +28,24 @@ class BaseMockTool(Tool):
 
     def __init__(self):
         super().__init__(MockAgent())
+
+
+def test_mcp_server_advertises_embedded_png_icon(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that Serena advertises its plugin icon in MCP initialization metadata."""
+    factory = SerenaMCPFactory(transport="stdio", context="chatgpt")
+    monkeypatch.setattr("serena.mcp.SerenaConfig.from_config_file", lambda: MagicMock())
+    monkeypatch.setattr(factory, "_create_serena_agent", lambda *args, **kwargs: MagicMock())
+    monkeypatch.setattr(factory, "_get_initial_instructions", lambda: "")
+
+    mcp = factory.create_mcp_server()
+    initialization = mcp._mcp_server.create_initialization_options()
+
+    assert initialization.icons is not None
+    assert len(initialization.icons) == 1
+    icon = initialization.icons[0]
+    assert icon.mimeType == "image/png"
+    assert icon.sizes == ["128x128"]
+    assert icon.src.startswith("data:image/png;base64,")
 
 
 class BasicTool(BaseMockTool):

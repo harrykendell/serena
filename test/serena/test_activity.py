@@ -280,6 +280,18 @@ def test_activity_tracker_isolates_conversations() -> None:
         tracker.get_run("conversation-b", run["run_id"])
 
 
+def test_activity_tracker_supersedes_previous_panel_in_same_conversation() -> None:
+    tracker = ActivityTracker(_FakeJobSource())
+    first = tracker.start_run("conversation-a", "serena")
+    second = tracker.start_run("conversation-a", "serena")
+
+    first_state = tracker.get_run("conversation-a", first["run_id"])
+    second_state = tracker.get_run("conversation-a", second["run_id"])
+
+    assert first_state["superseded"] is True
+    assert second_state["superseded"] is False
+
+
 def test_get_mcp_session_id_prefers_openai_conversation_metadata() -> None:
     meta = RequestParams.Meta.model_validate({"openai/session": "conversation-123"})
     context = SimpleNamespace(request_context=SimpleNamespace(meta=meta), session=object())
@@ -334,6 +346,19 @@ def test_activity_resource_uses_mcp_app_contract() -> None:
     assert 'window.openai.callTool("get_activity"' in content.content
     assert 'id="activity-logo"' in content.content
     assert 'id="activity-latest"' in content.content
+    assert 'id="activity-latest-detail"' in content.content
+    assert 'id="serena-activity" class="activity collapsed"' in content.content
+    assert 'id="activity-header" class="header" type="button" aria-expanded="false"' in content.content
+    assert 'id="activity-body" class="body" aria-live="polite" hidden' in content.content
+    assert "if (state?.run_id && next.run_id !== state.run_id) return;" in content.content
+    assert (
+        """if (next?.superseded) {
+        retirePanel();
+        return;
+      }
+      if (next?.run_id) render(next);"""
+        in content.content
+    )
     assert "<strong>Serena</strong>" not in content.content
 
 

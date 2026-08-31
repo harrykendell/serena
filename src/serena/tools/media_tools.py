@@ -283,8 +283,9 @@ class _McpMediaTool(Tool, ToolMarkerOptional):
             display_hint = TextContent(
                 type="text",
                 text=(
-                    "If showing this image is relevant to the user's request, embed the materialized file in the assistant "
-                    "response using normal Markdown image syntax."
+                    "Inspect the native image when it is relevant to the ongoing work. For scientific figures, plots, "
+                    "diagnostics, and other useful visual results, normally also embed the materialized file in the assistant "
+                    "response using normal Markdown image syntax so the user can inspect it too."
                 ),
             )
         elif isinstance(media, Audio):
@@ -474,7 +475,10 @@ class UploadFileTool(Tool, ToolMarkerCanEdit, ToolMarkerOptional):
 
 
 class FetchMediaFileTool(_McpMediaTool):
-    """Returns native project image/audio media. In ChatGPT, show returned images inline when relevant to the user's request."""
+    """Returns native project image/audio media.
+
+    In ChatGPT, normally show scientific figures, plots, diagnostics, and other images relevant to the ongoing work inline so the user can inspect them too.
+    """
 
     _MAX_FILE_SIZE = 25 * 1024 * 1024
 
@@ -510,7 +514,10 @@ class FetchMediaFileTool(_McpMediaTool):
 
 
 class RenderPdfPageTool(_McpMediaTool):
-    """Renders one PDF page as native image media. In ChatGPT, show the rendered page inline when relevant to the user's request."""
+    """Renders one PDF page as native image media.
+
+    In ChatGPT, normally show rendered pages containing scientific figures, plots, diagrams, diagnostics, or other visual results relevant to the ongoing work inline so the user can inspect them too.
+    """
 
     _MIN_DPI = 72
     _MAX_DPI = 300
