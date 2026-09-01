@@ -168,10 +168,13 @@ base_modes:
 # See https://oraios.github.io/serena/02-usage/050_configuration.html#modes
 default_modes:
 
-# Used as default for tools where the apply method has a default maximal answer length.
-# Even though the value of the max_answer_chars can be changed when calling the tool, it may make sense to adjust this default
-# through the global configuration.
+# Legacy character ceiling for tools where the apply method has a default maximal answer length.
 default_max_tool_answer_chars: 150000
+
+# Approximate default response budget when retained-output paging is available (for example in the ChatGPT context).
+# Serena uses a deterministic four-characters-per-token approximation here. Explicit max_answer_chars tool arguments still
+# override this implicit default exactly.
+default_max_tool_answer_tokens: 8000
 
 # the name of the token count estimator to use for tool usage statistics.
 # See the `RegisteredTokenCountEstimator` enum for available options.

@@ -18,6 +18,22 @@ class ToolOutputPage:
     offset: int
     content: str
     next_offset: int | None
+    is_open: bool = False
+
+    @property
+    def end_offset(self) -> int:
+        """Exclusive character offset reached by this page."""
+        return self.offset + len(self.content)
+
+    @property
+    def complete(self) -> bool:
+        """Whether this page contains the complete finalized retained result."""
+        return not self.is_open and self.offset == 0 and self.next_offset is None
+
+    @property
+    def truncated(self) -> bool:
+        """Whether retained content exists outside this page."""
+        return self.offset > 0 or self.next_offset is not None
 
 
 @dataclass(frozen=True)
@@ -142,7 +158,7 @@ class ToolOutputStore:
         answer_length = descriptor.total_chars if answer_chars is None else answer_chars
         footer = f"\nUse read_tool_output(output_id='{output_id}', offset=<offset>) to read another page."
         details_text = f"\n{details}" if details else ""
-        available = max_answer_chars - len(footer) - len(details_text) - 180
+        available = max_answer_chars - len(footer) - len(details_text) - 280
         tail_length = max(0, min(descriptor.total_chars, available))
 
         while True:
@@ -151,6 +167,8 @@ class ToolOutputStore:
             header = (
                 f"The answer is too long ({answer_length} characters). {retained_label} retained as {output_id}.\n"
                 f"Showing tail from character {tail_start}:{details_text}\n"
+                f"complete=false; truncated=true; total_chars={descriptor.total_chars}; "
+                f"shown_range={tail_start}:{descriptor.total_chars}\n"
             )
             response = f"{header}{page.content if page is not None else ''}{footer}"
             if len(response) <= max_answer_chars or tail_length == 0:
@@ -207,6 +225,7 @@ class ToolOutputStore:
                 offset=offset,
                 content=content,
                 next_offset=next_offset,
+                is_open=record.is_open,
             )
 
     def read_tail(self, output_id: str, max_chars: int) -> ToolOutputPage:

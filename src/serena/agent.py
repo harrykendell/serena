@@ -12,6 +12,7 @@ import threading
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -365,6 +366,61 @@ class ProjectPromptProvisionStatus:
         return self._get_session_status(session_id).project_activation_message_provided
 
 
+@dataclass
+class ProjectRuntime:
+    """Owns the mutable execution state associated with one loaded project."""
+
+    project: Project
+    task_executor: TaskExecutor
+    active_modes: ActiveModes
+    active_tools: AvailableTools
+    prompt_status: ProjectPromptProvisionStatus
+
+
+class SessionProjectRegistry:
+    """Binds MCP sessions to cached project runtimes."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._runtimes_by_root: dict[str, ProjectRuntime] = {}
+        self._project_root_by_session: dict[str, str] = {}
+
+    def get_runtime_for_session(self, session_id: str) -> ProjectRuntime | None:
+        """Returns the runtime currently bound to ``session_id``."""
+        with self._lock:
+            project_root = self._project_root_by_session.get(session_id)
+            if project_root is None:
+                return None
+            return self._runtimes_by_root.get(project_root)
+
+    def bind(
+        self,
+        session_id: str,
+        project: Project,
+        runtime_factory: Callable[[Project], ProjectRuntime],
+    ) -> tuple[ProjectRuntime, bool, bool]:
+        """Binds ``session_id`` to ``project`` and returns runtime/create/change state."""
+        project_root = project.project_root
+        with self._lock:
+            previous_root = self._project_root_by_session.get(session_id)
+            if previous_root == project_root:
+                runtime = self._runtimes_by_root[project_root]
+                return runtime, False, False
+
+            runtime = self._runtimes_by_root.get(project_root)
+            runtime_created = runtime is None
+            if runtime is None:
+                runtime = runtime_factory(project)
+                self._runtimes_by_root[project_root] = runtime
+            self._project_root_by_session[session_id] = project_root
+            return runtime, runtime_created, True
+
+    def get_runtimes(self) -> list[ProjectRuntime]:
+        """Returns a stable snapshot of all cached project runtimes."""
+        with self._lock:
+            return list(self._runtimes_by_root.values())
+
+
 class DashboardManager:
     class Mode(Enum):
         BROWSER = "browser"
@@ -564,6 +620,12 @@ class SerenaAgent:
         :param web_dashboard_port: exact dashboard port to bind, or None to use the first available secondary dashboard port.
         """
         self._active_project: Project | None = None  # NOTE: field name used in __del__
+        self._default_project: Project | None = None
+        self._session_id_context: ContextVar[str] = ContextVar(f"serena_session_{id(self)}", default="global")
+        self._execution_project_context: ContextVar[tuple[bool, ProjectRuntime | None, Project | None]] = ContextVar(
+            f"serena_execution_project_{id(self)}", default=(False, None, None)
+        )
+        self._session_projects = SessionProjectRegistry()
         self._project_activation_callback = project_activation_callback
         self._project_activation_error: str | None = project_activation_error
         self._gui_log_viewer: Optional["GuiLogViewer"] = None
@@ -658,8 +720,11 @@ class SerenaAgent:
         self._prompt_tool_names_mapping = self._create_prompt_tool_names_mapping(self._language_backend)
 
         # create executor for starting the language server and running tools in another thread
-        # This executor is used to achieve linear task execution
-        self._task_executor = TaskExecutor("SerenaAgentTaskExecutor", self._task_completion_callback)
+        # This executor is used to achieve linear task execution when no session project is bound.
+        self._last_executed_task_lock = threading.Lock()
+        self._task_completion_dispatch_lock = threading.Lock()
+        self._last_executed_task: TaskExecutor.TaskInfo | None = None
+        self._task_executor = self._create_task_executor("SerenaAgentTaskExecutor")
 
         # Initialize the prompt factory
         self.prompt_factory = SerenaPromptFactory()
@@ -825,26 +890,51 @@ class SerenaAgent:
     def get_language_backend(self) -> LanguageBackend:
         return self._language_backend
 
+    def _create_task_executor(self, name: str) -> TaskExecutor:
+        """Creates an executor whose completions feed the shared dashboard history."""
+        executor_holder: list[TaskExecutor] = []
+
+        def completion_callback() -> None:
+            executor = executor_holder[0]
+            with self._task_completion_dispatch_lock:
+                task_info = executor.get_last_executed_task()
+                if task_info is not None:
+                    with self._last_executed_task_lock:
+                        self._last_executed_task = task_info
+                self._task_completion_callback()
+
+        executor = TaskExecutor(name, completion_callback)
+        executor_holder.append(executor)
+        return executor
+
     def get_current_tasks(self) -> list[TaskExecutor.TaskInfo]:
         """
-        Gets the list of tasks currently running or queued for execution.
-        The function returns a list of thread-safe TaskInfo objects (specifically created for the caller).
+        Gets tasks currently running or queued across the global and project runtimes.
 
-        :return: the list of tasks in the execution order (running task first)
+        :return: current task snapshots from all distinct executors
         """
-        return self._task_executor.get_current_tasks()
+        executors = [self._task_executor]
+        seen_executor_ids = {id(self._task_executor)}
+        for runtime in self._session_projects.get_runtimes():
+            executor_id = id(runtime.task_executor)
+            if executor_id not in seen_executor_ids:
+                seen_executor_ids.add(executor_id)
+                executors.append(runtime.task_executor)
+
+        tasks: list[TaskExecutor.TaskInfo] = []
+        for executor in executors:
+            tasks.extend(executor.get_current_tasks())
+        return tasks
 
     def get_last_executed_task(self) -> TaskExecutor.TaskInfo | None:
-        """
-        Gets the last executed task.
-
-        :return: the last executed task info or None if no task has been executed yet
-        """
-        return self._task_executor.get_last_executed_task()
+        """Returns the most recently completed task across all project runtimes."""
+        with self._last_executed_task_lock:
+            return self._last_executed_task
 
     def get_language_server_manager(self) -> LanguageServerManager | None:
-        if self._active_project is not None:
-            return self._active_project.language_server_manager
+        project = self.get_active_project()
+        if project is not None:
+            return project.language_server_manager
         return None
 
     def get_language_server_manager_or_raise(self) -> LanguageServerManager:
@@ -886,6 +976,10 @@ class SerenaAgent:
         output_str = str(tool_result)
         log.debug(f"Recording tool usage for tool '{tool_name}'")
         self._tool_usage_stats.record_tool_usage(tool_name, input_str, output_str)
+
+    def retain_tool_output(self, tool_name: str, content: str) -> str:
+        """Retain one complete tool result and return its stable identifier."""
+        return self._tool_output_store.retain(tool_name, content)
 
     def retain_tool_output_with_tail(self, tool_name: str, content: str, max_answer_chars: int) -> str:
         """Retain an oversized tool result and return a bounded identified tail."""
@@ -960,11 +1054,41 @@ class SerenaAgent:
         """
         return list(self._exposed_tools.tools)
 
+    @contextmanager
+    def session_context(self, session_id: str) -> Iterator[None]:
+        """Binds project-dependent lookups in the current thread to ``session_id``."""
+        token = self._session_id_context.set(session_id)
+        try:
+            yield
+        finally:
+            self._session_id_context.reset(token)
+
+    def get_active_project_for_session(self, session_id: str) -> Project | None:
+        """Returns the project selected by ``session_id`` without changing execution context."""
+        if session_id == "global":
+            return self._active_project
+        runtime = self._session_projects.get_runtime_for_session(session_id)
+        if runtime is not None:
+            return runtime.project
+        return self._default_project
+
+    def _get_project_runtime(self, session_id: str | None = None) -> ProjectRuntime | None:
+        """Returns the project runtime pinned to this execution, or the session's current runtime."""
+        if session_id is None:
+            execution_is_pinned, runtime, _ = self._execution_project_context.get()
+            if execution_is_pinned:
+                return runtime
+            session_id = self._session_id_context.get()
+        return self._session_projects.get_runtime_for_session(session_id)
+
     def get_active_project(self) -> Project | None:
         """
-        :return: the active project or None if no project is active
+        :return: the project pinned to this execution, otherwise the current session selection
         """
-        return self._active_project
+        execution_is_pinned, _, project = self._execution_project_context.get()
+        if execution_is_pinned:
+            return project
+        return self.get_active_project_for_session(self._session_id_context.get())
 
     def get_active_project_or_raise(self) -> Project:
         """
@@ -977,8 +1101,11 @@ class SerenaAgent:
 
     def get_active_modes(self) -> ActiveModes:
         """
-        :return: the active modes
+        :return: the active modes for the current execution session
         """
+        runtime = self._get_project_runtime()
+        if runtime is not None:
+            return runtime.active_modes
         return self._active_modes
 
     @staticmethod
@@ -1058,10 +1185,10 @@ class SerenaAgent:
         """
         :return: the memory manager for the active project (if any) or a global memory manager if no project is active
         """
-        if self._active_project is not None:
-            return self._active_project.memory_manager
-        else:
-            return self._create_global_memory_manager()
+        project = self.get_active_project()
+        if project is not None:
+            return project.memory_manager
+        return self._create_global_memory_manager()
 
     def create_system_prompt(self, session_id: str = "global") -> str:
         """
@@ -1070,128 +1197,151 @@ class SerenaAgent:
         :param session_id: the client session ID for the case where this is run from a tool; "global" for the connection time case
         :return: the prompt
         """
-        available_tools = self._active_tools
-        available_markers = available_tools.tool_marker_names
-        global_memories = self._create_global_memory_manager().list_global_memories()
-        global_memories_str = dict_string(global_memories.to_dict()) if len(global_memories) > 0 else ""
-        log.info("Generating system prompt with available_tools=(see active tools), available_markers=%s", available_markers)
+        with self.session_context(session_id):
+            available_tools = self._get_active_tools()
+            prompt_status = self._get_project_prompt_status()
+            active_project = self.get_active_project()
+            available_markers = available_tools.tool_marker_names
+            global_memories = self._create_global_memory_manager().list_global_memories()
+            global_memories_str = dict_string(global_memories.to_dict()) if len(global_memories) > 0 else ""
+            log.info("Generating system prompt with available_tools=(see active tools), available_markers=%s", available_markers)
 
-        # determine modes for which prompts must (still) be provided, excluding modes that were already provided in a
-        # previously provided project activation message (if any)
-        relevant_modes = []
-        for mode in self.get_active_modes().get_modes(include_background_base_modes=True):
-            if mode.has_prompt():
-                if not self._project_prompt_status.is_mode_prompt_already_provided(mode.name, session_id):
+            relevant_modes = []
+            for mode in self.get_active_modes().get_modes(include_background_base_modes=True):
+                if mode.has_prompt() and not prompt_status.is_mode_prompt_already_provided(mode.name, session_id):
                     relevant_modes.append(mode)
-        self._project_prompt_status.mark_mode_prompts_as_provided(session_id)
+            prompt_status.mark_mode_prompts_as_provided(session_id)
 
-        system_prompt = self.prompt_factory.create_system_prompt(
-            context_system_prompt=self._render_prompt(self._context.prompt, tag="context"),
-            mode_system_prompts=[self._render_prompt(mode.prompt, tag="mode", tag_name_attr=mode.name) for mode in relevant_modes],
-            available_tools=available_tools.tool_names,
-            available_markers=available_markers,
-            global_memories_list=global_memories_str,
-            tool_names=self._prompt_tool_names_mapping,
-        )
+            system_prompt = self.prompt_factory.create_system_prompt(
+                context_system_prompt=self._render_prompt(self._context.prompt, tag="context"),
+                mode_system_prompts=[self._render_prompt(mode.prompt, tag="mode", tag_name_attr=mode.name) for mode in relevant_modes],
+                available_tools=available_tools.tool_names,
+                available_markers=available_markers,
+                global_memories_list=global_memories_str,
+                tool_names=self._prompt_tool_names_mapping,
+            )
 
-        # provide the project activation message if it hasn't yet been provided
-        if self._active_project is not None and not self._project_prompt_status.is_project_activation_message_already_provided(session_id):
-            system_prompt += "\n\n" + self._format_prompt_tag(self.get_project_activation_message(session_id), tag="active-project")
-        elif self._project_activation_error:
-            system_prompt += f"\n\nNo project is active ({self._project_activation_error})."
+            if active_project is not None and not prompt_status.is_project_activation_message_already_provided(session_id):
+                system_prompt += "\n\n" + self._format_prompt_tag(self.get_project_activation_message(session_id), tag="active-project")
+            elif self._project_activation_error:
+                system_prompt += f"\n\nNo project is active ({self._project_activation_error})."
 
-        return self._format_prompt_tag(system_prompt, tag="serena")
+            return self._format_prompt_tag(system_prompt, tag="serena")
 
     def get_project_activation_message(self, session_id: str) -> str:
         """
         :return: a message providing information about the project upon activation (e.g. programming language, memories, initial prompt)
         :raise: AssertionError if no project is active
         """
-        proj = self._active_project
-        assert proj is not None, "A project must be active before calling this."
+        with self.session_context(session_id):
+            runtime = self._session_projects.get_runtime_for_session(session_id)
+            proj = runtime.project if runtime is not None else self._active_project
+            assert proj is not None, "A project must be active before calling this."
+            prompt_status = runtime.prompt_status if runtime is not None else self._project_prompt_status
+            active_tools = runtime.active_tools if runtime is not None else self._active_tools
 
-        # Note: The activation message is always returned in full, even if it was already provided in the current session,
-        #   because some clients (e.g. Claude Desktop) will use the same session across multiple chats.
-        #   So while we don't want the activation message to be additionally included in the system prompt
-        #   (initial_instructions), an explicit project activation should always return it.
-        # (The check below deliberately left in place for documentation purposes, preventing a regression)
-        if self._project_prompt_status.is_project_activation_message_already_provided(session_id):
-            pass  # no special handling
+            with self.active_project_context(proj):
+                if prompt_status.is_project_activation_message_already_provided(session_id):
+                    pass
 
-        # provide basic project information (name, location, languages, encoding)
-        if proj.is_newly_created:
-            msg = f"Created and activated a new project with name '{proj.project_name}' at {proj.project_root}.\n"
-        else:
-            msg = f"The project with name '{proj.project_name}' at {proj.project_root} is activated.\n"
-        if self._language_backend == LanguageBackend.LSP:
-            language_servers_str = ", ".join([ls.value for ls in proj.project_config.language_servers])
-            msg += f"Active language servers: {language_servers_str}.\n"
-        msg += f"File encoding: {proj.project_config.encoding}.\n"
+                if proj.is_newly_created:
+                    msg = f"Created and activated a new project with name '{proj.project_name}' at {proj.project_root}.\n"
+                else:
+                    msg = f"The project with name '{proj.project_name}' at {proj.project_root} is activated.\n"
+                if self._language_backend == LanguageBackend.LSP:
+                    language_servers_str = ", ".join([ls.value for ls in proj.project_config.language_servers])
+                    msg += f"Active language servers: {language_servers_str}.\n"
+                msg += f"File encoding: {proj.project_config.encoding}.\n"
 
-        # add list of memories (if memories are enabled)
-        include_memories = self._active_tools.contains_tool_class(ReadMemoryTool)
-        if include_memories:
-            project_memories = proj.memory_manager.list_project_memories()
-            if project_memories:
-                msg += (
-                    f"{json.dumps(project_memories.to_dict())}\n"
-                    + f"Use the `{ReadMemoryTool.get_name_from_cls()}` tool to read these memories later if they are relevant to the task.\n"
-                )
-            elif self._active_tools.contains_tool_class(OnboardingTool):
-                msg += f"Onboarding has not been performed yet. Ask the user whether to perform onboarding via the `{OnboardingTool.get_name_from_cls()}` tool.\n"
+                if active_tools.contains_tool_class(ReadMemoryTool):
+                    project_memories = proj.memory_manager.list_project_memories()
+                    if project_memories:
+                        msg += (
+                            f"{json.dumps(project_memories.to_dict())}\n"
+                            + f"Use the `{ReadMemoryTool.get_name_from_cls()}` tool to read these memories later if they are relevant to the task.\n"
+                        )
+                    elif active_tools.contains_tool_class(OnboardingTool):
+                        msg += f"Onboarding has not been performed yet. Ask the user whether to perform onboarding via the `{OnboardingTool.get_name_from_cls()}` tool.\n"
 
-        # add prompts for modes that were dynamically activated by the project
-        modes_with_prompts = self._project_prompt_status.get_modes_with_prompts_to_be_provided_for_project_activation(session_id)
-        if modes_with_prompts:
-            for mode in modes_with_prompts:
-                msg += self._render_prompt(mode.prompt, tag="mode", tag_name_attr=mode.name) + "\n"
-        self._project_prompt_status.mark_mode_prompts_as_provided(session_id)
+                modes_with_prompts = prompt_status.get_modes_with_prompts_to_be_provided_for_project_activation(session_id)
+                for mode in modes_with_prompts:
+                    msg += self._render_prompt(mode.prompt, tag="mode", tag_name_attr=mode.name) + "\n"
+                prompt_status.mark_mode_prompts_as_provided(session_id)
 
-        # add project-specific prompt
-        if proj.project_config.initial_prompt:
-            msg += "\n" + self._render_prompt(proj.project_config.initial_prompt, tag="project-instructions")
+                if proj.project_config.initial_prompt:
+                    msg += "\n" + self._render_prompt(proj.project_config.initial_prompt, tag="project-instructions")
 
-        self._project_prompt_status.mark_project_activation_message_as_provided(session_id)
+                prompt_status.mark_project_activation_message_as_provided(session_id)
+                return msg
 
-        return msg
-
-    def _update_active_modes(self, log_message: bool = True) -> None:
-        """
-        Updates the active modes based on the Serena configuration, the active project configuration (if any),
-        and mode overrides (if any).
-        """
+    def _create_active_modes_for_project(self, project: Project | None) -> ActiveModes:
+        """Builds the effective mode selection for one project without mutating agent-global state."""
         background_base_modes = []
         if self._language_backend.is_jetbrains():
             background_base_modes.append(SerenaAgentMode.from_name_internal("jetbrains"))
-        self._active_modes = ActiveModes(background_base_modes=background_base_modes)
-        self._active_modes.apply(self.serena_config)
-        if self._active_project:
-            self._active_modes.apply(self._active_project.project_config)
+
+        active_modes = ActiveModes(background_base_modes=background_base_modes)
+        active_modes.apply(self.serena_config)
+        if project is not None:
+            active_modes.apply(project.project_config)
         if self._session_mode_selection_definition:
-            self._active_modes.apply(self._session_mode_selection_definition)
+            active_modes.apply(self._session_mode_selection_definition)
+        return active_modes
+
+    def _create_active_tools_for_project(self, project: Project | None, active_modes: ActiveModes) -> AvailableTools:
+        """Builds the active tool set for one project without mutating agent-global state."""
+        tool_set = self._base_toolset.apply(*active_modes.get_modes())
+        if project is not None:
+            tool_set = tool_set.apply(project.project_config)
+            if project.project_config.read_only:
+                tool_set = tool_set.without_editing_tools()
+        return tool_set.to_available_tools(self._all_tools)
+
+    def _create_project_runtime(self, project: Project, task_executor: TaskExecutor | None = None) -> ProjectRuntime:
+        """Creates the isolated mutable execution state for one cached project."""
+        project.set_agent(self)
+        active_modes = self._create_active_modes_for_project(project)
+        baseline_modes = self._create_active_modes_for_project(None)
+        newly_activated_mode_names = set(active_modes.get_mode_names()) - set(baseline_modes.get_mode_names())
+        active_tools = self._create_active_tools_for_project(project, active_modes)
+        return ProjectRuntime(
+            project=project,
+            task_executor=task_executor or self._create_task_executor(f"SerenaProjectRuntime[{project.project_name}]"),
+            active_modes=active_modes,
+            active_tools=active_tools,
+            prompt_status=ProjectPromptProvisionStatus(newly_activated_mode_names=newly_activated_mode_names),
+        )
+
+    def _get_project_prompt_status(self) -> ProjectPromptProvisionStatus:
+        """Returns prompt-provision state for the current execution session."""
+        runtime = self._get_project_runtime()
+        if runtime is not None:
+            return runtime.prompt_status
+        return self._project_prompt_status
+
+    def _get_active_tools(self) -> AvailableTools:
+        """Returns active tools for the current execution session."""
+        runtime = self._get_project_runtime()
+        if runtime is not None:
+            return runtime.active_tools
+        return self._active_tools
+
+    def _update_active_modes(self, log_message: bool = True) -> None:
+        """
+        Updates the global/default active modes from the Serena configuration and active project.
+        """
+        self._active_modes = self._create_active_modes_for_project(self._active_project)
         if log_message:
             active_mode_names = self._active_modes.get_mode_names()
             log.info(f"Active modes ({len(active_mode_names)}): {', '.join(active_mode_names)}")
 
     def _update_active_tools(self) -> None:
         """
-        Updates the active tools based on the active modes and the active project.
-        The base tool set already takes the Serena configuration and the context into account
-        (as well as many other aspects, such as JetBrains mode).
+        Updates the global/default active tools based on the active modes and project.
         """
-        # apply modes
-        tool_set = self._base_toolset.apply(*self._active_modes.get_modes())
-
-        # apply active project configuration (if any)
-        if self._active_project is not None:
-            tool_set = tool_set.apply(self._active_project.project_config)
-            if self._active_project.project_config.read_only:
-                tool_set = tool_set.without_editing_tools()
-
-        self._active_tools = tool_set.to_available_tools(self._all_tools)
+        self._active_tools = self._create_active_tools_for_project(self._active_project, self._active_modes)
         log.info(f"Active tools ({len(self._active_tools)}): {', '.join(self._active_tools.tool_names)}")
 
-        # check if a tool was activated that is not in the exposed tool set and issue a warning if so
         active_tools_not_exposed = set(self._active_tools.tool_names) - set(self._exposed_tools.tool_names)
         if active_tools_not_exposed:
             log.warning(
@@ -1201,32 +1351,48 @@ class SerenaAgent:
             )
 
     def issue_task(
-        self, task: Callable[[], T], name: str | None = None, logged: bool = True, timeout: float | None = None
+        self,
+        task: Callable[[], T],
+        name: str | None = None,
+        logged: bool = True,
+        timeout: float | None = None,
+        session_id: str | None = None,
     ) -> TaskExecutor.Task[T]:
-        """
-        Issue a task to the executor for asynchronous execution.
-        It is ensured that tasks are executed in the order they are issued, one after another.
+        """Schedules a task on the executor owned by the current session's project runtime."""
+        resolved_session_id = session_id or self._session_id_context.get()
+        runtime = self._session_projects.get_runtime_for_session(resolved_session_id)
+        if runtime is None and resolved_session_id != "global" and self._default_project is not None:
+            default_project = self._default_project
+            default_executor = self._task_executor if default_project is self._active_project else None
+            runtime, _, _ = self._session_projects.bind(
+                resolved_session_id,
+                default_project,
+                lambda project: self._create_project_runtime(project, task_executor=default_executor),
+            )
+        executor = runtime.task_executor if runtime is not None else self._task_executor
+        project = runtime.project if runtime is not None else self.get_active_project_for_session(resolved_session_id)
 
-        :param task: the task to execute
-        :param name: the name of the task for logging purposes; if None, use the task function's name
-        :param logged: whether to log management of the task; if False, only errors will be logged
-        :param timeout: the maximum time to wait for task completion in seconds, or None to wait indefinitely
-        :return: the task object, through which the task's future result can be accessed
-        """
-        return self._task_executor.issue_task(task, name=name, logged=logged, timeout=timeout)
+        def session_bound_task() -> T:
+            execution_token = self._execution_project_context.set((True, runtime, project))
+            try:
+                with self.session_context(resolved_session_id):
+                    return task()
+            finally:
+                self._execution_project_context.reset(execution_token)
 
-    def execute_task(self, task: Callable[[], T], name: str | None = None, logged: bool = True, timeout: float | None = None) -> T:
-        """
-        Executes the given task synchronously via the agent's task executor.
-        This is useful for tasks that need to be executed immediately and whose results are needed right away.
+        return executor.issue_task(session_bound_task, name=name, logged=logged, timeout=timeout)
 
-        :param task: the task to execute
-        :param name: the name of the task for logging purposes; if None, use the task function's name
-        :param logged: whether to log management of the task; if False, only errors will be logged
-        :param timeout: the maximum time to wait for task completion in seconds, or None to wait indefinitely
-        :return: the result of the task execution
-        """
-        return self._task_executor.execute_task(task, name=name, logged=logged, timeout=timeout)
+    def execute_task(
+        self,
+        task: Callable[[], T],
+        name: str | None = None,
+        logged: bool = True,
+        timeout: float | None = None,
+        session_id: str | None = None,
+    ) -> T:
+        """Executes a task synchronously on the current session's project runtime."""
+        task_obj = self.issue_task(task, name=name, logged=logged, timeout=timeout, session_id=session_id)
+        return task_obj.result(timeout=timeout)
 
     def _task_completion_callback(self) -> None:
         """
@@ -1257,17 +1423,16 @@ class SerenaAgent:
 
     def _activate_project(self, project: Project, update_active_modes: bool = True, update_active_tools: bool = True) -> bool:
         """
-        :return: True if the project was newly activated, False if it was already active
+        :return: True if the project was newly activated for the current session, False if it was already active
         """
-        # check if the project is already active
-        if self._active_project is not None and self._active_project.project_root == project.project_root:
+        session_id = self._session_id_context.get()
+        current_project = self.get_active_project_for_session(session_id)
+        if current_project is not None and current_project.project_root == project.project_root:
             return False
 
-        log.info(f"Activating {project.project_name} at {project.project_root}")
-
+        log.info(f"Activating {project.project_name} at {project.project_root} for session {session_id}")
         self._project_activation_error = None
 
-        # check if the project requires a different language backend than the one initialized at startup
         project_backend = project.project_config.language_backend
         if project_backend is not None and project_backend != self._language_backend:
             raise ValueError(
@@ -1277,12 +1442,34 @@ class SerenaAgent:
                 f"(2) Configure one MCP server per backend in your client."
             )
 
-        # shut down the previously active project to release its language server processes
+        if session_id != "global":
+            runtime, runtime_created, binding_changed = self._session_projects.bind(
+                session_id,
+                project,
+                self._create_project_runtime,
+            )
+            self._default_project = project
+            if not binding_changed:
+                return False
+
+            if runtime_created:
+
+                def init_project_services() -> None:
+                    self._run_project_activation_command(runtime.project)
+                    self._init_project_language_backend(runtime.project)
+
+                self.issue_task(init_project_services, session_id=session_id)
+
+            if self._project_activation_callback is not None:
+                self._project_activation_callback()
+            return True
+
         if self._active_project is not None:
             log.info(f"Shutting down previously active project '{self._active_project.project_name}' before switching")
             self._active_project.shutdown()
 
         self._active_project = project
+        self._default_project = project
         project.set_agent(self)
 
         if update_active_modes:
@@ -1299,18 +1486,14 @@ class SerenaAgent:
 
         def init_project_services() -> None:
             self._run_project_activation_command(project)
-            self._init_active_project_language_backend()
+            self._init_project_language_backend(project)
 
-        # initialise the project's language backend in the background
         self.issue_task(init_project_services)
 
         if self._project_activation_callback is not None:
             self._project_activation_callback()
-
-        # notify the dashboard manager of the project change (if applicable)
         if self._dashboard_manager:
             self._dashboard_manager.update_active_project(self._active_project)
-
         return True
 
     @staticmethod
@@ -1355,19 +1538,11 @@ class SerenaAgent:
         except Exception:
             log.exception(f"Unexpected error running activation_command for project '{project.project_name}'")
 
-    def _init_active_project_language_backend(self) -> None:
-        """
-        Initialises the active project's language backend
-        """
-        project = self._active_project
-        assert project is not None
-
-        # for LSP mode, start the language server manager
+    def _init_project_language_backend(self, project: Project) -> None:
+        """Initialises language-backend services owned by ``project``."""
         if self.get_language_backend().is_lsp():
             with LogTime("Language server initialization", logger=log):
-                self.reset_language_server_manager()
-
-        # for JetBrains mode, search for plugin server and spawn IDE (if not found and launch command provided)
+                project.create_language_server_manager()
         elif self.get_language_backend().is_jetbrains():
             try:
                 client = jetbrains_plugin_client.JetBrainsPluginClient.from_project(project, log_warning=False)
@@ -1381,6 +1556,12 @@ class SerenaAgent:
                     stdout, stderr = p.communicate()
                     if p.returncode != 0:
                         log.error(f"Failed to launch JetBrains IDE: {stderr.decode('utf-8')}")
+
+    def _init_active_project_language_backend(self) -> None:
+        """Initialises the active project's language backend."""
+        project = self.get_active_project()
+        assert project is not None
+        self._init_project_language_backend(project)
 
     def activate_project_from_path_or_name(
         self, project_root_or_name: str, update_active_modes: bool = True, update_active_tools: bool = True
@@ -1412,14 +1593,14 @@ class SerenaAgent:
         """
         :return: the list of names of the active tools for the current project, sorted alphabetically
         """
-        return self._active_tools.tool_names
+        return self._get_active_tools().tool_names
 
     def tool_is_active(self, tool_name: str) -> bool:
         """
-        :param tool_class: the name of the tool to check
+        :param tool_name: the name of the tool to check
         :return: True if the tool is active, False otherwise
         """
-        return self._active_tools.contains_tool_name(tool_name)
+        return self._get_active_tools().contains_tool_name(tool_name)
 
     def tool_is_exposed(self, tool_name: str) -> bool:
         """
@@ -1432,42 +1613,38 @@ class SerenaAgent:
         """
         :return: a string overview of the current configuration, including the active and available configuration options
         """
+        active_project = self.get_active_project()
         result_str = "Current configuration:\n"
         result_str += f"Serena version: {self.version}\n"
         result_str += f"Loglevel: {self.serena_config.log_level}, trace_lsp_communication={self.serena_config.trace_lsp_communication}\n"
-        if self._active_project is not None:
-            result_str += f"Active project: {self._active_project.project_name}\n"
+        if active_project is not None:
+            result_str += f"Active project: {active_project.project_name}\n"
         else:
             result_str += "No active project\n"
         result_str += f"Language backend: {self._language_backend.value}"
-        if self._active_project and self._active_project.project_config.language_backend is not None:
+        if active_project is not None and active_project.project_config.language_backend is not None:
             result_str += " (project override)"
         result_str += f" (global default: {self.serena_config.language_backend.value})\n"
-        if self._language_backend.is_lsp() and self._active_project:
-            result_str += f"Language server status: {self._active_project.get_language_server_manager_status()}\n"
+        if self._language_backend.is_lsp() and active_project is not None:
+            result_str += f"Language server status: {active_project.get_language_server_manager_status()}\n"
         result_str += "Available projects:\n" + "\n".join(list(self.serena_config.project_names)) + "\n"
         result_str += f"Active context: {self._context.name}\n"
 
-        # Active modes
         active_mode_names = self.get_active_modes().get_mode_names()
         result_str += "Active modes: {}\n".format(", ".join(active_mode_names)) + "\n"
 
-        # Available but not active modes
         all_available_modes = SerenaAgentMode.list_registered_mode_names()
         inactive_modes = [mode for mode in all_available_modes if mode not in active_mode_names]
         if inactive_modes:
             result_str += "Available but not active modes: {}\n".format(", ".join(inactive_modes)) + "\n"
 
-        # Active tools
         result_str += "Active tools (after all exclusions from the project, context, and modes):\n"
         active_tool_names = self.get_active_tool_names()
-        # print the tool names in chunks
         chunk_size = 4
         for i in range(0, len(active_tool_names), chunk_size):
             chunk = active_tool_names[i : i + chunk_size]
             result_str += "  " + ", ".join(chunk) + "\n"
 
-        # Available but not active tools
         all_tool_names = sorted([tool.get_name_from_cls() for tool in self._all_tools.values()])
         inactive_tool_names = [tool for tool in all_tool_names if tool not in active_tool_names]
         if inactive_tool_names:
@@ -1521,7 +1698,6 @@ class SerenaAgent:
         log.info("SerenaAgent is shutting down ...")
         if hasattr(self, "_tool_output_store"):
             self._tool_output_store.close()
-        # apply shutdown depending on allocated resources, handling quick ones first (dashboard manager & GUI viewer)
         if self._gui_log_viewer:
             log.info("Stopping the GUI log window ...")
             self._gui_log_viewer.stop()
@@ -1529,10 +1705,19 @@ class SerenaAgent:
         if self._dashboard_manager:
             self._dashboard_manager.shutdown()
             self._dashboard_manager = None
+
+        projects_by_root: dict[str, Project] = {}
         if self._active_project is not None:
-            log.info(f"Shutting down active project '{self._active_project.project_name}' ...")
-            self._active_project.shutdown(timeout=timeout)
-            self._active_project = None
+            projects_by_root[self._active_project.project_root] = self._active_project
+        if hasattr(self, "_session_projects"):
+            for runtime in self._session_projects.get_runtimes():
+                projects_by_root[runtime.project.project_root] = runtime.project
+
+        for project in projects_by_root.values():
+            log.info(f"Shutting down project '{project.project_name}' ...")
+            project.shutdown(timeout=timeout)
+        self._active_project = None
+        self._default_project = None
 
     def shutdown(self) -> None:
         """
@@ -1556,14 +1741,9 @@ class SerenaAgent:
 
     @contextmanager
     def active_project_context(self, project: Project) -> Iterator[None]:
-        """
-        Context manager for temporarily setting/overriding the active project
-
-        :param project: the project to be active
-        """
-        original_project = self._active_project
-        self._active_project = project
+        """Temporarily pins project-dependent lookups in the current execution context."""
+        execution_token = self._execution_project_context.set((True, None, project))
         try:
             yield
         finally:
-            self._active_project = original_project
+            self._execution_project_context.reset(execution_token)

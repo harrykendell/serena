@@ -1,5 +1,6 @@
 """Behaviour tests for incremental shell command output."""
 
+import os
 import re
 import shlex
 import sys
@@ -48,11 +49,30 @@ def test_execute_shell_command_streams_output_before_process_exit() -> None:
     assert sink.content == "FIRST\nSECOND\n"
 
 
+def test_execute_shell_command_uses_user_shell_environment(monkeypatch, tmp_path) -> None:
+    """Foreground commands resolve executables from the enriched user-shell PATH."""
+    custom_bin = tmp_path / "bin"
+    custom_bin.mkdir()
+    executable = custom_bin / "from-user-path"
+    executable.write_text("#!/bin/sh\nprintf 'resolved-from-user-path\\n'\n", encoding="utf-8")
+    executable.chmod(0o755)
+    environment = dict(os.environ)
+    environment["PATH"] = f"{custom_bin}:/usr/bin:/bin"
+    monkeypatch.setattr("serena.util.shell.user_shell_environment", lambda: environment)
+
+    result = execute_shell_command("from-user-path", capture_stderr=True)
+
+    assert result.return_code == 0
+    assert result.stdout == "resolved-from-user-path\n"
+    assert result.stderr == ""
+
+
 def test_shell_tool_oversize_response_reuses_live_transcript_id(tmp_path) -> None:
     store = ToolOutputStore()
     agent = MagicMock()
     agent.get_active_project_or_raise.return_value = SimpleNamespace(project_root=str(tmp_path))
     agent.serena_config.default_max_tool_answer_chars = 400
+    agent.serena_config.default_max_tool_answer_tokens = 100
     agent.open_tool_output.side_effect = store.open
     agent.render_tool_output_tail.side_effect = store.render_tail
     agent.tool_is_active.return_value = True

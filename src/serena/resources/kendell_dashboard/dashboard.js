@@ -566,6 +566,7 @@ function updateExecutionRow(row, execution) {
   const snapshot = JSON.stringify([
     execution.name,
     execution.status,
+    execution.project || null,
     execution.parameters,
     execution.result,
     execution.error,
@@ -578,7 +579,8 @@ function updateExecutionRow(row, execution) {
   if (row._dashboardSnapshot === snapshot) return;
   row._dashboardSnapshot = snapshot;
 
-  setNodeText(refs.title, executionDisplayName(execution.name));
+  const executionTitle = executionDisplayName(execution.name);
+  setNodeText(refs.title, execution.project ? `${executionTitle} · ${execution.project}` : executionTitle);
   updateStatusBadge(refs.badge, execution.status);
   updateExecutionSection(refs.parameters, execution.parameters);
 

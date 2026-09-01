@@ -10,6 +10,12 @@ prompt: |
   If complex relationships that the user asked for should be visualized or explained, consider creating
   a diagram in addition to your text-based communication. Note that in the chat interface you have various rendering
   options for text, html, and mermaid diagrams, as has been explained to you in your initial instructions.
+
+  Serena project selection is scoped to the current ChatGPT conversation. Always activate the intended project before
+  repository work rather than assuming another conversation's selection. Multiple conversations may read the same project;
+  writes to one project are serialized for correctness, while writes to different projects may proceed concurrently.
+  Serena owns only its project-local coding, Git, shell, file, memory, and job workflows; do not infer delegate/provider
+  lifecycle from Serena state.
 excluded_tools: []
 included_optional_tools:
   - start_job

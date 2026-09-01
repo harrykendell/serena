@@ -19,7 +19,7 @@ class ReadToolOutputTool(Tool, ToolMarkerDoesNotRequireActiveProject, ToolMarker
         :param output_id: stable identifier printed in the original truncated tool response
         :param offset: zero-based character offset at which to start this page
         :param max_chars: maximum content characters to return, from 1 through 20000
-        :return: JSON containing the exact output identifier, page range, content, and next offset
+        :return: JSON containing the exact output identifier, page range, completeness metadata, content, and cursors
         """
         if max_chars <= 0 or max_chars > self._MAX_PAGE_CHARS:
             raise ValueError(f"max_chars must be between 1 and {self._MAX_PAGE_CHARS}")
@@ -31,9 +31,12 @@ class ReadToolOutputTool(Tool, ToolMarkerDoesNotRequireActiveProject, ToolMarker
                 "tool_name": page.tool_name,
                 "total_chars": page.total_chars,
                 "offset": page.offset,
-                "end_offset": page.offset + len(page.content),
+                "end_offset": page.end_offset,
                 "previous_offset": max(0, page.offset - max_chars) if page.offset > 0 else None,
                 "next_offset": page.next_offset,
+                "complete": page.complete,
+                "truncated": page.truncated,
+                "is_open": page.is_open,
                 "content": page.content,
             },
             ensure_ascii=False,

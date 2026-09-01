@@ -16,6 +16,9 @@ T = TypeVar("T")
 
 
 class TaskExecutor:
+    _task_name_lock = threading.Lock()
+    _next_task_index = 1
+
     def __init__(self, name: str, task_completion_callback: Callable[[], None] | None = None):
         """
         :param name: the name of the task executor, used for logging purposes
@@ -26,7 +29,6 @@ class TaskExecutor:
         self._task_executor_queue: list[TaskExecutor.Task] = []
         self._task_executor_thread = Thread(target=self._process_task_queue, name=name, daemon=True)
         self._task_executor_thread.start()
-        self._task_executor_task_index = 1
         self._task_executor_current_task: TaskExecutor.Task | None = None
         self._task_executor_last_executed_task_info: TaskExecutor.TaskInfo | None = None
         self._task_completion_callback = task_completion_callback
@@ -195,6 +197,14 @@ class TaskExecutor:
                     tasks.append(self.TaskInfo.from_task(task, False))
         return tasks
 
+    @classmethod
+    def _next_logged_task_prefix(cls) -> str:
+        """Returns a process-unique task prefix for dashboard/log correlation."""
+        with cls._task_name_lock:
+            task_prefix = f"Task-{cls._next_task_index}"
+            cls._next_task_index += 1
+            return task_prefix
+
     def issue_task(self, task: Callable[[], T], name: str | None = None, logged: bool = True, timeout: float | None = None) -> Task[T]:
         """
         Issue a task to the executor for asynchronous execution.
@@ -208,8 +218,7 @@ class TaskExecutor:
         """
         with self._task_executor_lock:
             if logged:
-                task_prefix_name = f"Task-{self._task_executor_task_index}"
-                self._task_executor_task_index += 1
+                task_prefix_name = self._next_logged_task_prefix()
             else:
                 task_prefix_name = "BackgroundTask"
             task_name = f"{task_prefix_name}:{name or getattr(task, '__name__', 'task')}"

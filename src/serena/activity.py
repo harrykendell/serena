@@ -7,9 +7,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol, cast
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp import FastMCP
 
 from serena.jobs import JobManager, JobRecord, JobSnapshot, JobStatus
+from serena.session import get_mcp_session_id  # noqa: F401 - compatibility re-export
 
 ACTIVITY_RESOURCE_URI = "ui://serena/activity-v16.html"
 _ACTIVITY_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
@@ -26,26 +27,6 @@ _DETAIL_KEYS = (
 )
 
 
-def get_mcp_session_id(context: Context | None) -> str:
-    """Returns the host conversation identifier, falling back to the MCP session object."""
-    if context is None:
-        return "global"
-
-    try:
-        meta = context.request_context.meta
-        if meta is not None and meta.model_extra is not None:
-            openai_session = meta.model_extra.get("openai/session")
-            if isinstance(openai_session, str) and openai_session:
-                return openai_session
-    except (AttributeError, ValueError):
-        pass
-
-    try:
-        return f"{id(context.session):x}"
-    except (AttributeError, ValueError):
-        return "global"
-
-
 @dataclass
 class ActivityCall:
     """One tool invocation displayed in the ChatGPT activity panel."""
@@ -54,6 +35,7 @@ class ActivityCall:
     tool_name: str
     detail: str
     started_at: float
+    project_name: str = ""
     arguments: str = field(default="{}", repr=False)
     finished_at: float | None = None
     status: str = "running"
@@ -67,6 +49,7 @@ class ActivityCall:
             "call_id": self.call_id,
             "tool_name": self.tool_name,
             "detail": self.detail,
+            "project_name": self.project_name,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "status": self.status,
@@ -155,7 +138,15 @@ class ActivityTracker:
 
         return self.get_run(session_id, run_id)
 
-    def start_tool(self, session_id: str, tool_name: str, arguments: dict[str, Any]) -> str | None:
+    def update_project(self, session_id: str, project_name: str) -> None:
+        """Updates project attribution for the current activity run of ``session_id``."""
+        with self._lock:
+            run_id = self._current_run_by_session.get(session_id)
+            run = self._runs.get(run_id) if run_id is not None else None
+            if run is not None:
+                run.project_name = project_name
+
+    def start_tool(self, session_id: str, tool_name: str, arguments: dict[str, Any], project_name: str = "") -> str | None:
         """Records one tool invocation when an activity run is active for ``session_id``."""
         with self._lock:
             run_id = self._current_run_by_session.get(session_id)
@@ -168,6 +159,7 @@ class ActivityTracker:
                 tool_name=tool_name,
                 detail=self._summarize_arguments(arguments),
                 started_at=time.time(),
+                project_name=project_name or run.project_name,
                 arguments=self._serialize_value(arguments),
             )
             run.calls.append(call)
@@ -175,7 +167,13 @@ class ActivityTracker:
                 del run.calls[: len(run.calls) - _MAX_CALLS_PER_RUN]
             return call.call_id
 
-    def finish_tool(self, call_id: str | None, succeeded: bool, result: object | None = None) -> None:
+    def finish_tool(
+        self,
+        call_id: str | None,
+        succeeded: bool,
+        result: object | None = None,
+        project_name: str | None = None,
+    ) -> None:
         """Marks one tracked call terminal in every activity run retaining it."""
         if call_id is None:
             return
@@ -196,6 +194,8 @@ class ActivityTracker:
                 call.status = status
                 call.finished_at = finished_at
                 call.result = serialized_result
+                if project_name is not None:
+                    call.project_name = project_name
 
             # associate a newly submitted durable job with every panel that retained the call
             first_call = owners[0][1]
@@ -893,8 +893,9 @@ def _activity_widget_html() -> str:
     refs.status.textContent = statusIcon(entry.status);
     refs.tool.textContent = entry.tool_name;
     refs.tool.title = entry.tool_name;
-    refs.detail.textContent = entry.detail || "";
-    refs.detail.title = entry.detail || "";
+    const detailText = [entry.detail, entry.project_name].filter(Boolean).join(" · ");
+    refs.detail.textContent = detailText;
+    refs.detail.title = detailText;
     refs.elapsed.textContent = elapsed(entry, now);
 
     const expanded = expandedRows.has(entry.key);
@@ -960,8 +961,11 @@ def _activity_widget_html() -> str:
     const backgroundJobs = otherRunningJobs(next);
 
     headerTool.textContent = activeHeaderCall?.tool_name || "Waiting for activity";
-    headerDetail.textContent = activeHeaderCall?.detail || "";
-    headerDetail.title = activeHeaderCall?.detail || "";
+    const headerDetailText = activeHeaderCall
+      ? [activeHeaderCall.detail, activeHeaderCall.project_name].filter(Boolean).join(" · ")
+      : "";
+    headerDetail.textContent = headerDetailText;
+    headerDetail.title = headerDetailText;
     headerElapsed.textContent = activeHeaderCall ? elapsed(activeHeaderCall, now) : "";
     logo.classList.toggle("running", activeHeaderCall?.status === "running");
 

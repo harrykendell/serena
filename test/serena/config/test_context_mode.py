@@ -49,6 +49,17 @@ def test_grok_context_prompt_renders():
     assert "Serena's code intelligence tools" in rendered_prompt
 
 
+def test_chatgpt_context_explains_session_project_concurrency() -> None:
+    context = SerenaAgentContext.from_name("chatgpt")
+
+    rendered_prompt = _render_context_prompt(context)
+
+    assert "Always activate the intended project" in rendered_prompt
+    assert "Multiple conversations may read the same project" in rendered_prompt
+    assert "writes to one project are serialized" in rendered_prompt
+    assert "writes to different projects may proceed concurrently" in rendered_prompt
+
+
 def test_chatgpt_context_includes_fork_optional_tools() -> None:
     context = SerenaAgentContext.from_name("chatgpt")
 

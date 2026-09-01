@@ -37,6 +37,21 @@ def test_task_executor_sequence(executor):
     assert future2.result() is True
 
 
+def test_task_names_are_unique_across_executors() -> None:
+    """Concurrent project executors must not reuse dashboard/log task identities."""
+    first_executor = TaskExecutor("FirstExecutor")
+    second_executor = TaskExecutor("SecondExecutor")
+
+    first_task = first_executor.issue_task(lambda: True, name="first")
+    second_task = second_executor.issue_task(lambda: True, name="second")
+
+    assert first_task.name.startswith("Task-")
+    assert second_task.name.startswith("Task-")
+    assert first_task.name != second_task.name
+    assert first_task.result() is True
+    assert second_task.result() is True
+
+
 def test_task_executor_exception(executor):
     """
     Tests that tasks that raise exceptions are handled correctly, i.e. that

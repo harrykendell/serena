@@ -17,6 +17,7 @@ from serena.jobs import (
     JobRuntimeInfo,
     JobStatus,
     JobStore,
+    SystemdJobBackend,
 )
 from serena.tools.job_tools import CancelJobTool, JobStatusTool, StartJobTool
 
@@ -144,6 +145,33 @@ def _manager(
         max_concurrent_jobs=max_jobs,
         output_char_limit=output_limit,
     )
+
+
+def test_systemd_job_backend_inherits_user_shell_path(monkeypatch, tmp_path: Path) -> None:
+    """Durable jobs receive the enriched user-shell PATH rather than the MCP service's stale PATH."""
+    backend = SystemdJobBackend()
+    record = JobRecord(
+        job_id="0123456789abcdef0123456789abcdef",
+        unit_name="serena-job-test.service",
+        project_root=str(tmp_path),
+        cwd=str(tmp_path),
+        status=JobStatus.RUNNING,
+        created_at="2026-09-01T18:00:00+00:00",
+    )
+    command_file = tmp_path / "command"
+    state_file = tmp_path / "state.json"
+    command_file.write_text("codex --version", encoding="utf-8")
+    state_file.write_text("{}", encoding="utf-8")
+    enriched_path = "/home/example/.nvm/bin:/usr/bin:/bin"
+    monkeypatch.setattr("serena.jobs.user_shell_environment", lambda: {"PATH": enriched_path, "HOME": "/home/example"})
+    run = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr("serena.jobs.subprocess.run", run)
+
+    backend.start(record, command_file, state_file)
+
+    args = run.call_args.args[0]
+    assert f"--setenv=PATH={enriched_path}" in args
+    assert "--setenv=HOME=/home/example" in args
 
 
 def test_job_limit_is_twelve_and_cancelled_job_frees_capacity(tmp_path: Path) -> None:

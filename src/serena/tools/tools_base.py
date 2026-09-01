@@ -17,6 +17,7 @@ from serena.config.serena_config import LanguageBackend
 from serena.memories.memory_manager import MemoryManager
 from serena.project import Project
 from serena.prompt_factory import PromptFactory
+from serena.session import get_mcp_session_id
 from serena.util.class_decorators import singleton
 from serena.util.inspection import iter_subclasses
 from serena.util.ls_diagnostics import DiagnosticsDiff, EditedFilePath, PublishedDiagnosticsSnapshot
@@ -285,7 +286,23 @@ class Tool(Component):
                 params.update(value)
             else:
                 params[param] = value
-        log.info(f"{self.get_name_from_cls()}: {dict_string(params)}; session_id: {session_id}")
+        project = self.agent.get_active_project()
+        project_name = project.project_name if project is not None else ""
+        log.info(f"{self.get_name_from_cls()}: {dict_string(params)}; project: {project_name}; session_id: {session_id}")
+
+    def _effective_max_answer_chars(self, max_answer_chars: int) -> int:
+        """Resolve one response budget while preserving explicit character overrides."""
+        if max_answer_chars != -1:
+            effective_max_answer_chars = max_answer_chars
+        elif self.agent.tool_is_active("read_tool_output") is True:
+            # use a smaller approximate token budget when exact retained paging is available
+            effective_max_answer_chars = self.agent.serena_config.default_max_tool_answer_tokens * 4
+        else:
+            effective_max_answer_chars = self.agent.serena_config.default_max_tool_answer_chars
+
+        if effective_max_answer_chars <= 0:
+            raise ValueError(f"Resolved maximum answer length must be positive, got: {effective_max_answer_chars}")
+        return effective_max_answer_chars
 
     def _limit_length(
         self,
@@ -296,30 +313,48 @@ class Tool(Component):
         """Limit the length of the result string, optionally trying progressively shorter versions.
 
         :param result: the full result string
-        :param max_answer_chars: maximum allowed characters. -1 means use the default from config.
+        :param max_answer_chars: maximum allowed characters. -1 means use the context-appropriate default.
         :param shortened_result_factories: optional list of closures, each producing a progressively shorter
-            version of the result. They are tried in order until one fits within ``max_answer_chars``.
+            version of the result. They are tried in order until one fits within the resolved response budget.
         :return: the result string, potentially replaced by a shortened version
         """
-        if max_answer_chars == -1:
-            max_answer_chars = self.agent.serena_config.default_max_tool_answer_chars
-        if max_answer_chars <= 0:
-            raise ValueError(f"Must be positive or the default (-1), got: {max_answer_chars=}")
-        if (n_chars := len(result)) > max_answer_chars:
-            too_long_msg = (
-                f"The answer is too long ({n_chars} characters). " + "You can adjust your query or raise the max_answer_chars parameter."
+        effective_max_answer_chars = self._effective_max_answer_chars(max_answer_chars)
+        if (n_chars := len(result)) <= effective_max_answer_chars:
+            return result
+
+        too_long_msg = (
+            f"The answer is too long ({n_chars} characters). " + "You can adjust your query or raise the max_answer_chars parameter."
+        )
+        retained_output_available = self.agent.tool_is_active("read_tool_output") is True
+        if retained_output_available:
+            output_id = self.agent.retain_tool_output(self.get_name(), result)
+            retained_msg = (
+                f"{too_long_msg}\nFull output retained as {output_id}.\n"
+                f"complete=false; truncated=true; total_chars={n_chars}\n"
+                f"Use read_tool_output(output_id='{output_id}', offset=<offset>) to read an exact page."
             )
             if shortened_result_factories is not None:
-                # try each shortening closure in order;
+                # prefer the richest compact representation that fits while preserving exact recovery
                 for make_shorter in shortened_result_factories:
                     shortened = make_shorter()
-                    candidate = f"{too_long_msg}\n{shortened}"
-                    if len(candidate) <= max_answer_chars:
+                    candidate = f"{retained_msg}\n{shortened}"
+                    if len(candidate) <= effective_max_answer_chars:
                         return candidate
-            if self.agent.tool_is_active("read_tool_output"):
-                return self.agent.retain_tool_output_with_tail(self.get_name(), result, max_answer_chars)
-            result = too_long_msg
-        return result
+            return self.agent.render_tool_output_tail(
+                output_id,
+                effective_max_answer_chars,
+                answer_chars=n_chars,
+                retained_label="Full output",
+            )
+
+        if shortened_result_factories is not None:
+            # preserve legacy behaviour in contexts without retained-output paging
+            for make_shorter in shortened_result_factories:
+                shortened = make_shorter()
+                candidate = f"{too_long_msg}\n{shortened}"
+                if len(candidate) <= effective_max_answer_chars:
+                    return candidate
+        return too_long_msg
 
     def is_active(self) -> bool:
         return self.agent.tool_is_active(self.get_name())
@@ -348,10 +383,9 @@ class Tool(Component):
         :param catch_exceptions: whether to catch exceptions and return their messages as strings, instead of raising a ToolCallError
         """
         # obtain session ID and client info
-        session_id = "global"
+        session_id = get_mcp_session_id(mcp_ctx)
         if mcp_ctx is not None:
             try:
-                session_id = "%x" % id(mcp_ctx.session)
                 client_params = mcp_ctx.session.client_params
                 if client_params is not None:
                     client_info = cast(Implementation, client_params.clientInfo)
@@ -434,7 +468,7 @@ class Tool(Component):
         tool_call_error: ToolCallError
         timeout = self.agent.serena_config.tool_timeout
         try:
-            task_exec = self.agent.issue_task(task, name=self.__class__.__name__, timeout=timeout)
+            task_exec = self.agent.issue_task(task, name=self.__class__.__name__, timeout=timeout, session_id=session_id)
             return task_exec.result(timeout=timeout)
         except ToolCallError as e:
             tool_call_error = e

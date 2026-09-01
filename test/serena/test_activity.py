@@ -19,6 +19,10 @@ class _MockAgent:
     def get_context() -> SerenaAgentContext:
         return SerenaAgentContext.load_default()
 
+    @staticmethod
+    def get_active_project_for_session(session_id: str):
+        return None
+
 
 class _EchoCommandTool(Tool):
     def __init__(self) -> None:
@@ -129,6 +133,7 @@ def test_activity_tracker_records_tool_lifecycle() -> None:
             "call_id": call_id,
             "tool_name": "execute_shell_command",
             "detail": "uv run poe test",
+            "project_name": "serena",
             "started_at": snapshot["calls"][0]["started_at"],
             "finished_at": snapshot["calls"][0]["finished_at"],
             "status": "completed",
@@ -350,7 +355,7 @@ def test_activity_resource_uses_mcp_app_contract() -> None:
 def test_activity_tools_expose_widget_and_private_polling_contract() -> None:
     class Agent:
         @staticmethod
-        def get_active_project():
+        def get_active_project_for_session(session_id: str):
             return None
 
     async def inspect_tools() -> dict[str, object]:

@@ -901,9 +901,12 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
     and rate limits may apply.
     """
     default_max_tool_answer_chars: int = 150_000
-    """Used as default for tools where the apply method has a default maximal answer length.
-    Even though the value of the max_answer_chars can be changed when calling the tool, it may make sense to adjust this default 
-    through the global configuration.
+    """Used as the legacy character ceiling for tools with bounded answers."""
+    default_max_tool_answer_tokens: int = 8_000
+    """Approximate default response budget when retained output paging is available.
+
+    The budget uses a deterministic four-characters-per-token approximation and only constrains implicit defaults. An explicit
+    ``max_answer_chars`` supplied by a caller remains an exact character override.
     """
 
     ignored_paths: list[str] = field(default_factory=list)

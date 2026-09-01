@@ -24,13 +24,14 @@ from mcp.types import Icon, ToolAnnotations
 from pydantic_settings import SettingsConfigDict
 from sensai.util import logging
 
-from serena.activity import ACTIVITY_RESOURCE_URI, ActivityTracker, get_mcp_session_id, register_activity_resource
+from serena.activity import ACTIVITY_RESOURCE_URI, ActivityTracker, register_activity_resource
 from serena.agent import (
     SerenaAgent,
 )
 from serena.config.context_mode import SerenaAgentContext
 from serena.config.serena_config import LanguageBackend, ModeSelectionDefinition, SerenaConfig
 from serena.constants import DEFAULT_CONTEXT, SERENA_LOG_FORMAT
+from serena.session import get_mcp_session_id
 from serena.tools import Tool, ToolCallError
 from serena.tools.media_tools import register_file_export_resource
 from serena.util.exception import show_fatal_exception_safe
@@ -143,6 +144,7 @@ class SerenaFastMCPTool(FastMCPTool):
 
         self._param_aliases = tool.get_param_aliases()
         self._activity_tracker = activity_tracker
+        self._agent = tool.agent
 
     async def run(
         self,
@@ -156,9 +158,15 @@ class SerenaFastMCPTool(FastMCPTool):
                 arguments[param_name] = arguments.pop(param_alias)
 
         # publish invocation lifecycle to an active ChatGPT activity run
+        session_id = get_mcp_session_id(context)
         call_id = None
+        activity_project_name = ""
         if self._activity_tracker is not None:
-            call_id = self._activity_tracker.start_tool(get_mcp_session_id(context), self.name, arguments)
+            project = self._agent.get_active_project_for_session(session_id)
+            activity_project_name = project.project_name if project is not None else ""
+            if activity_project_name:
+                self._activity_tracker.update_project(session_id, activity_project_name)
+            call_id = self._activity_tracker.start_tool(session_id, self.name, arguments, project_name=activity_project_name)
 
         # keep the MCP event loop free while Serena's synchronous executor waits
         try:
@@ -173,19 +181,29 @@ class SerenaFastMCPTool(FastMCPTool):
                 result = self.fn_metadata.convert_result(result)
         except UrlElicitationRequiredError:
             if self._activity_tracker is not None:
-                self._activity_tracker.finish_tool(call_id, succeeded=False)
+                self._activity_tracker.finish_tool(call_id, succeeded=False, project_name=activity_project_name)
             raise
         except Exception as e:
             if self._activity_tracker is not None:
-                self._activity_tracker.finish_tool(call_id, succeeded=False, result=e)
+                self._activity_tracker.finish_tool(call_id, succeeded=False, result=e, project_name=activity_project_name)
             raise ToolError(f"Error executing tool {self.name}: {e}") from e
         except BaseException:
             if self._activity_tracker is not None:
-                self._activity_tracker.finish_tool(call_id, succeeded=False)
+                self._activity_tracker.finish_tool(call_id, succeeded=False, project_name=activity_project_name)
             raise
 
         if self._activity_tracker is not None:
-            self._activity_tracker.finish_tool(call_id, succeeded=True, result=result)
+            project = self._agent.get_active_project_for_session(session_id)
+            current_project_name = project.project_name if project is not None else ""
+            if current_project_name:
+                self._activity_tracker.update_project(session_id, current_project_name)
+            call_project_name = current_project_name if self.name == "activate_project" else activity_project_name
+            self._activity_tracker.finish_tool(
+                call_id,
+                succeeded=True,
+                result=result,
+                project_name=call_project_name,
+            )
         return result
 
 
@@ -321,7 +339,25 @@ class SerenaMCPFactory:
 
             return node
 
-        return walk(s)
+        sanitized = walk(s)
+
+        # OpenAI tool parameters are expected to expose a top-level type even when
+        # Pydantic represents the parameter through a local schema reference.
+        definitions = sanitized.get("$defs", {})
+        properties = sanitized.get("properties", {})
+        if not isinstance(definitions, dict) or not isinstance(properties, dict):
+            return sanitized
+        for property_schema in properties.values():
+            if not isinstance(property_schema, dict):
+                continue
+            ref = property_schema.get("$ref")
+            if "type" in property_schema or not isinstance(ref, str) or not ref.startswith("#/$defs/"):
+                continue
+            referenced_schema = definitions.get(ref.removeprefix("#/$defs/"))
+            if isinstance(referenced_schema, dict) and isinstance(referenced_schema.get("type"), str):
+                property_schema["type"] = referenced_schema["type"]
+
+        return sanitized
 
     @staticmethod
     def make_mcp_tool(
@@ -397,7 +433,7 @@ class SerenaMCPFactory:
         )
         async def show_activity(mcp_ctx: Context) -> dict[str, Any]:
             session_id = get_mcp_session_id(mcp_ctx)
-            project = agent.get_active_project()
+            project = agent.get_active_project_for_session(session_id)
             project_name = project.project_name if project is not None else ""
             return await asyncio.to_thread(self._activity_tracker.start_run, session_id, project_name)
 

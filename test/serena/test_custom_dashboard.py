@@ -197,7 +197,7 @@ def test_execution_history_captures_parameters_and_result_from_tool_logs() -> No
 
     log_handler.emit_message(
         "INFO  2026-08-29 19:00:00 [Task-2:ActivateProjectTool] serena.tools.tools_base:_log_tool_application:288 - "
-        "activate_project: project='serena', session_id='internal'; session_id: abc123"
+        "activate_project: project='serena', session_id='internal'; project: serena; session_id: abc123"
     )
     callbacks[0]()
     log_handler.emit_message(
@@ -206,6 +206,8 @@ def test_execution_history_captures_parameters_and_result_from_tool_logs() -> No
 
     execution = history.get_executions()["executions"][0]
     assert execution["parameters"] == "project='serena'"
+    assert execution["project"] == "serena"
+    assert execution["session_id"] == "abc123"
     assert execution["result"] == "Project activated"
     assert execution["error"] is None
 

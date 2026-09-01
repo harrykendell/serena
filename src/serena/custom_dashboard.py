@@ -24,7 +24,11 @@ CUSTOM_DASHBOARD_DIR = Path(__file__).parent / "resources" / "kendell_dashboard"
 _CUSTOM_DASHBOARD_JOB_LIMIT = 1000
 _EXECUTION_FIELD_LIMIT = 12_000
 _TASK_THREAD_PATTERN = r"Task-\d+:[^\]]+Tool"
-_TOOL_START_RE = re.compile(rf"\[(?P<task>{_TASK_THREAD_PATTERN})\].*? - [a-z0-9_]+: (?P<parameters>.*?); session_id: [^\s]+$", re.DOTALL)
+_TOOL_START_RE = re.compile(
+    rf"\[(?P<task>{_TASK_THREAD_PATTERN})\].*? - [a-z0-9_]+: (?P<parameters>.*?); "
+    rf"(?:project: (?P<project>.*?); )?session_id: (?P<session_id>[^\s]+)$",
+    re.DOTALL,
+)
 _TOOL_RESULT_RE = re.compile(rf"\[(?P<task>{_TASK_THREAD_PATTERN})\].*? - Result: (?P<result>.*)$", re.DOTALL)
 _TOOL_ERROR_RE = re.compile(rf"^ERROR.*?\[(?P<task>{_TASK_THREAD_PATTERN})\].*? - (?P<error>.*)$", re.DOTALL)
 _INTERNAL_SESSION_PARAM_RE = re.compile(r",?\s*session_id=(?:'[^']*'|\"[^\"]*\")\s*$")
@@ -128,6 +132,10 @@ class DashboardExecutionHistory:
                 metadata = self._metadata_by_task_name.setdefault(start_match.group("task"), {})
                 parameters = _INTERNAL_SESSION_PARAM_RE.sub("", start_match.group("parameters").strip())
                 metadata["parameters"] = _bounded(parameters)
+                project = start_match.group("project")
+                if project:
+                    metadata["project"] = project
+                metadata["session_id"] = start_match.group("session_id")
             return
 
         result_match = _TOOL_RESULT_RE.search(message)
@@ -163,6 +171,8 @@ class DashboardExecutionHistory:
             "name": task_info.name,
             "status": self._status(task_info),
             "finished_successfully": task_info.finished_successfully(),
+            "project": metadata.get("project"),
+            "session_id": metadata.get("session_id"),
             "parameters": metadata.get("parameters"),
             "result": None if media is not None else metadata.get("result"),
             "error": metadata.get("error"),

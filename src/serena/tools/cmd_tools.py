@@ -47,11 +47,7 @@ class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit):
                         f"Specified a relative working directory ({cwd}), but the resulting path is not a directory: {_cwd}"
                     )
 
-        effective_max_answer_chars = max_answer_chars
-        if effective_max_answer_chars == -1:
-            effective_max_answer_chars = self.agent.serena_config.default_max_tool_answer_chars
-        if effective_max_answer_chars <= 0:
-            raise ValueError(f"Must be positive or the default (-1), got: {max_answer_chars=}")
+        effective_max_answer_chars = self._effective_max_answer_chars(max_answer_chars)
 
         # stream a live transcript keyed to this exact Serena task while preserving the structured final result
         with self.agent.open_tool_output(self.get_name(), execution_name=current_thread().name) as output_writer:

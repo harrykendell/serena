@@ -20,6 +20,7 @@ from uuid import UUID, uuid4
 import psutil
 from filelock import FileLock
 
+from mcp_runtime.shell_environment import user_shell_environment
 from serena.config.serena_config import SerenaPaths
 
 DEFAULT_MAX_CONCURRENT_JOBS = 12
@@ -223,8 +224,9 @@ class SystemdJobBackend(JobBackend):
         ]
         if record.timeout_seconds is not None:
             args.append(f"--property=RuntimeMaxSec={record.timeout_seconds}s")
+        shell_environment = user_shell_environment()
         for name in _INHERITED_ENVIRONMENT_VARIABLES:
-            value = os.environ.get(name)
+            value = shell_environment.get(name)
             if value is not None:
                 args.append(f"--setenv={name}={value}")
         args.extend(["--", sys.executable, "-m", "serena.job_runner", str(state_file), str(command_file)])

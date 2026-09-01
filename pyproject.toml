@@ -64,6 +64,7 @@ explicit = true
 serena = "serena.cli:top_level"
 serena-agent = "serena.cli:top_level"
 serena-hooks = "serena.hooks:hook_commands"
+orchestrator = "orchestrator.cli:main"
 
 [project.license]
 text = "MIT"
@@ -103,7 +104,7 @@ google = ["google-genai==1.27.0"]
 Homepage = "https://github.com/oraios/serena"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/serena", "src/interprompt", "src/solidlsp"]
+packages = ["src/serena", "src/orchestrator", "src/mcp_runtime", "src/interprompt", "src/solidlsp"]
 
 [tool.doc8]
 max-line-length = 1000
@@ -169,7 +170,7 @@ _ruff_fix = "ruff check --fix src scripts test"
 _ruff_format = "ruff format src scripts test"
 lint = ["_ruff_format_check", "_ruff_check"]
 format = ["_ruff_fix", "_ruff_format"]
-_ty_core = "ty check src/serena src/solidlsp"
+_ty_core = "ty check src/serena src/orchestrator src/mcp_runtime src/solidlsp"
 _ty_test = "ty check test --exclude test/resources"
 type-check = ["_ty_core", "_ty_test"]
 ty = ["type-check"]
