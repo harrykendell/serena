@@ -9,7 +9,7 @@ from mcp.types import RequestParams
 
 from serena.activity import ACTIVITY_RESOURCE_URI, ActivityTracker, get_mcp_session_id, register_activity_resource
 from serena.config.context_mode import SerenaAgentContext
-from serena.jobs import JobRecord, JobStatus
+from serena.jobs import JobOutputChunk, JobRecord, JobRuntimeInfo, JobSnapshot, JobStatus
 from serena.mcp import SerenaMCPFactory
 from serena.tools import Tool
 
@@ -72,9 +72,28 @@ class _FakeJobSource:
 
     def __init__(self, records: list[JobRecord] | None = None) -> None:
         self.records = records or []
+        self.outputs: dict[str, str] = {}
 
     def list_jobs(self, limit: int = 20) -> list[JobRecord]:
         return self.records[:limit]
+
+    def get_job(self, job_id: str) -> JobSnapshot:
+        record = next(record for record in self.records if record.job_id == job_id)
+        return JobSnapshot(
+            record=record,
+            runtime=JobRuntimeInfo(
+                elapsed_seconds=12.5,
+                seconds_since_last_output=0.5,
+                memory_bytes=2048,
+                cpu_seconds=1.25,
+                process_count=2,
+            ),
+            output=JobOutputChunk(
+                output=self.outputs.get(job_id, ""),
+                next_cursor=None,
+                has_more_output=False,
+            ),
+        )
 
 
 def _job_record(job_id: str, label: str, status: JobStatus = JobStatus.RUNNING, project_name: str = "thesis") -> JobRecord:
@@ -157,6 +176,30 @@ def test_activity_tracker_marks_current_turn_job_and_exposes_other_running_jobs(
         ("other-job", False),
     ]
     assert snapshot["calls"][0]["job_id"] == "current-job"
+    assert snapshot["calls"][0]["detail"] == "current optimisation"
+
+
+def test_activity_tracker_exposes_job_runtime_and_output_on_demand() -> None:
+    source = _FakeJobSource([_job_record("current-job", "current optimisation")])
+    source.outputs["current-job"] = "step 1\nstep 2"
+    tracker = ActivityTracker(source)
+    run = tracker.start_run("conversation-a", "serena")
+    call_id = tracker.start_tool("conversation-a", "start_job", {"label": "current optimisation"})
+    tracker.finish_tool(
+        call_id,
+        succeeded=True,
+        result={"job_id": "current-job", "label": "current optimisation"},
+    )
+
+    detail = tracker.get_job_detail("conversation-a", run["run_id"], "current-job")
+
+    assert detail["label"] == "current optimisation"
+    assert detail["status"] == "running"
+    assert detail["elapsed_seconds"] == 12.5
+    assert detail["seconds_since_last_output"] == 0.5
+    assert detail["memory_bytes"] == 2048
+    assert detail["process_count"] == 2
+    assert detail["output"] == "step 1\nstep 2"
 
 
 def test_activity_tracker_isolates_conversations() -> None:
@@ -180,7 +223,48 @@ def test_activity_tracker_supersedes_previous_panel_in_same_conversation() -> No
     assert [(call["call_id"], call["status"]) for call in second_state["calls"]] == [(call_id, "running")]
 
     tracker.finish_tool(call_id, succeeded=True)
+    assert tracker.get_run("conversation-a", first["run_id"])["calls"][0]["status"] == "completed"
     assert tracker.get_run("conversation-a", second["run_id"])["calls"][0]["status"] == "completed"
+
+
+def test_superseded_panel_retains_its_jobs_without_absorbing_background_jobs() -> None:
+    source = _FakeJobSource(
+        [
+            _job_record("first-job", "first job"),
+            _job_record("background-job", "background job"),
+        ]
+    )
+    tracker = ActivityTracker(source)
+    first = tracker.start_run("conversation-a", "serena")
+    call_id = tracker.start_tool("conversation-a", "start_job", {"command": "sleep 5"})
+
+    tracker.finish_tool(call_id, succeeded=True, result={"job_id": "first-job", "label": "first job"})
+    second = tracker.start_run("conversation-a", "serena")
+
+    first_state = tracker.get_run("conversation-a", first["run_id"])
+    second_state = tracker.get_run("conversation-a", second["run_id"])
+
+    assert [(job["job_id"], job["current_turn"]) for job in first_state["jobs"]] == [("first-job", True)]
+    assert {(job["job_id"], job["current_turn"]) for job in second_state["jobs"]} == {
+        ("first-job", False),
+        ("background-job", False),
+    }
+
+
+def test_carried_start_job_is_retained_by_old_and_new_panels() -> None:
+    source = _FakeJobSource([_job_record("shared-job", "shared job")])
+    tracker = ActivityTracker(source)
+    first = tracker.start_run("conversation-a", "serena")
+    call_id = tracker.start_tool("conversation-a", "start_job", {"command": "sleep 5"})
+
+    second = tracker.start_run("conversation-a", "serena")
+    tracker.finish_tool(call_id, succeeded=True, result={"job_id": "shared-job", "label": "shared job"})
+
+    first_state = tracker.get_run("conversation-a", first["run_id"])
+    second_state = tracker.get_run("conversation-a", second["run_id"])
+
+    assert [(job["job_id"], job["current_turn"]) for job in first_state["jobs"]] == [("shared-job", True)]
+    assert [(job["job_id"], job["current_turn"]) for job in second_state["jobs"]] == [("shared-job", True)]
 
 
 def test_get_mcp_session_id_prefers_openai_conversation_metadata() -> None:
@@ -256,6 +340,7 @@ def test_activity_resource_uses_mcp_app_contract() -> None:
     assert content.mime_type == "text/html;profile=mcp-app"
     assert 'window.openai.callTool("get_activity"' in content.content
     assert 'window.openai.callTool("get_activity_detail"' in content.content
+    assert 'window.openai.callTool("get_activity_job_detail"' in content.content
     assert 'id="activity-logo" class="logo"' in content.content
     assert 'id="activity-header-tool">Waiting for activity</strong>' in content.content
     assert 'id="activity-header-elapsed" class="summary"' in content.content
@@ -279,6 +364,7 @@ def test_activity_tools_expose_widget_and_private_polling_contract() -> None:
     show_meta = tools["show_activity"].meta
     poll_meta = tools["get_activity"].meta
     detail_meta = tools["get_activity_detail"].meta
+    job_detail_meta = tools["get_activity_job_detail"].meta
 
     assert show_meta is not None
     assert show_meta["ui"] == {"resourceUri": ACTIVITY_RESOURCE_URI, "visibility": ["model", "app"]}
@@ -289,3 +375,6 @@ def test_activity_tools_expose_widget_and_private_polling_contract() -> None:
     assert detail_meta is not None
     assert detail_meta["ui"] == {"visibility": ["app"]}
     assert detail_meta["openai/visibility"] == "private"
+    assert job_detail_meta is not None
+    assert job_detail_meta["ui"] == {"visibility": ["app"]}
+    assert job_detail_meta["openai/visibility"] == "private"

@@ -431,6 +431,26 @@ class SerenaMCPFactory:
         def get_activity_detail(run_id: str, call_id: str, mcp_ctx: Context) -> dict[str, Any]:
             return self._activity_tracker.get_call_detail(get_mcp_session_id(mcp_ctx), run_id, call_id)
 
+        @mcp.tool(
+            name="get_activity_job_detail",
+            title="Get Serena Activity Job Detail",
+            description="Returns runtime metadata and bounded output for one Serena job. Intended for the activity app only.",
+            annotations=ToolAnnotations(title="Get Serena Activity Job Detail", readOnlyHint=True, destructiveHint=False),
+            meta={
+                "ui": {"visibility": ["app"]},
+                "openai/widgetAccessible": True,
+                "openai/visibility": "private",
+            },
+            structured_output=True,
+        )
+        async def get_activity_job_detail(run_id: str, job_id: str, mcp_ctx: Context) -> dict[str, Any]:
+            return await asyncio.to_thread(
+                self._activity_tracker.get_job_detail,
+                get_mcp_session_id(mcp_ctx),
+                run_id,
+                job_id,
+            )
+
     def _create_serena_agent(
         self,
         serena_config: SerenaConfig,

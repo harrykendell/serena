@@ -9,9 +9,9 @@ from typing import Any, Protocol, cast
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from serena.jobs import JobManager, JobRecord, JobStatus
+from serena.jobs import JobManager, JobRecord, JobSnapshot, JobStatus
 
-ACTIVITY_RESOURCE_URI = "ui://serena/activity-v14.html"
+ACTIVITY_RESOURCE_URI = "ui://serena/activity-v16.html"
 _ACTIVITY_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
 _MAX_RUNS = 32
 _MAX_CALLS_PER_RUN = 100
@@ -102,10 +102,14 @@ class ActivityRun:
 
 
 class ActivityJobSource(Protocol):
-    """Provides retained durable-job metadata for the activity panel."""
+    """Provides retained durable-job metadata and output for the activity panel."""
 
     def list_jobs(self, limit: int = 20) -> list[JobRecord]:
         """Returns running jobs followed by recent terminal jobs."""
+        ...
+
+    def get_job(self, job_id: str) -> JobSnapshot:
+        """Returns one job snapshot with bounded retained output."""
         ...
 
 
@@ -172,40 +176,59 @@ class ActivityTracker:
             return call.call_id
 
     def finish_tool(self, call_id: str | None, succeeded: bool, result: object | None = None) -> None:
-        """Marks one tracked call terminal and associates any newly submitted durable job with its run."""
+        """Marks one tracked call terminal in every activity run retaining it."""
         if call_id is None:
             return
 
         with self._lock:
-            for run in reversed(self._runs.values()):
-                for call in reversed(run.calls):
-                    if call.call_id != call_id:
-                        continue
+            # collect every panel that retains the carried call
+            owners: list[tuple[ActivityRun, ActivityCall]] = []
+            for run in self._runs.values():
+                owners.extend((run, call) for call in run.calls if call.call_id == call_id)
+            if not owners:
+                return
 
-                    call.status = "completed" if succeeded else "failed"
-                    call.finished_at = time.time()
-                    call.result = self._serialize_value(result) if result is not None else None
-                    if succeeded and call.tool_name == "start_job":
-                        job_id, label = self._extract_job_identity(result)
-                        if job_id is not None:
-                            call.job_id = job_id
-                            call.job_label = label
-                            if job_id not in run.job_ids:
-                                run.job_ids.append(job_id)
-                            self._job_cache_at = 0.0
-                    return
+            # update the call lifecycle consistently across old and continuing panels
+            status = "completed" if succeeded else "failed"
+            finished_at = time.time()
+            serialized_result = self._serialize_value(result) if result is not None else None
+            for _, call in owners:
+                call.status = status
+                call.finished_at = finished_at
+                call.result = serialized_result
+
+            # associate a newly submitted durable job with every panel that retained the call
+            first_call = owners[0][1]
+            if not succeeded or first_call.tool_name != "start_job":
+                return
+
+            job_id, label = self._extract_job_identity(result)
+            if job_id is None:
+                return
+
+            for run, call in owners:
+                call.job_id = job_id
+                call.job_label = label
+                if label is not None:
+                    call.detail = label
+                if job_id not in run.job_ids:
+                    run.job_ids.append(job_id)
+            self._job_cache_at = 0.0
 
     def get_run(self, session_id: str, run_id: str) -> dict[str, Any]:
-        """Returns one session-owned run enriched with current-turn jobs and globally running jobs."""
+        """Returns one session-owned run enriched with the jobs relevant to that panel."""
         with self._lock:
             run = self._runs.get(run_id)
             if run is None or run.session_id != session_id:
                 raise ValueError("Activity run is not available in this session")
             payload = run.as_dict()
             current_job_ids = set(run.job_ids)
+            superseded = run.superseded
 
         records = self._list_jobs_safely()
-        visible_records = [record for record in records if record.job_id in current_job_ids or record.status is JobStatus.RUNNING]
+        visible_records = [
+            record for record in records if record.job_id in current_job_ids or (not superseded and record.status is JobStatus.RUNNING)
+        ]
         visible_records.sort(key=lambda record: record.created_at, reverse=True)
         payload["jobs"] = [self._job_payload(record) | {"current_turn": record.job_id in current_job_ids} for record in visible_records]
         return payload
@@ -226,6 +249,50 @@ class ActivityTracker:
                         "result": call.result,
                     }
         raise ValueError("Activity call is not available in this run")
+
+    def get_job_detail(self, session_id: str, run_id: str, job_id: str) -> dict[str, Any]:
+        """Returns runtime metadata and bounded output for one job visible in a session-owned run."""
+        # validate panel ownership and retained current-turn jobs
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None or run.session_id != session_id:
+                raise ValueError("Activity run is not available in this session")
+            current_turn = job_id in run.job_ids
+            superseded = run.superseded
+
+        # admit globally running jobs only while this is the current panel
+        if not current_turn:
+            visible_background_job = any(
+                record.job_id == job_id and record.status is JobStatus.RUNNING for record in self._list_jobs_safely()
+            )
+            if superseded or not visible_background_job:
+                raise ValueError("Activity job is not available in this run")
+
+        # read one bounded latest-output snapshot without blocking the activity poller
+        snapshot = self._job_source.get_job(job_id)
+        record = snapshot.record
+        runtime = snapshot.runtime
+        output = snapshot.output
+        return {
+            "job_id": record.job_id,
+            "label": record.label or "background job",
+            "project": record.project_name or "",
+            "cwd": record.cwd,
+            "status": record.status.value,
+            "status_message": record.status_message,
+            "return_code": record.return_code,
+            "timeout_seconds": record.timeout_seconds,
+            "elapsed_seconds": runtime.elapsed_seconds,
+            "seconds_since_last_output": runtime.seconds_since_last_output,
+            "memory_bytes": runtime.memory_bytes,
+            "cpu_seconds": runtime.cpu_seconds,
+            "process_count": runtime.process_count,
+            "output": output.output if output is not None else "",
+            "output_truncated": output.output_truncated if output is not None else False,
+            "earlier_output_omitted": output.earlier_output_omitted if output is not None else False,
+            "has_earlier_output": output.has_earlier_output if output is not None else False,
+            "cursor_reset": output.cursor_reset if output is not None else False,
+        }
 
     def _list_jobs_safely(self) -> list[JobRecord]:
         """Returns cached durable-job metadata without allowing job-backend failures to break activity polling."""
@@ -429,6 +496,10 @@ def _activity_widget_html() -> str:
   .detail-block + .detail-block { margin-top: 5px; }
   .detail-label { display: block; margin-bottom: 2px; color: color-mix(in srgb, #00491e 82%, CanvasText); font-size: 10px; font-weight: 700; letter-spacing: .035em; text-transform: uppercase; }
   .detail-value { margin: 0; max-height: 9em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 10.5px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .78; }
+  .job-meta { font-size: 10.5px; opacity: .68; font-variant-numeric: tabular-nums; }
+  .job-output-note { margin-bottom: 3px; font-size: 10px; opacity: .56; }
+  .job-output-scroll { max-height: 180px; overflow: auto; overscroll-behavior: contain; border: 1px solid color-mix(in srgb, CanvasText 10%, transparent); border-radius: 5px; background: color-mix(in srgb, CanvasText 3%, transparent); }
+  .job-output { margin: 0; min-height: 2.4em; padding: 6px 7px; white-space: pre-wrap; overflow-wrap: anywhere; font: 10.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .detail-loading { font-size: 11px; opacity: .58; }
   .other-jobs { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 14px; gap: 6px; align-items: center; margin-top: 3px; padding: 4px 0 2px 21px; border: 0; border-top: 1px solid color-mix(in srgb, CanvasText 8%, transparent); background: transparent; color: inherit; text-align: left; cursor: pointer; font-size: 11px; opacity: .58; }
   .other-jobs:hover { opacity: .78; }
@@ -472,16 +543,17 @@ def _activity_widget_html() -> str:
   let timer = null;
   let clockTimer = null;
   let clockDelay = null;
+  let jobDetailTimer = null;
 
   function setCollapsed(collapsed) {
     root.classList.toggle("collapsed", collapsed);
     header.setAttribute("aria-expanded", String(!collapsed));
     body.hidden = collapsed;
+    syncJobDetailTimer();
     window.openai?.notifyIntrinsicHeight?.();
   }
 
   header.addEventListener("click", () => {
-    if (root.classList.contains("retired")) return;
     setCollapsed(!root.classList.contains("collapsed"));
   });
   otherJobsButton.addEventListener("click", event => {
@@ -491,7 +563,8 @@ def _activity_widget_html() -> str:
   });
 
   function elapsed(entry, nowSeconds) {
-    const end = entry.finished_at ?? nowSeconds;
+    const liveLagSeconds = entry.kind === "job" ? 1.5 : 0.5;
+    const end = entry.finished_at ?? Math.max(entry.started_at, nowSeconds - liveLagSeconds);
     const seconds = Math.max(0, end - entry.started_at);
     if (seconds < 10) return `${seconds.toFixed(1)}s`;
     if (seconds < 120) return `${Math.round(seconds)}s`;
@@ -526,8 +599,8 @@ def _activity_widget_html() -> str:
       ...job,
       key: `job:${job.job_id}`,
       kind: "job",
-      tool_name: job.label || "background job",
-      detail: job.project || "background job",
+      tool_name: "start_job",
+      detail: job.label || "background job",
     };
   }
 
@@ -586,17 +659,114 @@ def _activity_widget_html() -> str:
     window.openai?.notifyIntrinsicHeight?.();
   }
 
+  function formatBytes(value) {
+    if (value === null || value === undefined) return null;
+    if (value < 1024) return `${Math.round(value)} B`;
+    if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
+    if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
+    return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
+  }
+
+  function formatRuntimeSeconds(value) {
+    if (value === null || value === undefined) return null;
+    if (value < 10) return `${value.toFixed(1)}s`;
+    if (value < 120) return `${Math.round(value)}s`;
+    if (value < 3600) return `${Math.floor(value / 60)}m ${String(Math.round(value % 60)).padStart(2, "0")}s`;
+    const hours = Math.floor(value / 3600);
+    const minutes = Math.floor((value % 3600) / 60);
+    return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  }
+
+  function jobDetailMeta(detail) {
+    const parts = [];
+    const runtime = formatRuntimeSeconds(detail.elapsed_seconds);
+    if (runtime) parts.push(`${runtime} ${detail.status === "running" ? "elapsed" : "runtime"}`);
+    if (detail.status === "running") {
+      const sinceOutput = formatRuntimeSeconds(detail.seconds_since_last_output);
+      parts.push(sinceOutput ? `${sinceOutput} since output` : "no output yet");
+      const memory = formatBytes(detail.memory_bytes);
+      if (memory) parts.push(memory);
+      const cpu = formatRuntimeSeconds(detail.cpu_seconds);
+      if (cpu) parts.push(`${cpu} CPU`);
+      if (detail.process_count !== null && detail.process_count !== undefined) parts.push(`${detail.process_count} proc`);
+      const timeout = formatRuntimeSeconds(detail.timeout_seconds);
+      if (timeout) parts.push(`limit ${timeout}`);
+    } else if (detail.return_code !== null && detail.return_code !== undefined) {
+      parts.push(`exit ${detail.return_code}`);
+    }
+    if (detail.project) parts.push(detail.project);
+    return parts.join(" · ");
+  }
+
+  async function loadJobDetail(row) {
+    const refs = row._activityRefs;
+    const jobId = row.dataset.jobId;
+    if (!state?.run_id || !jobId || !window.openai?.callTool || !refs.panel || row.dataset.jobDetailLoading === "true") return;
+
+    row.dataset.jobDetailLoading = "true";
+    if (!row.dataset.jobDetailLoaded) {
+      refs.loading.hidden = false;
+      refs.loading.textContent = "Loading job output...";
+      refs.content.hidden = true;
+    }
+    const scroller = refs.jobOutputScroll;
+    const follow = !scroller || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 32;
+    try {
+      const result = await window.openai.callTool("get_activity_job_detail", { run_id: state.run_id, job_id: jobId });
+      const detail = result?.structuredContent ?? result?.structured_content ?? result;
+      if (!detail?.job_id || detail.job_id !== jobId) throw new Error("Mismatched activity job detail");
+      refs.jobMeta.textContent = jobDetailMeta(detail);
+      refs.jobOutput.textContent = detail.output || "";
+      if (detail.output) {
+        refs.jobOutputNote.textContent = detail.earlier_output_omitted || detail.has_earlier_output
+          ? "Latest retained output · earlier output available"
+          : detail.status === "running" ? "Live output" : "Final output";
+      } else {
+        refs.jobOutputNote.textContent = detail.status === "running" ? "Waiting for output..." : "No output recorded";
+      }
+      refs.loading.hidden = true;
+      refs.content.hidden = false;
+      row.dataset.jobDetailLoaded = "true";
+      row.dataset.detailStatus = detail.status || "";
+      if (follow && scroller) requestAnimationFrame(() => { scroller.scrollTop = scroller.scrollHeight; });
+    } catch (_) {
+      refs.loading.hidden = false;
+      refs.loading.textContent = "Job details unavailable.";
+      if (!row.dataset.jobDetailLoaded) refs.content.hidden = true;
+    } finally {
+      row.dataset.jobDetailLoading = "false";
+    }
+    window.openai?.notifyIntrinsicHeight?.();
+  }
+
+  function syncJobDetailTimer() {
+    const hasExpandedRunningJob = !root.classList.contains("collapsed") && [...rowsByKey.values()].some(row => {
+      const entry = row._activityEntry;
+      return entry?.kind === "job" && entry.status === "running" && expandedRows.has(entry.key);
+    });
+    if (!hasExpandedRunningJob) {
+      if (jobDetailTimer !== null) clearInterval(jobDetailTimer);
+      jobDetailTimer = null;
+      return;
+    }
+    if (jobDetailTimer !== null) return;
+    jobDetailTimer = setInterval(() => {
+      for (const row of rowsByKey.values()) {
+        const entry = row._activityEntry;
+        if (entry?.kind === "job" && entry.status === "running" && expandedRows.has(entry.key)) void loadJobDetail(row);
+      }
+    }, 1000);
+  }
+
   function createRow(entry) {
     const isJob = entry.kind === "job";
     const row = document.createElement("li");
     row.dataset.scrollKey = entry.key;
 
-    const rowHeader = document.createElement(isJob ? "div" : "button");
+    const rowHeader = document.createElement("button");
     rowHeader.className = "row-header";
-    if (!isJob) {
-      rowHeader.type = "button";
-      rowHeader.setAttribute("aria-expanded", "false");
-    }
+    rowHeader.type = "button";
+    rowHeader.setAttribute("aria-expanded", "false");
     const status = document.createElement("span");
     status.className = "status";
     const tool = document.createElement("span");
@@ -609,24 +779,49 @@ def _activity_widget_html() -> str:
     chevron.className = "row-chevron";
     chevron.setAttribute("aria-hidden", "true");
     chevron.textContent = "⌄";
-    if (isJob) chevron.hidden = true;
     rowHeader.append(status, tool, detail, elapsedNode, chevron);
     row.append(rowHeader);
 
-    let panel = null;
-    let loading = null;
-    let content = null;
+    const panel = document.createElement("div");
+    panel.className = `detail-panel${isJob ? " job-detail-panel" : ""}`;
+    panel.hidden = true;
+    const loading = document.createElement("div");
+    loading.className = "detail-loading";
+    loading.textContent = isJob ? "Loading job output..." : "Loading details...";
+    const content = document.createElement("div");
+    content.hidden = true;
     let argumentsValue = null;
     let resultValue = null;
-    if (!isJob) {
-      panel = document.createElement("div");
-      panel.className = "detail-panel";
-      panel.hidden = true;
-      loading = document.createElement("div");
-      loading.className = "detail-loading";
-      loading.textContent = "Loading details...";
-      content = document.createElement("div");
-      content.hidden = true;
+    let jobMetaValue = null;
+    let jobOutputNote = null;
+    let jobOutputScroll = null;
+    let jobOutputValue = null;
+
+    if (isJob) {
+      const metaBlock = document.createElement("div");
+      metaBlock.className = "detail-block";
+      const metaLabel = document.createElement("span");
+      metaLabel.className = "detail-label";
+      metaLabel.textContent = "Job";
+      jobMetaValue = document.createElement("div");
+      jobMetaValue.className = "job-meta";
+      metaBlock.append(metaLabel, jobMetaValue);
+
+      const outputBlock = document.createElement("div");
+      outputBlock.className = "detail-block";
+      const outputLabel = document.createElement("span");
+      outputLabel.className = "detail-label";
+      outputLabel.textContent = "Output";
+      jobOutputNote = document.createElement("div");
+      jobOutputNote.className = "job-output-note";
+      jobOutputScroll = document.createElement("div");
+      jobOutputScroll.className = "job-output-scroll";
+      jobOutputValue = document.createElement("pre");
+      jobOutputValue.className = "job-output";
+      jobOutputScroll.append(jobOutputValue);
+      outputBlock.append(outputLabel, jobOutputNote, jobOutputScroll);
+      content.append(metaBlock, outputBlock);
+    } else {
       const argumentsBlock = document.createElement("div");
       argumentsBlock.className = "detail-block";
       const argumentsLabel = document.createElement("span");
@@ -644,22 +839,26 @@ def _activity_widget_html() -> str:
       resultValue.className = "detail-value";
       resultBlock.append(resultLabel, resultValue);
       content.append(argumentsBlock, resultBlock);
-      panel.append(loading, content);
-      row.append(panel);
-
-      rowHeader.addEventListener("click", () => {
-        const key = row.dataset.scrollKey;
-        if (!key) return;
-        const expanded = !expandedRows.has(key);
-        if (expanded) expandedRows.add(key);
-        else expandedRows.delete(key);
-        row.classList.toggle("expanded", expanded);
-        rowHeader.setAttribute("aria-expanded", String(expanded));
-        panel.hidden = !expanded;
-        if (expanded) void loadToolDetail(row);
-        window.openai?.notifyIntrinsicHeight?.();
-      });
     }
+
+    panel.append(loading, content);
+    row.append(panel);
+    rowHeader.addEventListener("click", () => {
+      const key = row.dataset.scrollKey;
+      if (!key) return;
+      const expanded = !expandedRows.has(key);
+      if (expanded) expandedRows.add(key);
+      else expandedRows.delete(key);
+      row.classList.toggle("expanded", expanded);
+      rowHeader.setAttribute("aria-expanded", String(expanded));
+      panel.hidden = !expanded;
+      if (expanded) {
+        if (isJob) void loadJobDetail(row);
+        else void loadToolDetail(row);
+      }
+      syncJobDetailTimer();
+      window.openai?.notifyIntrinsicHeight?.();
+    });
 
     row._activityRefs = {
       header: rowHeader,
@@ -673,6 +872,10 @@ def _activity_widget_html() -> str:
       content,
       arguments: argumentsValue,
       result: resultValue,
+      jobMeta: jobMetaValue,
+      jobOutputNote,
+      jobOutputScroll,
+      jobOutput: jobOutputValue,
     };
     rowsByKey.set(entry.key, row);
     return row;
@@ -683,6 +886,7 @@ def _activity_widget_html() -> str:
     const isJob = entry.kind === "job";
     const previousDetailStatus = row.dataset.detailStatus;
     row.dataset.callId = entry.call_id || "";
+    row.dataset.jobId = entry.job_id || "";
     row.dataset.entryKind = entry.kind;
     row._activityEntry = entry;
     row.className = `call ${entry.status}${isJob ? " job-entry" : ""}`;
@@ -693,12 +897,13 @@ def _activity_widget_html() -> str:
     refs.detail.title = entry.detail || "";
     refs.elapsed.textContent = elapsed(entry, now);
 
-    if (!isJob) {
-      const expanded = expandedRows.has(entry.key);
-      row.classList.toggle("expanded", expanded);
-      refs.header.setAttribute("aria-expanded", String(expanded));
-      refs.panel.hidden = !expanded;
-      if (expanded && previousDetailStatus && previousDetailStatus !== entry.status) void loadToolDetail(row);
+    const expanded = expandedRows.has(entry.key);
+    row.classList.toggle("expanded", expanded);
+    refs.header.setAttribute("aria-expanded", String(expanded));
+    refs.panel.hidden = !expanded;
+    if (expanded && previousDetailStatus && previousDetailStatus !== entry.status) {
+      if (isJob) void loadJobDetail(row);
+      else void loadToolDetail(row);
     }
   }
 
@@ -769,7 +974,14 @@ def _activity_widget_html() -> str:
     empty.hidden = primary.length > 0 || backgroundJobs.length > 0;
     reconcileRows(displayedEntries(next), displayedBackgroundJobs(next), now);
     syncClockTimer();
+    syncJobDetailTimer();
     window.openai?.notifyIntrinsicHeight?.();
+  }
+
+  function hasRunningPanelActivity(next) {
+    const hasRunningTool = (next?.calls || []).some(call => call.status === "running");
+    const hasRunningJob = currentTurnJobs(next || {}).some(job => job.status === "running");
+    return hasRunningTool || hasRunningJob;
   }
 
   function retire() {
@@ -778,13 +990,10 @@ def _activity_widget_html() -> str:
     if (clockTimer !== null) clearInterval(clockTimer);
     clockTimer = null;
     clockDelay = null;
+    if (jobDetailTimer !== null) clearInterval(jobDetailTimer);
+    jobDetailTimer = null;
     root.classList.add("retired");
-    logo.classList.remove("running");
-    for (const row of rowsByKey.values()) row.classList.remove("running");
-    headerTool.textContent = "Continued in newer Serena panel";
-    headerDetail.textContent = "";
-    headerElapsed.textContent = "";
-    setCollapsed(true);
+    window.openai?.notifyIntrinsicHeight?.();
   }
 
   async function poll() {
@@ -795,12 +1004,11 @@ def _activity_widget_html() -> str:
     try {
       const result = await window.openai.callTool("get_activity", { run_id: state.run_id });
       const next = result?.structuredContent ?? result?.structured_content ?? result;
-      if (next?.superseded) {
-        if (next?.run_id) render(next);
+      if (next?.run_id) render(next);
+      if (next?.superseded && !hasRunningPanelActivity(next)) {
         retire();
         return;
       }
-      if (next?.run_id) render(next);
     } catch (_) {
       // Keep the last useful state; transient bridge/server failures are non-fatal.
     }
@@ -814,12 +1022,8 @@ def _activity_widget_html() -> str:
     const next = event?.detail?.globals?.toolOutput;
     if (!next?.run_id) return;
     if (state?.run_id && next.run_id !== state.run_id) return;
-    if (next.superseded) {
-      render(next);
-      retire();
-      return;
-    }
     render(next);
+    if (next.superseded && !hasRunningPanelActivity(next)) retire();
   }
   window.addEventListener("openai:set_globals", acceptGlobals, { passive: true });
 
