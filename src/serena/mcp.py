@@ -508,6 +508,7 @@ class SerenaMCPFactory:
         self,
         host: str = "127.0.0.1",
         port: int = 8000,
+        streamable_http_path: str = "/mcp",
         mode_selection_def: ModeSelectionDefinition | None = None,
         language_backend: LanguageBackend | None = None,
         enable_web_dashboard: bool | None = None,
@@ -524,6 +525,7 @@ class SerenaMCPFactory:
 
         :param host: The host to bind to
         :param port: The port to bind to
+        :param streamable_http_path: Streamable HTTP endpoint path exposed by the server.
         :param mode_selection_def: the mode selection definition to apply
         :param language_backend: the language backend to use, overriding the configuration setting.
         :param enable_web_dashboard: Whether to enable the web dashboard. If not specified, will take the value from the serena configuration.
@@ -582,6 +584,7 @@ class SerenaMCPFactory:
             icons=_server_icons(),
             host=host,
             port=port,
+            streamable_http_path=streamable_http_path,
             instructions=instructions,
         )
         register_file_export_resource(mcp)

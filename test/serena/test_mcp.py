@@ -48,6 +48,18 @@ def test_mcp_server_advertises_embedded_png_icon(monkeypatch: pytest.MonkeyPatch
     assert icon.src.startswith("data:image/png;base64,")
 
 
+def test_mcp_server_accepts_custom_streamable_http_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that Serena can expose Streamable HTTP at a deployment-specific path."""
+    factory = SerenaMCPFactory(transport="streamable-http", context="chatgpt")
+    monkeypatch.setattr("serena.mcp.SerenaConfig.from_config_file", lambda: MagicMock())
+    monkeypatch.setattr(factory, "_create_serena_agent", lambda *args, **kwargs: MagicMock())
+    monkeypatch.setattr(factory, "_get_initial_instructions", lambda: "")
+
+    mcp = factory.create_mcp_server(streamable_http_path="/serena")
+
+    assert mcp.settings.streamable_http_path == "/serena"
+
+
 class BasicTool(BaseMockTool):
     """A mock Tool class for testing."""
 

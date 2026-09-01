@@ -279,6 +279,13 @@ class TopLevelCommands(AutoRegisteringGroup):
         "--port", type=int, default=8000, show_default=True, help="Listen port for the MCP server (when using corresponding transport)."
     )
     @click.option(
+        "--streamable-http-path",
+        type=str,
+        default="/mcp",
+        show_default=True,
+        help="HTTP endpoint path for Streamable HTTP transport.",
+    )
+    @click.option(
         "--enable-web-dashboard",
         type=bool,
         is_flag=False,
@@ -332,6 +339,7 @@ class TopLevelCommands(AutoRegisteringGroup):
         transport: Literal["stdio", "sse", "streamable-http"],
         host: str,
         port: int,
+        streamable_http_path: str,
         enable_web_dashboard: bool | None,
         web_dashboard_port: int | None,
         open_web_dashboard: bool | None,
@@ -388,6 +396,7 @@ class TopLevelCommands(AutoRegisteringGroup):
         server = factory.create_mcp_server(
             host=host,
             port=port,
+            streamable_http_path=streamable_http_path,
             mode_selection_def=mode_selection_def,
             language_backend=LanguageBackend.from_str(language_backend) if language_backend else None,
             enable_web_dashboard=enable_web_dashboard,

@@ -72,6 +72,13 @@ def test_orchestrator_creates_only_its_own_state_layout(orchestrator_config: Orc
     assert orchestrator_config.provider_state_dir.is_dir()
 
 
+def test_orchestrator_accepts_custom_streamable_http_path(orchestrator_config: OrchestratorConfig) -> None:
+    """Orchestrator can expose Streamable HTTP at a deployment-specific path."""
+    server = OrchestratorMCPFactory(orchestrator_config).create_mcp_server(streamable_http_path="/orchestrator")
+
+    assert server.settings.streamable_http_path == "/orchestrator"
+
+
 def test_orchestrator_exposes_delegation_routing_guide(orchestrator_config: OrchestratorConfig) -> None:
     """Orchestrator exposes route selection and both supported hand-off workflows."""
 

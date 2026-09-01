@@ -52,11 +52,17 @@ class OrchestratorMCPFactory:
         """Stops Orchestrator-owned background scheduling for this factory."""
         self._scheduler.close()
 
-    def create_mcp_server(self, host: str = "127.0.0.1", port: int = 8100) -> FastMCP:
+    def create_mcp_server(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 8100,
+        streamable_http_path: str = "/mcp",
+    ) -> FastMCP:
         """Creates the independent Orchestrator MCP server.
 
         :param host: host to bind for network transports.
         :param port: port to bind for network transports.
+        :param streamable_http_path: Streamable HTTP endpoint path exposed by the server.
         :return: configured FastMCP server.
         """
         self._config.ensure_state_layout()
@@ -67,6 +73,7 @@ class OrchestratorMCPFactory:
             name="Orchestrator",
             host=host,
             port=port,
+            streamable_http_path=streamable_http_path,
             instructions=(
                 "Orchestrator is an independent delegation service. "
                 "Use it for bounded ChatGPT/Codex delegation and provider lifecycle, not Serena coding/project/jobs tools. "
