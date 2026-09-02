@@ -7,11 +7,17 @@ import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from orchestrator.delegates import DelegateError, DelegateState, DelegateStatusResponse, DelegateStore
+from orchestrator.delegates import (
+    DelegateError,
+    DelegateState,
+    DelegateStatusResponse,
+    DelegateStore,
+)
 
 ACTIVITY_RESOURCE_URI = "ui://orchestrator/activity-v1.html"
 _ACTIVITY_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
@@ -23,6 +29,7 @@ _ACTIVE_STATES = {
     DelegateState.RUNNING_CHAT,
     DelegateState.RUNNING_CODEX,
 }
+_LOGO_SVG = (Path(__file__).parent / "resources" / "orchestrator-logo.svg").read_text(encoding="utf-8")
 
 
 @dataclass
@@ -115,7 +122,12 @@ class OrchestratorActivityTracker:
                 delegates.append(self._delegate_store.status(delegate_id, session_id))
             except DelegateError:
                 continue
-        delegates.sort(key=lambda item: (item.state not in _ACTIVE_STATES, -item.created_at.timestamp()))
+        delegates.sort(
+            key=lambda item: (
+                item.state not in _ACTIVE_STATES,
+                -item.created_at.timestamp(),
+            )
+        )
 
         return {
             "run_id": run_id,
@@ -154,44 +166,73 @@ def _activity_widget_html() -> str:
     return r"""
 <div id="orchestrator-activity" class="activity">
   <button id="activity-header" class="header" type="button" aria-expanded="true">
-    <span class="title"><strong>Orchestrator</strong><span id="activity-count" class="count">0 agents</span></span>
+    <span class="title">
+      <span id="activity-logo" class="logo" aria-hidden="true">__ORCHESTRATOR_LOGO__</span>
+      <span class="header-overview">
+        <strong>Orchestrator</strong>
+        <span id="activity-count" class="count">0 agents</span>
+      </span>
+    </span>
+    <span id="activity-header-status" class="header-status">Idle</span>
     <span id="activity-chevron" class="chevron" aria-hidden="true">⌄</span>
   </button>
   <div id="activity-body" class="body" aria-live="polite">
-    <div id="activity-empty" class="empty">No delegates visible in this session.</div>
+    <div id="activity-empty" class="empty">Waiting for activity...</div>
     <ol id="activity-delegates" class="delegates"></ol>
   </div>
 </div>
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 13px/1.35 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  body { margin: 0; font: 12px/1.35 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: CanvasText; background: transparent; }
   button { font: inherit; color: inherit; }
   .activity { width: 100%; min-width: 0; }
-  .header { width: 100%; border: 0; background: transparent; display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; cursor: pointer; }
-  .title { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-  .count { opacity: .65; font-size: 12px; }
-  .chevron { transition: transform .15s ease; }
+  .header { width: 100%; min-height: 42px; display: grid; grid-template-columns: minmax(0, 1fr) auto 12px; gap: 5px; align-items: center; padding: 6px 7px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+  .title { min-width: 0; display: flex; gap: 7px; align-items: center; white-space: nowrap; overflow: hidden; }
+  .logo { width: 21px; height: 21px; flex: 0 0 auto; color: #00491e; opacity: .82; }
+  .logo svg { display: block; width: 100%; height: 100%; }
+  .header-overview { min-width: 0; display: grid; gap: 1px; overflow: hidden; }
+  .header-overview strong, .count { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .count { font-size: 10.5px; line-height: 1.2; opacity: .58; }
+  .header-status { justify-self: end; white-space: nowrap; font-size: 11px; font-variant-numeric: tabular-nums; opacity: .58; }
+  .header-status.running { color: #00491e; opacity: 1; font-weight: 650; }
+  .header-status.failed { color: #dc2626; opacity: 1; font-weight: 650; }
+  .chevron { width: 14px; text-align: center; transition: transform .14s ease; opacity: .58; }
   .activity.collapsed .chevron { transform: rotate(-90deg); }
   .activity.collapsed .body { display: none; }
-  .body { max-height: 260px; overflow: auto; padding: 0 8px 8px; }
-  .empty { padding: 8px 2px; opacity: .65; }
+  .body { max-height: 202px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent); padding: 3px 7px 6px; }
+  .empty { padding: 5px 0 2px; opacity: .58; }
   .delegates { list-style: none; margin: 0; padding: 0; }
-  .row { border-top: 1px solid color-mix(in srgb, currentColor 14%, transparent); }
-  .row-header { width: 100%; border: 0; background: transparent; display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; grid-template-areas: "dot label elapsed" ". meta meta"; gap: 1px 7px; padding: 7px 2px; text-align: left; cursor: pointer; }
-  .dot { grid-area: dot; width: 8px; height: 8px; border-radius: 50%; margin-top: 4px; background: currentColor; opacity: .35; }
-  .row.active .dot { opacity: .9; }
-  .label { grid-area: label; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
-  .elapsed { grid-area: elapsed; opacity: .6; font-size: 11px; }
-  .meta { grid-area: meta; opacity: .68; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .detail { margin: 0 2px 8px 17px; padding: 7px 8px; border-radius: 6px; background: color-mix(in srgb, currentColor 6%, transparent); font-size: 11px; }
+  .row { min-width: 0; }
+  .row-header { width: 100%; display: grid; grid-template-columns: 15px minmax(0, 1fr) auto; grid-template-areas: "status label submitted" "status meta elapsed"; column-gap: 5px; row-gap: 0; align-items: start; min-height: 0; padding: 3px 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+  .status { grid-area: status; align-self: center; width: 15px; text-align: center; opacity: .78; font-size: larger;}
+  .row.running .status { color: #00491e; animation: pulse 1.1s ease-in-out infinite; }
+  .row.completed .status { color: #16a34a; }
+  .row.failed .status, .row.timed_out .status { color: #dc2626; }
+  .row.cancelled .status { opacity: .5; }
+  .label { grid-area: label; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; }
+  .submitted, .elapsed { justify-self: end; white-space: nowrap; font-size: 10.5px; opacity: .52; font-variant-numeric: tabular-nums; }
+  .submitted { grid-area: submitted; }
+  .elapsed { grid-area: elapsed; }
+  .meta { grid-area: meta; min-width: 0; margin-top: 1px; font-size: 10.5px; line-height: 1.25; opacity: .58; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .detail { margin: 1px 0 5px 20px; padding: 5px 7px 6px; border-left: 2px solid color-mix(in srgb, #00491e 28%, transparent); border-radius: 0 6px 6px 0; background: color-mix(in srgb, CanvasText 3%, transparent); font-size: 10.5px; }
   .detail[hidden] { display: none; }
-  .detail-grid { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 3px 8px; }
-  .detail-key { opacity: .6; }
-  .goal { margin-top: 6px; white-space: pre-wrap; }
-  .audit { margin-top: 6px; max-height: 90px; overflow: auto; white-space: pre-wrap; opacity: .78; }
-  .copy { margin-top: 7px; border: 1px solid color-mix(in srgb, currentColor 20%, transparent); background: transparent; border-radius: 5px; padding: 3px 6px; cursor: pointer; }
-  .retired { opacity: .7; }
+  .detail-grid { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 8px; }
+  .detail-key { color: color-mix(in srgb, #00491e 82%, CanvasText); opacity: .78; font-weight: 700; }
+  .goal { margin-top: 5px; white-space: pre-wrap; }
+  .audit { margin-top: 5px; max-height: 90px; overflow: auto; white-space: pre-wrap; font: 10.5px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .72; }
+  .row-actions { margin: 1px 0 5px 20px; display: flex; align-items: stretch; gap: 6px; }
+  .row-actions[hidden] { display: none; }
+  .copy-action, .fallback-action { border: 1px solid color-mix(in srgb, CanvasText 14%, transparent); background: transparent; border-radius: 5px; padding: 4px 7px; cursor: pointer; font-size: 10.5px; }
+  .copy-action { flex: 0 0 auto; }
+  .fallback-action { position: relative; flex: 1 1 auto; min-width: 145px; overflow: hidden; text-align: left; }
+  .fallback-action[hidden] { display: none; }
+  .fallback-action:disabled { cursor: default; opacity: .65; }
+  .fallback-progress { position: absolute; inset: 0 auto 0 0; width: 100%; background: color-mix(in srgb, #00491e 9%, transparent); pointer-events: none; }
+  .fallback-label { position: relative; z-index: 1; }
+  @keyframes pulse { 50% { opacity: .28; } }
+  @media (prefers-color-scheme: dark) { .logo { color: #70c990; } .header-status.running, .row.running .status { color: #70c990; } }
+  @media (prefers-reduced-motion: reduce) { .row.running .status { animation: none; } .chevron { transition: none; } }
 </style>
 <script>
 (() => {
@@ -201,7 +242,9 @@ def _activity_widget_html() -> str:
 
   const header = document.getElementById("activity-header");
   const body = document.getElementById("activity-body");
+  const logo = document.getElementById("activity-logo");
   const count = document.getElementById("activity-count");
+  const headerStatus = document.getElementById("activity-header-status");
   const list = document.getElementById("activity-delegates");
   const empty = document.getElementById("activity-empty");
   const rows = new Map();
@@ -230,6 +273,12 @@ def _activity_widget_html() -> str:
     return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
   }
 
+  function submittedClock(timestamp) {
+    const value = Date.parse(timestamp || "");
+    if (!Number.isFinite(value)) return "";
+    return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
   function label(item) {
     const provider = item.active_provider || item.provider_policy || "chat";
     return `${provider === "chat" ? "ChatGPT" : "Codex"} · ${item.kind}`;
@@ -238,6 +287,84 @@ def _activity_widget_html() -> str:
   function meta(item) {
     const stateLabel = String(item.state || "").toLowerCase().replaceAll("_", " ");
     return `${item.project_name || "project"} · ${stateLabel}`;
+  }
+
+  function statusClass(state) {
+    if (state === "RUNNING_CHAT" || state === "RUNNING_CODEX") return "running";
+    if (state === "COMPLETED") return "completed";
+    if (state === "FAILED") return "failed";
+    if (state === "TIMED_OUT") return "timed_out";
+    if (state === "CANCELLED") return "cancelled";
+    return "waiting";
+  }
+
+  function statusIcon(state) {
+    if (state === "RUNNING_CHAT" || state === "RUNNING_CODEX") return "●";
+    if (state === "FAILED" || state === "TIMED_OUT") return "!";
+    if (state === "CANCELLED") return "\u00d7";
+    if (state === "WAITING_FOR_CHAT" || state === "QUEUED") return "○";
+    return "✓";
+  }
+
+  function launchPrompt(item) {
+    return `@Orchestrator claim delegate ${item.delegate_id} and complete it independently.`;
+  }
+
+  async function copyLaunchPrompt(item, button) {
+    const prompt = launchPrompt(item);
+    try {
+      await navigator.clipboard.writeText(prompt);
+      button.textContent = "Copied";
+    } catch (_) {
+      button.textContent = prompt;
+    }
+  }
+
+  function fallbackTiming(item) {
+    const created = Date.parse(item.created_at || "");
+    const deadline = Date.parse(item.claim_deadline || "");
+    if (!Number.isFinite(created) || !Number.isFinite(deadline) || deadline <= created) return null;
+    const totalMs = deadline - created;
+    const remainingMs = Math.max(0, deadline - Date.now());
+    return { remainingMs, fraction: Math.min(1, remainingMs / totalMs) };
+  }
+
+  function formatRemaining(milliseconds) {
+    const seconds = Math.max(0, Math.ceil(milliseconds / 1000));
+    if (seconds < 60) return `${seconds}s`;
+    return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  }
+
+  async function useCodexNow(item, button) {
+    if (!window.openai?.callTool || item.state !== "WAITING_FOR_CHAT") return;
+    button.disabled = true;
+    const labelNode = button.querySelector(".fallback-label");
+    if (labelNode) labelNode.textContent = "Starting Codex...";
+    try {
+      const result = await window.openai.callTool("delegate_reroute", { delegate_id: item.delegate_id, provider_policy: "codex" });
+      const nextItem = result?.structuredContent ?? result?.structured_content ?? result;
+      if (nextItem?.delegate_id !== item.delegate_id) throw new Error("Mismatched delegate reroute");
+    } catch (_) {
+      button.disabled = false;
+      if (labelNode) labelNode.textContent = "Use Codex now";
+    }
+  }
+
+  function updateRowActions(item, refs) {
+    const waiting = item.state === "WAITING_FOR_CHAT";
+    refs.actions.hidden = !waiting;
+    if (!waiting) return;
+
+    refs.copyAction.textContent = "Copy launch prompt";
+    refs.fallbackAction.hidden = item.provider_policy !== "auto" || !item.claim_deadline;
+    if (refs.fallbackAction.hidden) return;
+
+    const timing = fallbackTiming(item);
+    refs.fallbackAction.disabled = false;
+    refs.fallbackProgress.style.width = `${(timing?.fraction ?? 0) * 100}%`;
+    refs.fallbackLabel.textContent = timing
+      ? `Use Codex now · auto in ${formatRemaining(timing.remainingMs)}`
+      : "Use Codex now";
   }
 
   async function loadDetail(item, detail) {
@@ -278,15 +405,6 @@ def _activity_widget_html() -> str:
       const audit = document.createElement("div"); audit.className = "audit";
       audit.textContent = (value.audit || []).map(event => `${event.event} · ${event.actor} · ${String(event.state).toLowerCase()}`).join("\n");
       if (audit.textContent) detail.appendChild(audit);
-      if (item.state === "WAITING_FOR_CHAT") {
-        const copy = document.createElement("button"); copy.className = "copy"; copy.type = "button"; copy.textContent = "Copy launch prompt";
-        copy.addEventListener("click", async event => {
-          event.stopPropagation();
-          const prompt = `@Orchestrator claim delegate ${item.delegate_id} and complete it independently.`;
-          try { await navigator.clipboard.writeText(prompt); copy.textContent = "Copied"; } catch (_) { copy.textContent = prompt; }
-        });
-        detail.appendChild(copy);
-      }
     } catch (_) {
       detail.textContent = "Delegate detail unavailable.";
     }
@@ -296,7 +414,13 @@ def _activity_widget_html() -> str:
   function render(next) {
     state = next;
     const delegates = next?.delegates || [];
+    root.classList.toggle("empty-state", delegates.length === 0);
     count.textContent = `${delegates.length} ${delegates.length === 1 ? "agent" : "agents"}`;
+    const activeCount = delegates.filter(item => activeStates.has(item.state)).length;
+    const failedCount = delegates.filter(item => item.state === "FAILED").length;
+    headerStatus.textContent = activeCount > 0 ? `${activeCount} running` : failedCount > 0 ? `${failedCount} failed` : delegates.length > 0 ? "Complete" : "Idle";
+    headerStatus.classList.toggle("running", activeCount > 0);
+    headerStatus.classList.toggle("failed", activeCount === 0 && failedCount > 0);
     empty.hidden = delegates.length !== 0;
 
     const seen = new Set();
@@ -306,13 +430,22 @@ def _activity_widget_html() -> str:
       if (!row) {
         row = document.createElement("li"); row.className = "row";
         const button = document.createElement("button"); button.className = "row-header"; button.type = "button";
-        const dot = document.createElement("span"); dot.className = "dot";
+        const status = document.createElement("span"); status.className = "status";
         const labelNode = document.createElement("span"); labelNode.className = "label";
+        const submittedNode = document.createElement("span"); submittedNode.className = "submitted";
         const elapsedNode = document.createElement("span"); elapsedNode.className = "elapsed";
         const metaNode = document.createElement("span"); metaNode.className = "meta";
+        const actions = document.createElement("div"); actions.className = "row-actions"; actions.hidden = true;
+        const copyAction = document.createElement("button"); copyAction.className = "copy-action"; copyAction.type = "button";
+        const fallbackAction = document.createElement("button"); fallbackAction.className = "fallback-action"; fallbackAction.type = "button"; fallbackAction.hidden = true;
+        const fallbackProgress = document.createElement("span"); fallbackProgress.className = "fallback-progress";
+        const fallbackLabel = document.createElement("span"); fallbackLabel.className = "fallback-label";
+        fallbackAction.append(fallbackProgress, fallbackLabel); actions.append(copyAction, fallbackAction);
         const detail = document.createElement("div"); detail.className = "detail"; detail.hidden = true;
-        button.append(dot, labelNode, elapsedNode, metaNode); row.append(button, detail);
-        row._refs = { labelNode, elapsedNode, metaNode, detail };
+        button.append(status, labelNode, submittedNode, elapsedNode, metaNode); row.append(button, actions, detail);
+        row._refs = { status, labelNode, submittedNode, elapsedNode, metaNode, actions, copyAction, fallbackAction, fallbackProgress, fallbackLabel, detail };
+        copyAction.addEventListener("click", event => { event.stopPropagation(); copyLaunchPrompt(row._item, copyAction); });
+        fallbackAction.addEventListener("click", event => { event.stopPropagation(); useCodexNow(row._item, fallbackAction); });
         button.addEventListener("click", () => {
           const isOpen = expanded.has(item.delegate_id);
           if (isOpen) { expanded.delete(item.delegate_id); detail.hidden = true; }
@@ -322,10 +455,13 @@ def _activity_widget_html() -> str:
         rows.set(item.delegate_id, row);
       }
       row._item = item;
-      row.classList.toggle("active", activeStates.has(item.state));
+      row.className = `row ${statusClass(item.state)}`;
+      row._refs.status.textContent = statusIcon(item.state);
       row._refs.labelNode.textContent = label(item);
+      row._refs.submittedNode.textContent = submittedClock(item.created_at);
       row._refs.elapsedNode.textContent = elapsed(item);
       row._refs.metaNode.textContent = meta(item);
+      updateRowActions(item, row._refs);
       list.appendChild(row);
     }
     for (const [id, row] of rows) {
@@ -370,4 +506,4 @@ def _activity_widget_html() -> str:
   poll();
 })();
 </script>
-""".strip()
+""".replace("__ORCHESTRATOR_LOGO__", _LOGO_SVG).strip()

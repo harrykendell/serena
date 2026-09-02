@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Orchestrator</title>
+  <rect x="24" y="24" width="208" height="208" rx="48" fill="#ffffff" stroke="#00491e" stroke-width="12"/>
+  <circle cx="80" cy="128" r="17" fill="#00491e"/>
+  <circle cx="176" cy="82" r="17" fill="#00491e"/>
+  <circle cx="176" cy="174" r="17" fill="#00491e"/>
+  <path d="M98 128h28c17 0 22-13 31-30M126 128c17 0 22 13 31 30" fill="none" stroke="#00491e" stroke-width="14" stroke-linecap="round"/>
+</svg>

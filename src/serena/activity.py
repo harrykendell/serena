@@ -146,7 +146,13 @@ class ActivityTracker:
             if run is not None:
                 run.project_name = project_name
 
-    def start_tool(self, session_id: str, tool_name: str, arguments: dict[str, Any], project_name: str = "") -> str | None:
+    def start_tool(
+        self,
+        session_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        project_name: str = "",
+    ) -> str | None:
         """Records one tool invocation when an activity run is active for ``session_id``."""
         with self._lock:
             run_id = self._current_run_by_session.get(session_id)
@@ -439,12 +445,22 @@ def _activity_widget_html() -> str:
         <strong id="activity-header-tool">Waiting for activity</strong>
         <span id="activity-header-detail" class="header-detail"></span>
       </span>
+      <span class="header-overview">
+        <strong>Serena</strong>
+        <span id="activity-header-stats" class="header-stats">0 tools · 0 jobs</span>
+      </span>
     </span>
-    <span id="activity-header-elapsed" class="summary"></span>
+    <span class="header-meta">
+      <span class="header-times">
+        <span id="activity-header-submitted" class="header-submitted"></span>
+        <span id="activity-header-elapsed" class="summary"></span>
+      </span>
+      <span id="activity-header-status" class="header-status">Idle</span>
+    </span>
     <span id="activity-chevron" class="chevron" aria-hidden="true">⌄</span>
   </button>
   <div id="activity-body" class="body" aria-live="polite">
-    <div id="activity-empty" class="empty">Waiting for Serena commands...</div>
+    <div id="activity-empty" class="empty">Waiting for commands...</div>
     <ol id="activity-calls" class="calls"></ol>
     <button id="activity-other-jobs" class="other-jobs" type="button" aria-expanded="false" hidden>
       <span id="activity-other-jobs-label"></span><span class="other-jobs-chevron" aria-hidden="true">⌄</span>
@@ -461,26 +477,37 @@ def _activity_widget_html() -> str:
   .activity { width: 100%; min-width: 0; }
   .header { width: 100%; min-height: 42px; display: grid; grid-template-columns: minmax(0, 1fr) auto 12px; gap: 5px; align-items: center; padding: 6px 7px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
   .title { min-width: 0; display: flex; gap: 7px; align-items: center; white-space: nowrap; overflow: hidden; }
-  .logo { width: 21px; height: 21px; flex: 0 0 auto; color: #00491e; opacity: .82; transform-origin: center; }
+  .logo { width: 21px; height: 21px; flex: 0 0 auto; color: #00491e; opacity: .82; }
   .logo svg { display: block; width: 100%; height: 100%; }
-  .logo.running { animation: logo-work .85s ease-in-out infinite alternate; opacity: 1; }
-  .header-tool { min-width: 0; display: grid; gap: 1px; overflow: hidden; }
+  .header-tool, .header-overview { min-width: 0; display: grid; gap: 1px; overflow: hidden; }
   #activity-header-tool { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .header-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 10.5px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .58; }
-  .summary { white-space: nowrap; font-size: 11px; opacity: .66; font-variant-numeric: tabular-nums; }
-  .activity:not(.collapsed) .header-detail, .activity:not(.collapsed) .summary { display: none; }
+  .header-detail, .header-stats { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; line-height: 1.2; opacity: .58; }
+  .header-detail { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .header-meta { justify-self: end; min-width: 0; }
+  .header-times { display: grid; gap: 1px; justify-items: end; }
+  .header-submitted, .summary, .header-status { white-space: nowrap; font-size: 11px; font-variant-numeric: tabular-nums; }
+  .header-submitted { opacity: .52; }
+  .summary { opacity: .66; }
+  .header-status { opacity: .58; }
+  .header-status.running { color: #00491e; opacity: 1; font-weight: 650; }
+  .header-status.failed { color: #dc2626; opacity: 1; font-weight: 650; }
+  .activity.collapsed .header-overview, .activity.collapsed .header-status { display: none; }
+  .activity:not(.collapsed) .header-tool, .activity:not(.collapsed) .header-times { display: none; }
+  .activity.collapsed.empty-state .header-tool, .activity.collapsed.empty-state .header-times { display: none; }
+  .activity.collapsed.empty-state .header-overview { display: grid; }
+  .activity.collapsed.empty-state .header-status { display: inline; }
   .chevron, .other-jobs-chevron { width: 14px; text-align: center; transition: transform .14s ease; opacity: .58; }
   .activity.collapsed .chevron, .other-jobs[aria-expanded="false"] .other-jobs-chevron { transform: rotate(-90deg); }
   .body { max-height: 202px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent); padding: 3px 7px 6px; }
   .activity.collapsed .body { display: none; }
   .calls { list-style: none; padding: 0; margin: 0; }
   .call { min-width: 0; }
-  .row-header { width: 100%; display: grid; grid-template-columns: 15px minmax(0, 1fr) auto 12px; grid-template-areas: "status tool submitted chevron" ". detail elapsed chevron"; column-gap: 5px; row-gap: 0; align-items: start; min-height: 0; padding: 3px 0; border: 0; background: transparent; color: inherit; text-align: left; }
+  .row-header { width: 100%; display: grid; grid-template-columns: 15px minmax(0, 1fr) auto 12px; grid-template-areas: "status tool submitted chevron" "status detail elapsed chevron"; column-gap: 5px; row-gap: 0; align-items: start; min-height: 0; padding: 3px 0; border: 0; background: transparent; color: inherit; text-align: left; }
   button.row-header { cursor: pointer; }
-  .job-entry { margin: 1px 0; border-radius: 6px; background: color-mix(in srgb, #00491e 5%, transparent); }
+  .job-entry { margin: 1px 0; border-radius: 6px; }
   .job-entry .row-header { padding-left: 4px; padding-right: 4px; }
-  .status { grid-area: status; width: 15px; text-align: center; opacity: .78; }
-  .call.running .status { color: #d97706; animation: pulse 1.1s ease-in-out infinite; }
+  .status { grid-area: status; align-self: center; width: 15px; text-align: center; opacity: .78; font-size: larger; }
+  .call.running .status { color: #00491e; animation: pulse 1.1s ease-in-out infinite; }
   .call.completed .status { color: #16a34a; }
   .call.failed .status, .call.timed_out .status { color: #dc2626; }
   .call.cancelled .status { opacity: .5; }
@@ -506,9 +533,8 @@ def _activity_widget_html() -> str:
   .other-jobs:hover { opacity: .78; }
   .empty { padding: 5px 0 2px; opacity: .58; }
   @keyframes pulse { 50% { opacity: .28; } }
-  @keyframes logo-work { from { transform: scale(.92); opacity: .62; } to { transform: scale(1.05); opacity: 1; } }
-  @media (prefers-color-scheme: dark) { .logo { color: #70c990; } .job-entry.running .status { color: #70c990; } }
-  @media (prefers-reduced-motion: reduce) { .call.running .status, .logo.running { animation: none; } .chevron, .other-jobs-chevron, .row-chevron { transition: none; } }
+  @media (prefers-color-scheme: dark) { .logo { color: #70c990; } .header-status.running, .call.running .status, .job-entry.running .status { color: #70c990; } }
+  @media (prefers-reduced-motion: reduce) { .call.running .status { animation: none; } .chevron, .other-jobs-chevron, .row-chevron { transition: none; } }
   @media (max-width: 520px) {
     body { font-size: 12px; }
     .header { min-height: 42px; grid-template-columns: minmax(0, 1fr) auto 12px; gap: 5px; padding: 6px 7px; }
@@ -530,7 +556,10 @@ def _activity_widget_html() -> str:
   const body = document.getElementById("activity-body");
   const headerTool = document.getElementById("activity-header-tool");
   const headerDetail = document.getElementById("activity-header-detail");
+  const headerStats = document.getElementById("activity-header-stats");
+  const headerSubmitted = document.getElementById("activity-header-submitted");
   const headerElapsed = document.getElementById("activity-header-elapsed");
+  const headerStatus = document.getElementById("activity-header-status");
   const calls = document.getElementById("activity-calls");
   const empty = document.getElementById("activity-empty");
   const logo = document.getElementById("activity-logo");
@@ -588,6 +617,10 @@ def _activity_widget_html() -> str:
     return "✓";
   }
 
+  function countLabel(count, singular) {
+    return `${count} ${singular}${count === 1 ? "" : "s"}`;
+  }
+
   function currentTurnJobs(next) {
     return (next.jobs || []).filter(job => Boolean(job.current_turn));
   }
@@ -617,11 +650,8 @@ def _activity_widget_html() -> str:
       .map(callEntry);
   }
 
-  function headerCall(next) {
-    const toolCalls = next.calls || [];
-    const running = toolCalls.filter(call => call.status === "running").sort((a, b) => b.started_at - a.started_at);
-    if (running.length > 0) return running[0];
-    return [...toolCalls].sort((a, b) => b.started_at - a.started_at)[0] || null;
+  function headerEntry(next) {
+    return primaryEntries(next)[0] || null;
   }
 
   function primaryEntries(next) {
@@ -944,8 +974,8 @@ def _activity_widget_html() -> str:
   function refreshDurations() {
     if (!state?.run_id) return;
     const now = Date.now() / 1000;
-    const activeHeaderCall = headerCall(state);
-    if (activeHeaderCall) headerElapsed.textContent = elapsed(activeHeaderCall, now);
+    const activeHeaderEntry = headerEntry(state);
+    if (activeHeaderEntry) headerElapsed.textContent = elapsed(activeHeaderEntry, now);
     for (const row of rowsByKey.values()) {
       const entry = row._activityEntry;
       if (entry?.status === "running") row._activityRefs.elapsed.textContent = elapsed(entry, now);
@@ -967,15 +997,32 @@ def _activity_widget_html() -> str:
     if (!next || !next.run_id) return;
     state = next;
     const now = Date.now() / 1000;
-    const activeHeaderCall = headerCall(next);
+    const activeHeaderEntry = headerEntry(next);
     const backgroundJobs = otherRunningJobs(next);
 
-    headerTool.textContent = activeHeaderCall?.tool_name || "Waiting for activity";
-    const headerDetailText = activeHeaderCall?.detail || "";
+    headerTool.textContent = activeHeaderEntry?.tool_name || "Waiting for activity";
+    const headerDetailText = activeHeaderEntry?.detail || "";
     headerDetail.textContent = headerDetailText;
     headerDetail.title = headerDetailText;
-    headerElapsed.textContent = activeHeaderCall ? elapsed(activeHeaderCall, now) : "";
-    logo.classList.toggle("running", activeHeaderCall?.status === "running");
+    headerSubmitted.textContent = activeHeaderEntry ? submittedClock(activeHeaderEntry.started_at) : "";
+    headerElapsed.textContent = activeHeaderEntry ? elapsed(activeHeaderEntry, now) : "";
+
+    const toolCount = (next.calls || []).length;
+    const jobCount = (next.jobs || []).length;
+    root.classList.toggle("empty-state", toolCount + jobCount === 0);
+    const projectName = next.project_name || "no project";
+    headerStats.textContent = `${countLabel(toolCount, "tool")} · ${countLabel(jobCount, "job")} · ${projectName}`;
+    headerStats.title = headerStats.textContent;
+
+    const runningCount = (next.calls || []).filter(call => call.status === "running").length
+      + (next.jobs || []).filter(job => job.status === "running").length;
+    const issueCount = (next.calls || []).filter(call => call.status === "failed" || call.status === "timed_out").length
+      + (next.jobs || []).filter(job => job.status === "failed" || job.status === "timed_out").length;
+    headerStatus.textContent = runningCount > 0
+      ? `${runningCount} running`
+      : issueCount > 0 ? `${issueCount} failed` : toolCount + jobCount > 0 ? "Complete" : "Idle";
+    headerStatus.classList.toggle("running", runningCount > 0);
+    headerStatus.classList.toggle("failed", runningCount === 0 && issueCount > 0);
 
     if (backgroundJobs.length === 0) otherJobsExpanded = false;
     otherJobsButton.hidden = backgroundJobs.length === 0;

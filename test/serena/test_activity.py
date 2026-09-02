@@ -348,7 +348,10 @@ def test_activity_resource_uses_mcp_app_contract() -> None:
     assert 'window.openai.callTool("get_activity_job_detail"' in content.content
     assert 'id="activity-logo" class="logo"' in content.content
     assert 'id="activity-header-tool">Waiting for activity</strong>' in content.content
+    assert 'id="activity-header-submitted" class="header-submitted"' in content.content
     assert 'id="activity-header-elapsed" class="summary"' in content.content
+    assert 'id="activity-header-stats" class="header-stats">0 tools · 0 jobs</span>' in content.content
+    assert 'id="activity-header-status" class="header-status">Idle</span>' in content.content
     assert 'id="activity-other-jobs" class="other-jobs" type="button" aria-expanded="false" hidden' in content.content
 
 

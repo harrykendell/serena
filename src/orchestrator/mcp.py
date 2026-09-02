@@ -277,6 +277,12 @@ class OrchestratorMCPFactory:
                 "Explicitly changes the provider policy while a delegate is still waiting for ChatGPT. "
                 "Use codex to start unattended work now, chat to disable fallback, or auto to restart the claim window."
             ),
+            annotations=ToolAnnotations(title="Reroute Delegate", readOnlyHint=False, destructiveHint=False),
+            meta={
+                "ui": {"visibility": ["model", "app"]},
+                "openai/widgetAccessible": True,
+            },
+            structured_output=True,
         )
         def delegate_reroute(delegate_id: str, provider_policy: ProviderPolicy, mcp_ctx: Context) -> dict[str, Any]:
             session_id = get_mcp_session_id(mcp_ctx)
