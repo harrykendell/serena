@@ -370,7 +370,10 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
                 ls_priorities[language] = priority
 
         log.debug("Language server priorities: %s", ls_priorities)
-        ls_composition = compute_language_server_support_composition(project_root, list(ls_priorities.keys()))
+        ls_composition = compute_language_server_support_composition(
+            project_root,
+            sorted(ls_priorities, key=lambda language: ls_priorities[language], reverse=True),
+        )
         log.info("Project composition: %s", ls_composition)
 
         if len(ls_composition) == 0:

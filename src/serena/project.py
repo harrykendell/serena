@@ -502,7 +502,10 @@ class Project(ToStringMixin):
             for language in LanguageServerId
             if self.serena_config.get_ls_priority(language) > 0
         }
-        composition = compute_language_server_support_composition(self.project_root, list(priorities.keys()))
+        composition = compute_language_server_support_composition(
+            self.project_root,
+            sorted(priorities, key=lambda language: priorities[language], reverse=True),
+        )
         detected = [
             language
             for language, _percentage in sorted(
