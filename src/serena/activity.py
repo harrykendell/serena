@@ -456,26 +456,26 @@ def _activity_widget_html() -> str:
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
-  body { margin: 0; font: 13px/1.35 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: CanvasText; background: transparent; }
+  body { margin: 0; font: 12px/1.35 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: CanvasText; background: transparent; }
   button { font: inherit; }
   .activity { width: 100%; min-width: 0; }
-  .header { width: 100%; min-height: 42px; display: grid; grid-template-columns: minmax(0, 1fr) auto 14px; gap: 8px; align-items: center; padding: 7px 9px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+  .header { width: 100%; min-height: 42px; display: grid; grid-template-columns: minmax(0, 1fr) auto 12px; gap: 5px; align-items: center; padding: 6px 7px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
   .title { min-width: 0; display: flex; gap: 7px; align-items: center; white-space: nowrap; overflow: hidden; }
   .logo { width: 21px; height: 21px; flex: 0 0 auto; color: #00491e; opacity: .82; transform-origin: center; }
   .logo svg { display: block; width: 100%; height: 100%; }
   .logo.running { animation: logo-work .85s ease-in-out infinite alternate; opacity: 1; }
   .header-tool { min-width: 0; display: grid; gap: 1px; overflow: hidden; }
   #activity-header-tool { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .header-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .58; }
-  .summary { white-space: nowrap; font-size: 12px; opacity: .66; font-variant-numeric: tabular-nums; }
+  .header-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 10.5px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .58; }
+  .summary { white-space: nowrap; font-size: 11px; opacity: .66; font-variant-numeric: tabular-nums; }
   .activity:not(.collapsed) .header-detail, .activity:not(.collapsed) .summary { display: none; }
   .chevron, .other-jobs-chevron { width: 14px; text-align: center; transition: transform .14s ease; opacity: .58; }
   .activity.collapsed .chevron, .other-jobs[aria-expanded="false"] .other-jobs-chevron { transform: rotate(-90deg); }
-  .body { max-height: 146px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent); padding: 4px 9px 7px; }
+  .body { max-height: 202px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent); padding: 3px 7px 6px; }
   .activity.collapsed .body { display: none; }
   .calls { list-style: none; padding: 0; margin: 0; }
   .call { min-width: 0; }
-  .row-header { width: 100%; display: grid; grid-template-columns: 15px minmax(0, 1fr) auto 14px; grid-template-areas: "status tool submitted chevron" ". detail elapsed chevron"; column-gap: 6px; row-gap: 0; align-items: start; min-height: 0; padding: 4px 0; border: 0; background: transparent; color: inherit; text-align: left; }
+  .row-header { width: 100%; display: grid; grid-template-columns: 15px minmax(0, 1fr) auto 12px; grid-template-areas: "status tool submitted chevron" ". detail elapsed chevron"; column-gap: 5px; row-gap: 0; align-items: start; min-height: 0; padding: 3px 0; border: 0; background: transparent; color: inherit; text-align: left; }
   button.row-header { cursor: pointer; }
   .job-entry { margin: 1px 0; border-radius: 6px; background: color-mix(in srgb, #00491e 5%, transparent); }
   .job-entry .row-header { padding-left: 4px; padding-right: 4px; }
@@ -487,7 +487,7 @@ def _activity_widget_html() -> str:
   .job-entry.running .status { color: #00491e; }
   .tool { grid-area: tool; min-width: 0; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .job-entry .tool { font-weight: 700; }
-  .detail { grid-area: detail; min-width: 0; margin-top: 1px; font: 11px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .58; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 1.25em; }
+  .detail { grid-area: detail; min-width: 0; margin-top: 1px; font: 10.5px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .58; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 1.25em; }
   .submitted, .elapsed { justify-self: end; white-space: nowrap; font-size: 10.5px; opacity: .52; font-variant-numeric: tabular-nums; }
   .submitted { grid-area: submitted; }
   .elapsed { grid-area: elapsed; }
