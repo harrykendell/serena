@@ -11,9 +11,20 @@ from click import Command, Option
 from click.testing import CliRunner
 
 from serena.cli import ProjectCommands, TopLevelCommands, find_project_root
-from serena.config.serena_config import ProjectConfig
+from serena.config.serena_config import ProjectConfig, SerenaConfig
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
+
+
+@pytest.fixture(autouse=True)
+def isolated_serena_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep CLI project tests from modifying the user's Serena configuration."""
+    config_path = tmp_path / "serena-home" / SerenaConfig.CONFIG_FILE
+    monkeypatch.setattr(
+        SerenaConfig,
+        "_determine_config_file_path",
+        classmethod(lambda cls: str(config_path)),
+    )
 
 
 @pytest.fixture
