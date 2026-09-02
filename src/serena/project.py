@@ -19,6 +19,7 @@ from serena.ls_manager import LanguageServerFactory, LanguageServerManager
 from serena.memories.memory_manager import MemoryManager
 from serena.util.file_proxy import FileCollection, FileProxy
 from serena.util.file_system import GitignoreParser, match_path, scan_directory
+from serena.util.inspection import compute_language_server_support_composition
 from serena.util.text_utils import MatchedConsecutiveLines, search_files
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
@@ -57,6 +58,7 @@ class Project(ToStringMixin):
         self.line_ending = project_config.line_ending or serena_config.line_ending
 
         self.language_server_manager: LanguageServerManager | None = None
+        self._language_server_candidates: list[LanguageServerId] = list(project_config.language_servers)
         self._language_server_manager_init_error: Exception | None = None
         self.is_newly_created = is_newly_created
         self._agent: Optional["SerenaAgent"] = None
@@ -239,7 +241,7 @@ class Project(ToStringMixin):
             if self.language_backend.is_lsp():
                 if os.path.isfile(abs_path):
                     is_file_in_supported_language = False
-                    for language in self.project_config.language_servers:
+                    for language in self._language_server_candidates:
                         fn_matcher = language.get_source_fn_matcher()
                         if fn_matcher.is_relevant_filename(abs_path):
                             is_file_in_supported_language = True
@@ -488,15 +490,44 @@ class Project(ToStringMixin):
             source_file_path=relative_file_path,
         )
 
+    def determine_language_server_candidates(self) -> list[LanguageServerId]:
+        """Determines and stores ordered language-server candidates for this project."""
+        explicit = list(self.project_config.language_servers)
+        if not self.project_config.auto_detect_language_servers:
+            self._language_server_candidates = explicit
+            return list(self._language_server_candidates)
+
+        priorities = {
+            language: self.serena_config.get_ls_priority(language)
+            for language in LanguageServerId
+            if self.serena_config.get_ls_priority(language) > 0
+        }
+        composition = compute_language_server_support_composition(self.project_root, list(priorities.keys()))
+        detected = [
+            language
+            for language, _percentage in sorted(
+                composition.items(),
+                key=lambda item: (item[1], priorities[item[0]]),
+                reverse=True,
+            )
+        ]
+        self._language_server_candidates = explicit + [language for language in detected if language not in explicit]
+        return list(self._language_server_candidates)
+
+    def get_language_server_candidates(self) -> list[LanguageServerId]:
+        """Returns the ordered configured and automatically detected language-server candidates."""
+        return list(self._language_server_candidates)
+
     def create_language_server_manager(self) -> LanguageServerManager:
         """
-        Creates the language server manager for the project, starting one language server per configured programming language.
+        Creates the project's lazy language-server manager.
+
+        Applicable language servers are determined at manager creation, but no server process is
+        started until a semantic operation requires it.
 
         :return: the language server manager, which is also stored in the project instance
         """
         try:
-            # ensure that the project configuration, particularly the list of languages is complete,
-            # despite asynchronous first-time project configuration generation (which may not have completed yet)
             self.project_config.await_asynchronous_completion()
 
             # determine timeout to use for LS calls
@@ -506,16 +537,28 @@ class Project(ToStringMixin):
             else:
                 if tool_timeout < 10:
                     raise ValueError(f"Tool timeout must be at least 10 seconds, but is {tool_timeout} seconds")
-                ls_timeout = tool_timeout - 5  # the LS timeout is for a single call, it should be smaller than the tool timeout
+                ls_timeout = tool_timeout - 5
 
-            # if there is an existing instance, stop its language servers first
+            idle_timeout = self.serena_config.language_server_idle_timeout
+            if idle_timeout < 0:
+                raise ValueError(f"Language server idle timeout cannot be negative, but is {idle_timeout} seconds")
+            if idle_timeout > 0 and tool_timeout is not None and tool_timeout > 0 and idle_timeout <= tool_timeout:
+                raise ValueError(
+                    "Language server idle timeout must exceed the tool timeout so a server cannot be reaped during a tool call "
+                    f"({idle_timeout=} <= {tool_timeout=})"
+                )
+
+            # replace any existing manager cleanly
             if self.language_server_manager is not None:
                 log.info("Stopping existing language server manager ...")
-                self.language_server_manager.stop_all()
+                self.language_server_manager.stop_all(save_cache=True)
                 self.language_server_manager = None
 
-            log.info(f"Creating language server manager for {self.project_root}")
+            log.info(f"Creating lazy language server manager for {self.project_root}")
             self._language_server_manager_init_error = None
+            self._language_server_candidates = self.determine_language_server_candidates()
+            log.info("Language server candidates: %s", [language.value for language in self._language_server_candidates])
+
             ls_specific_settings = dict(self.serena_config.ls_specific_settings)
             if self.project_config.ls_specific_settings:
                 if self.is_trusted():
@@ -525,6 +568,7 @@ class Project(ToStringMixin):
                         f"Project path {self.project_root} is not trusted, ignoring LS-specific settings from project configuration. "
                         "To trust the project, modify the trusted path patterns in the global configuration."
                     )
+
             factory = LanguageServerFactory(
                 project_root=self.project_root,
                 project_config=self.project_config,
@@ -535,7 +579,12 @@ class Project(ToStringMixin):
                 ls_specific_settings=ls_specific_settings,
                 trace_lsp_communication=self.serena_config.trace_lsp_communication,
             )
-            self.language_server_manager = LanguageServerManager.from_languages(self.project_config.language_servers, factory, self)
+            self.language_server_manager = LanguageServerManager.lazy(
+                self._language_server_candidates,
+                factory,
+                self,
+                idle_timeout=idle_timeout,
+            )
             return self.language_server_manager
         except Exception as e:
             self._language_server_manager_init_error = e

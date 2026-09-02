@@ -14,7 +14,7 @@ from serena.agent import SerenaAgent
 from serena.config.serena_config import ProjectConfig, RegisteredProject, SerenaConfig
 from serena.mcp import SerenaMCPFactory
 from serena.project import Project
-from serena.tools import ActivateProjectTool, CreateTextFileTool, ReadFileTool
+from serena.tools import ActivateProjectTool, CreateTextFileTool, ReadFileTool, ReplaceContentTool
 
 
 class _EmptyJobSource:
@@ -135,6 +135,27 @@ def test_sessions_bind_projects_independently(multi_project_agent: tuple[SerenaA
     assert agent.get_active_project_for_session("session-a").project_name == "project_a"
     assert agent.get_active_project_for_session("session-b").project_name == "project_b"
     assert agent.get_active_project_for_session("session-c").project_name == "project_c"
+    assert agent.get_default_project().project_name == "project_c"
+
+
+def test_replace_content_works_without_language_server(multi_project_agent: tuple[SerenaAgent, dict[str, Path]]) -> None:
+    agent, roots = multi_project_agent
+    target = roots["project_a"] / "index.html"
+    target.write_text('<a href="old">dashboard</a>')
+    _activate(agent, "session-a", "project_a")
+
+    tool = agent.get_tool(ReplaceContentTool)
+    result = tool.apply_ex(
+        relative_path="index.html",
+        needle='href="old"',
+        repl='href="new"',
+        mode="literal",
+        mcp_ctx=_mcp_context("session-a"),
+        catch_exceptions=False,
+    )
+
+    assert result == "OK"
+    assert target.read_text() == '<a href="new">dashboard</a>'
 
 
 def test_different_project_reads_can_interleave(

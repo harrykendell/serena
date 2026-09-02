@@ -141,6 +141,10 @@ ignored_memory_patterns: []
 # timeout, in seconds, after which tool executions are terminated
 tool_timeout: 240
 
+# idle seconds after which a lazily started language server is stopped and its cache is saved.
+# Set to 0 to keep language servers running until Serena shuts down.
+language_server_idle_timeout: 900
+
 # list of tools to be globally excluded
 excluded_tools: []
 

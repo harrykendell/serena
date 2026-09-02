@@ -516,9 +516,14 @@ async function loadExecutionOutput(row, force = false) {
 function createExecutionRow() {
   const details = makeElement("details", "execution-entry");
   const summary = makeElement("summary", "execution-summary");
-  const title = makeElement("span", "activity-title mono");
+  const title = makeElement("div", "activity-title execution-title mono");
+  const metaRow = makeElement("div", "execution-meta-row");
+  const detail = makeElement("span", "activity-subtitle execution-detail");
   const badge = makeElement("span", "status-badge");
-  summary.append(title, badge);
+  metaRow.append(detail, badge);
+  const submitted = createActivityTimeItem("execution-submitted");
+  const elapsed = createActivityTimeItem("execution-elapsed");
+  summary.append(title, submitted.item, metaRow, elapsed.item);
 
   const body = makeElement("div", "execution-body");
   const parameters = createOutputSection("Parameters", "execution-parameters");
@@ -529,7 +534,19 @@ function createExecutionRow() {
   body.append(parameters.section, stream.section, result.section, error.section, media.section);
   details.append(summary, body);
 
-  details._dashboardRefs = { title, badge, body, parameters, stream, result, error, media };
+  details._dashboardRefs = {
+    title,
+    detail,
+    badge,
+    submitted: submitted.valueNode,
+    elapsed: elapsed.valueNode,
+    body,
+    parameters,
+    stream,
+    result,
+    error,
+    media,
+  };
   summary.addEventListener("click", (event) => {
     event.preventDefault();
     const key = details.dataset.itemKey;
@@ -567,6 +584,9 @@ function updateExecutionRow(row, execution) {
     execution.name,
     execution.status,
     execution.project || null,
+    execution.detail || null,
+    execution.submitted_at ?? null,
+    execution.elapsed_seconds ?? null,
     execution.parameters,
     execution.result,
     execution.error,
@@ -580,8 +600,14 @@ function updateExecutionRow(row, execution) {
   row._dashboardSnapshot = snapshot;
 
   const executionTitle = executionDisplayName(execution.name);
-  setNodeText(refs.title, execution.project ? `${executionTitle} · ${execution.project}` : executionTitle);
+  const executionDetailParts = [execution.detail].filter(Boolean);
+  if (execution.project && execution.project !== execution.detail) executionDetailParts.push(execution.project);
+  const executionDetail = executionDetailParts.join(" · ");
+  setNodeText(refs.title, executionTitle);
+  setNodeText(refs.detail, executionDetail || "—");
   updateStatusBadge(refs.badge, execution.status);
+  setNodeText(refs.submitted, formatEpochClock(execution.submitted_at));
+  setNodeText(refs.elapsed, formatDuration(execution.elapsed_seconds));
   updateExecutionSection(refs.parameters, execution.parameters);
 
   const taskId = String(execution.task_id);
@@ -683,6 +709,11 @@ function renderExecutions(data) {
   renderExecutionsNow(data, snapshot);
 }
 
+function formatEpochClock(timestamp) {
+  if (!Number.isFinite(timestamp)) return "—";
+  return new Date(timestamp * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
 function formatDuration(seconds) {
   if (seconds === null || seconds === undefined) return "—";
   if (seconds < 60) return `${Math.max(0, Math.round(seconds))}s`;
@@ -770,8 +801,8 @@ async function loadJobOutput(row, force = false) {
   }
 }
 
-function createJobTimeItem(className) {
-  const item = makeElement("div", `job-time-item ${className}`);
+function createActivityTimeItem(className) {
+  const item = makeElement("div", `activity-time-item ${className}`);
   const valueNode = makeElement("span", "job-meta-value");
   item.append(valueNode);
   return { item, valueNode };
@@ -787,8 +818,8 @@ function createJobRow() {
   const badge = makeElement("span", "status-badge");
   projectRow.append(project, badge);
 
-  const submitted = createJobTimeItem("job-submitted");
-  const elapsed = createJobTimeItem("job-elapsed");
+  const submitted = createActivityTimeItem("job-submitted");
+  const elapsed = createActivityTimeItem("job-elapsed");
   summary.append(title, submitted.item, projectRow, elapsed.item);
 
   const outputBody = makeElement("div", "job-output-body");

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import base64
 import re
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -32,6 +34,29 @@ _TOOL_START_RE = re.compile(
 _TOOL_RESULT_RE = re.compile(rf"\[(?P<task>{_TASK_THREAD_PATTERN})\].*? - Result: (?P<result>.*)$", re.DOTALL)
 _TOOL_ERROR_RE = re.compile(rf"^ERROR.*?\[(?P<task>{_TASK_THREAD_PATTERN})\].*? - (?P<error>.*)$", re.DOTALL)
 _INTERNAL_SESSION_PARAM_RE = re.compile(r",?\s*session_id=(?:'[^']*'|\"[^\"]*\")\s*$")
+_EXECUTION_DETAIL_KEYS = ("command", "project", "relative_path", "memory_name", "name_path_pattern", "job_id", "message")
+
+
+def _execution_detail(parameters: str | None) -> str:
+    """Returns one concise primary argument for a tool execution."""
+    if not parameters:
+        return ""
+    try:
+        expression = ast.parse(f"_tool({parameters})", mode="eval").body
+        if isinstance(expression, ast.Call):
+            by_name = {keyword.arg: keyword.value for keyword in expression.keywords if keyword.arg is not None}
+            for key in _EXECUTION_DETAIL_KEYS:
+                node = by_name.get(key)
+                if node is None:
+                    continue
+                value = ast.literal_eval(node)
+                if isinstance(value, str | int | float | bool):
+                    detail = " ".join(str(value).split())
+                    return detail[:177] + "..." if len(detail) > 180 else detail
+    except (SyntaxError, ValueError):
+        pass
+    detail = " ".join(parameters.split())
+    return detail[:177] + "..." if len(detail) > 180 else detail
 
 
 def _bounded(value: str) -> str:
@@ -166,6 +191,10 @@ class DashboardExecutionHistory:
         if not isinstance(stream_output_chars, int):
             stream_output_chars = None
 
+        started_at = task_info.started_at
+        finished_at = task_info.finished_at
+        elapsed_seconds = max(0.0, (finished_at or time.time()) - started_at) if started_at is not None else None
+
         return {
             "task_id": task_info.task_id,
             "name": task_info.name,
@@ -173,6 +202,11 @@ class DashboardExecutionHistory:
             "finished_successfully": task_info.finished_successfully(),
             "project": metadata.get("project"),
             "session_id": metadata.get("session_id"),
+            "detail": _execution_detail(metadata.get("parameters")),
+            "submitted_at": task_info.submitted_at,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "elapsed_seconds": elapsed_seconds,
             "parameters": metadata.get("parameters"),
             "result": None if media is not None else metadata.get("result"),
             "error": metadata.get("error"),
@@ -282,14 +316,14 @@ class DashboardSessionOverview:
 
     def get_session(self) -> dict[str, Any]:
         """Returns compact session metadata for the custom dashboard."""
-        project = self._agent.get_active_project()
+        project = self._agent.get_default_project()
         if project is None:
             project_info = {"name": None, "path": None}
             languages: list[str] = []
             memories: list[str] = []
         else:
             project_info = {"name": project.project_name, "path": str(project.project_root)}
-            languages = [language.value for language in project.project_config.language_servers]
+            languages = [language.value for language in project.get_language_server_candidates()]
             memories = project.memory_manager.list_memories().get_full_list()
 
         active_tools = self._agent.get_active_tool_names()
@@ -315,7 +349,7 @@ class DashboardMemoryOverview:
 
     def get_memory(self, memory_name: str) -> dict[str, Any]:
         """Returns one memory from the currently active project."""
-        project = self._agent.get_active_project()
+        project = self._agent.get_default_project()
         if project is None:
             raise ValueError("No active project")
 

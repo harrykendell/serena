@@ -34,9 +34,8 @@ project_name: "serena"
 # When using multiple language servers, the first language server that supports a given file will be used for that file.
 # The first language server is the default language and the respective language server will be used as a fallback.
 # Note that when using the JetBrains backend, language servers are not used and this list is correspondingly ignored.
-language_servers:
-  - python
-  - typescript
+language_servers: []
+auto_detect_language_servers: true
 
 # whether to use project's .gitignore files to ignore files
 ignore_all_files_in_gitignore: true

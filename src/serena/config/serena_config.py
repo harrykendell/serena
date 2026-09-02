@@ -322,6 +322,7 @@ class ProjectConfigAutoGenerationMode(Enum):
 class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
     project_name: str
     language_servers: list[LanguageServerId]
+    auto_detect_language_servers: bool = True
     ignored_paths: list[str] = field(default_factory=list)
     ls_workspace_folders: list[str] = field(default_factory=lambda: ["."])
     ls_additional_workspace_folders: list[str] = field(default_factory=list)
@@ -421,43 +422,38 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
         asynchronous: bool = False,
     ) -> Self:
         """
-        Autogenerate a project configuration for a given project root.
+        Autogenerates a project configuration for a given project root.
+
+        Runtime language-server detection is the default. Consequently, automatically detected
+        languages are not persisted in ``language_servers``; that field is reserved for explicit
+        preferences supplied through ``languages`` or later configuration edits.
 
         :param project_root: the path to the project root
         :param serena_config: the global Serena configuration
-        :param project_name: the name of the project; if None, the name of the project will be the name of the directory
-            containing the project
-        :param languages: the languages of the project; if None, they will be determined automatically
+        :param project_name: the name of the project; if None, the containing directory name is used
+        :param languages: explicit language-server preferences; if None, runtime auto-detection is used
         :param save_to_disk: whether to save the project configuration to disk
-        :param interactive: whether to run in interactive CLI mode, asking the user for input where appropriate
-        :param asynchronous: whether to run in asynchronous mode, where time-consuming configuration parts (currently only the
-            determination of the list of programming languages) are determined in a background thread and initialised as empty
+        :param interactive: retained for API compatibility; runtime language detection does not require prompting
+        :param asynchronous: retained for API compatibility; runtime language detection is already lazy
         :return: the project configuration
         """
         if interactive and asynchronous:
             raise ValueError("Cannot use interactive mode with asynchronous auto-generation")
+
         project_root = Path(project_root).resolve()
         if not project_root.exists():
             raise FileNotFoundError(f"Project root not found: {project_root}")
+
         with LogTime("Project configuration auto-generation", logger=log):
             log.info("Project root: %s", project_root)
             project_folder_name = project_root.name
             project_name = project_name or project_folder_name
-            use_asynchronous_language_determination = False
-            if languages is None:
-                if asynchronous:
-                    use_asynchronous_language_determination = True
-                    languages_to_use = []  # temporarily empty, will be determined in background thread
-                else:
-                    determined_languages = cls._determine_project_language_servers(
-                        str(project_root), interactive=interactive, serena_config=serena_config
-                    )
-                    languages_to_use = [l.value for l in determined_languages]
-            else:
-                languages_to_use = [lang.value for lang in languages]
+            languages_to_use = [] if languages is None else [language.value for language in languages]
+
             config_with_comments, _ = cls._load_yaml_dict(PROJECT_TEMPLATE_FILE)
             config_with_comments["project_name"] = project_name
             config_with_comments["language_servers"] = languages_to_use
+            config_with_comments["auto_detect_language_servers"] = True
 
             project_yml_path = serena_config.get_project_yml_location(str(project_root))
             if save_to_disk:
@@ -467,28 +463,7 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
                 project_local_yml_path = os.path.join(os.path.dirname(project_yml_path), cls.SERENA_LOCAL_PROJECT_FILE)
                 shutil.copy(PROJECT_LOCAL_TEMPLATE_FILE, project_local_yml_path)
 
-            project_config = cls._from_dict(config_with_comments, local_override_keys=[])
-
-            # if asynchronous language determination is used, start a background thread which updates and saves the configuration
-            # and set an event which can be awaited to ensure that the configuration is complete
-            if use_asynchronous_language_determination:
-                event = threading.Event()
-                project_config._async_completion_events[id(project_config)] = event
-
-                def async_language_determination():
-                    try:
-                        with LogTime("Asynchronous language determination", logger=log):
-                            project_config.language_servers = cls._determine_project_language_servers(
-                                str(project_root), interactive=False, serena_config=serena_config
-                            )
-                            if save_to_disk:
-                                project_config.save(project_yml_path)
-                    finally:
-                        event.set()
-
-                threading.Thread(target=async_language_determination, name="project-language-determination", daemon=True).start()
-
-            return project_config
+            return cls._from_dict(config_with_comments, local_override_keys=[])
 
     def await_asynchronous_completion(self):
         """
@@ -633,6 +608,7 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
         return cls(
             project_name=data["project_name"],
             language_servers=ls_ids,
+            auto_detect_language_servers=data["auto_detect_language_servers"],
             ignored_paths=ignored_paths,
             ls_workspace_folders=data["ls_workspace_folders"],
             ls_additional_workspace_folders=additional_workspace_folders,
@@ -891,6 +867,9 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
     """
     timeout for tool calls in seconds; if a tool takes longer than this, it is aborted and an error is returned.
     """
+
+    language_server_idle_timeout: float = 900.0
+    """Idle seconds after which lazily managed language servers are stopped and cached."""
 
     token_count_estimator: str = RegisteredTokenCountEstimator.CHAR_COUNT.name
     """Only relevant if `record_tool_usage` is True; the name of the token count estimator to use for tool usage statistics.

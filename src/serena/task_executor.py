@@ -45,6 +45,9 @@ class TaskExecutor:
             self.future: concurrent.futures.Future = concurrent.futures.Future()
             self.logged = logged
             self.timeout = timeout
+            self.submitted_at = time.time()
+            self.started_at: float | None = None
+            self.finished_at: float | None = None
             self._function = function
 
         def _tostring_includes(self) -> list[str]:
@@ -56,6 +59,7 @@ class TaskExecutor:
             """
 
             def run_task() -> None:
+                self.started_at = time.time()
                 try:
                     if self.future.done():
                         if self.logged:
@@ -64,11 +68,16 @@ class TaskExecutor:
                     with LogTime(self.name, logger=log, enabled=self.logged):
                         result = self._function()
                         if not self.future.done():
+                            self.finished_at = time.time()
                             self.future.set_result(result)
                 except Exception as e:
                     if not self.future.done():
+                        self.finished_at = time.time()
                         log.error(f"Error during execution of {self.name}: {e}", exc_info=e)
                         self.future.set_exception(e)
+                finally:
+                    if self.finished_at is None:
+                        self.finished_at = time.time()
 
             thread = Thread(target=run_task, name=self.name)
             thread.start()
@@ -170,13 +179,25 @@ class TaskExecutor:
         unique identifier of the task
         """
         logged: bool
+        submitted_at: float
+        started_at: float | None
+        finished_at: float | None
 
         def finished_successfully(self) -> bool:
             return self.future.done() and not self.future.cancelled() and self.future.exception() is None
 
         @staticmethod
         def from_task(task: "TaskExecutor.Task", is_running: bool) -> "TaskExecutor.TaskInfo":
-            return TaskExecutor.TaskInfo(name=task.name, is_running=is_running, future=task.future, task_id=id(task), logged=task.logged)
+            return TaskExecutor.TaskInfo(
+                name=task.name,
+                is_running=is_running,
+                future=task.future,
+                task_id=id(task),
+                logged=task.logged,
+                submitted_at=task.submitted_at,
+                started_at=task.started_at,
+                finished_at=task.finished_at,
+            )
 
         def cancel(self) -> None:
             self.future.cancel()

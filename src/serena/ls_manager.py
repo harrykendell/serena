@@ -1,6 +1,7 @@
 import logging
 import os.path
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -69,32 +70,54 @@ class LanguageServerFactory:
 
 
 class LanguageServerManager:
-    """
-    Manages one or more language servers for a project.
-    """
+    """Manages lazily started language servers for a project."""
 
     def __init__(
         self,
         language_servers: dict[LanguageServerId, SolidLanguageServer],
         language_server_factory: LanguageServerFactory,
         project: "Project",
+        candidate_languages: list[LanguageServerId] | None = None,
+        idle_timeout: float = 0.0,
     ) -> None:
         """
-        :param language_servers: a mapping from language to language server; the servers are assumed to be already started.
-            The first server in the iteration order is used as the default server.
-            All servers are assumed to serve the same project root.
-        :param language_server_factory: factory for language server creation; if None, dynamic (re)creation of language servers
-            is not supported
-        """
-        self._language_servers = language_servers
-        self._language_server_factory = language_server_factory
-        self._file_change_notifier = LanguageServerFileChangeNotifier(project, self)
+        Creates a language-server manager.
 
-    @property
-    def _default_language_server(self) -> SolidLanguageServer:
-        if len(self._language_servers) == 0:
-            raise ValueError("No language servers available in the manager")
-        return next(iter(self._language_servers.values()))
+        :param language_servers: mapping of already-started language servers
+        :param language_server_factory: factory used for lazy server creation
+        :param project: owning project
+        :param candidate_languages: ordered language-server candidates available for lazy startup
+        :param idle_timeout: idle seconds after which running servers are stopped; ``0`` disables idle shutdown
+        """
+        self._language_servers = dict(language_servers)
+        self._language_server_factory = language_server_factory
+        self._candidate_languages = list(dict.fromkeys(candidate_languages or list(language_servers.keys())))
+        self._project = project
+        self._idle_timeout = idle_timeout
+        self._last_used_at: dict[LanguageServerId, float] = {ls_id: time.monotonic() for ls_id in self._language_servers}
+        self._lock = threading.RLock()
+        self._stop_event = threading.Event()
+        self._file_change_notifier = LanguageServerFileChangeNotifier(project, self)
+        self._reaper_thread: threading.Thread | None = None
+
+        if idle_timeout > 0:
+            self._reaper_thread = threading.Thread(
+                target=self._reap_idle_language_servers,
+                name=f"LSIdleReaper:{project.project_name}",
+                daemon=True,
+            )
+            self._reaper_thread.start()
+
+    @classmethod
+    def lazy(
+        cls,
+        candidate_languages: list[LanguageServerId],
+        factory: LanguageServerFactory,
+        project: "Project",
+        idle_timeout: float,
+    ) -> "LanguageServerManager":
+        """Creates a manager whose candidate language servers are started only when requested."""
+        return cls({}, factory, project, candidate_languages=candidate_languages, idle_timeout=idle_timeout)
 
     @staticmethod
     def from_languages(languages: list[LanguageServerId], factory: LanguageServerFactory, project: "Project") -> "LanguageServerManager":
@@ -126,14 +149,12 @@ class LanguageServerManager:
                     log.error(f"Error starting language server for language {self.ls_id.value}: {e}", exc_info=e)
                     self.exception = e
 
-        # start language servers in parallel threads
         threads = []
         for language in languages:
             thread = StartLSThread(language)
             thread.start()
             threads.append(thread)
 
-        # collect language servers and exceptions
         language_servers: dict[LanguageServerId, SolidLanguageServer] = {}
         exceptions: dict[LanguageServerId, Exception] = {}
         for thread in threads:
@@ -143,92 +164,124 @@ class LanguageServerManager:
             elif thread.language_server is not None:
                 language_servers[thread.ls_id] = thread.language_server
 
-        # If any server failed to start up, raise an exception and stop all started language servers.
-        # We intentionally fail fast here. The user's intention is to work with all the specified languages,
-        # so if any of them is not available, it is better to make symbolic tool calls fail, bringing the issue to the
-        # user's attention instead of silently continuing with a subset of the language servers and potentially
-        # causing suboptimal agent behaviour.
         if exceptions:
             for ls in language_servers.values():
                 ls.stop()
             failure_messages = "\n".join([f"{lang.value}: {e}" for lang, e in exceptions.items()])
             raise LanguageServerManagerInitialisationError(f"Failed to start {len(exceptions)} language server(s):\n{failure_messages}")
 
-        return LanguageServerManager(language_servers, factory, project)
+        return LanguageServerManager(language_servers, factory, project, candidate_languages=languages)
 
-    def _ensure_functional_ls(self, ls: SolidLanguageServer) -> SolidLanguageServer:
-        if not ls.is_running():
-            log.warning(f"Language server for language {ls.ls_id} is not running; restarting ...")
-            ls = self.restart_language_server(ls.ls_id)
-        return ls
+    def _refresh_candidates(self) -> None:
+        """Refreshes automatically detected candidates from the current project contents."""
+        refreshed = self._project.determine_language_server_candidates()
+        with self._lock:
+            self._candidate_languages = list(dict.fromkeys(refreshed))
 
-    def _get_suitable_language_server(self, relative_path: str) -> SolidLanguageServer | None:
-        """:param relative_path: relative path to a file"""
-        for candidate in self._language_servers.values():
-            if not candidate.is_ignored_path(relative_path, ignore_unsupported_files=True):
-                return candidate
+    def _candidate_for_file(self, relative_path: str) -> LanguageServerId | None:
+        """Returns the preferred candidate language server for ``relative_path``."""
+        filename = os.path.basename(relative_path)
+        for ls_id in self._candidate_languages:
+            if ls_id.get_source_fn_matcher().is_relevant_filename(filename):
+                return ls_id
         return None
+
+    def _touch(self, ls_id: LanguageServerId) -> None:
+        with self._lock:
+            self._last_used_at[ls_id] = time.monotonic()
+
+    def _create_and_start_language_server(self, ls_id: LanguageServerId) -> SolidLanguageServer:
+        language_server = self._language_server_factory.create_language_server(ls_id)
+        language_server.start()
+        if not language_server.is_running():
+            raise RuntimeError(f"Failed to start the language server for language {ls_id.value}")
+        self._language_servers[ls_id] = language_server
+        self._touch(ls_id)
+        return language_server
+
+    def _ensure_language_server(self, ls_id: LanguageServerId) -> SolidLanguageServer:
+        with self._lock:
+            ls = self._language_servers.get(ls_id)
+            if ls is not None and ls.is_running():
+                self._touch(ls_id)
+                return ls
+
+            if ls is not None:
+                self._language_servers.pop(ls_id, None)
+                self._last_used_at.pop(ls_id, None)
+
+            with LogTime(f"Lazy language server startup (language={ls_id.value})"):
+                return self._create_and_start_language_server(ls_id)
+
+    def _reap_idle_language_servers(self) -> None:
+        check_interval = min(max(self._idle_timeout / 4, 0.05), 60.0)
+        while not self._stop_event.wait(check_interval):
+            now = time.monotonic()
+            with self._lock:
+                idle_ids = [ls_id for ls_id, last_used_at in self._last_used_at.items() if now - last_used_at >= self._idle_timeout]
+                for ls_id in idle_ids:
+                    ls = self._language_servers.pop(ls_id, None)
+                    self._last_used_at.pop(ls_id, None)
+                    if ls is not None:
+                        self._stop_language_server(ls, save_cache=True)
 
     def get_language_server(self, relative_path: str) -> SolidLanguageServer:
         """:param relative_path: relative path to a file"""
-        ls: SolidLanguageServer | None = None
-        if len(self._language_servers) > 1:
-            if os.path.isdir(relative_path):
-                raise ValueError(f"Expected a file path, but got a directory: {relative_path}")
-            ls = self._get_suitable_language_server(relative_path)
-        if ls is None:
-            ls = self._default_language_server
-        return self._ensure_functional_ls(ls)
+        if os.path.isdir(os.path.join(self._project.project_root, relative_path)):
+            raise ValueError(f"Expected a file path, but got a directory: {relative_path}")
 
-    def _create_and_start_language_server(self, ls_id: LanguageServerId) -> SolidLanguageServer:
-        if self._language_server_factory is None:
-            raise ValueError(f"No language server factory available to create language server for {ls_id}")
-        language_server = self._language_server_factory.create_language_server(ls_id)
-        language_server.start()
-        self._language_servers[ls_id] = language_server
-        return language_server
+        ls_id = self._candidate_for_file(relative_path)
+        if ls_id is None:
+            self._refresh_candidates()
+            ls_id = self._candidate_for_file(relative_path)
+        if ls_id is None:
+            if not self._candidate_languages:
+                raise ValueError(f"No language server is available for file: {relative_path}")
+            ls_id = self._candidate_languages[0]
+        return self._ensure_language_server(ls_id)
+
+    def ensure_all_language_servers(self) -> list[SolidLanguageServer]:
+        """Starts and returns every candidate server required for complete project-wide semantic queries."""
+        self._refresh_candidates()
+        return [self._ensure_language_server(ls_id) for ls_id in self._candidate_languages]
 
     def restart_language_server(self, language: LanguageServerId) -> SolidLanguageServer:
-        """
-        Forces recreation and restart of the language server for the given language.
-        It is assumed that the language server for the given language is no longer running.
-
-        :param language: the language
-        :return: the newly created language server
-        """
-        if language not in self._language_servers:
-            raise ValueError(f"No language server for language {language.value} present; cannot restart")
-        return self._create_and_start_language_server(language)
+        """Forces recreation and restart of the language server for the given language."""
+        if language not in self._candidate_languages:
+            raise ValueError(f"No language server for language {language.value} configured or detected; cannot restart")
+        with self._lock:
+            old_ls = self._language_servers.pop(language, None)
+            self._last_used_at.pop(language, None)
+            if old_ls is not None:
+                self._stop_language_server(old_ls)
+            return self._create_and_start_language_server(language)
 
     def add_language_server(self, ls_id: LanguageServerId) -> SolidLanguageServer:
-        """
-        Dynamically adds a new language server for the given language.
-
-        :param ls_id: the language server to add
-        :return: the newly created language server
-        """
-        if ls_id in self._language_servers:
-            raise ValueError(f"Language server for language {ls_id.value} already present")
-        return self._create_and_start_language_server(ls_id)
+        """Adds a language-server candidate and starts it immediately."""
+        with self._lock:
+            if ls_id not in self._candidate_languages:
+                self._candidate_languages.append(ls_id)
+            return self._ensure_language_server(ls_id)
 
     def remove_language_server(self, language: LanguageServerId, save_cache: bool = False) -> None:
-        """
-        Removes the language server for the given language, stopping it if it is running.
-
-        :param language: the language
-        """
-        if language not in self._language_servers:
-            raise ValueError(f"No language server for language {language.value} present; cannot remove")
-        ls = self._language_servers.pop(language)
-        self._stop_language_server(ls, save_cache=save_cache)
+        """Removes a language-server candidate and stops its running instance, if any."""
+        with self._lock:
+            if language not in self._candidate_languages:
+                raise ValueError(f"No language server for language {language.value} present; cannot remove")
+            self._candidate_languages.remove(language)
+            ls = self._language_servers.pop(language, None)
+            self._last_used_at.pop(language, None)
+            if ls is not None:
+                self._stop_language_server(ls, save_cache=save_cache)
 
     def get_active_language_server_ids(self) -> list[LanguageServerId]:
-        """
-        Returns the list of languages for which language servers are currently managed.
+        """Returns language servers that currently have a managed process instance."""
+        with self._lock:
+            return list(self._language_servers.keys())
 
-        :return: list of languages
-        """
-        return list(self._language_servers.keys())
+    def get_candidate_language_server_ids(self) -> list[LanguageServerId]:
+        """Returns configured and automatically detected language-server candidates in precedence order."""
+        return list(self._candidate_languages)
 
     @staticmethod
     def _stop_language_server(ls: SolidLanguageServer, save_cache: bool = False, timeout: float = 2.0) -> None:
@@ -239,38 +292,46 @@ class LanguageServerManager:
             ls.stop(shutdown_timeout=timeout)
 
     def iter_language_servers(self) -> Iterator[SolidLanguageServer]:
-        for ls in self._language_servers.values():
-            yield self._ensure_functional_ls(ls)
+        """Iterates currently running language servers without starting additional candidates."""
+        with self._lock:
+            language_servers = list(self._language_servers.items())
+        for ls_id, ls in language_servers:
+            if ls.is_running():
+                self._touch(ls_id)
+                yield ls
 
     def stop_all(self, save_cache: bool = False, timeout: float = 2.0) -> None:
-        """
-        Stops all managed language servers.
+        """Stops all currently running language servers and the idle-reaper thread."""
+        self._stop_event.set()
+        reaper_thread = self._reaper_thread
+        if reaper_thread is not None and reaper_thread is not threading.current_thread():
+            reaper_thread.join(timeout=timeout)
 
-        :param save_cache: whether to save the cache before stopping
-        :param timeout: timeout for shutdown of each language server
-        """
-        for ls in self.iter_language_servers():
-            self._stop_language_server(ls, save_cache=save_cache, timeout=timeout)
+        with self._lock:
+            language_servers = list(self._language_servers.values())
+            self._language_servers.clear()
+            self._last_used_at.clear()
+            for ls in language_servers:
+                self._stop_language_server(ls, save_cache=save_cache, timeout=timeout)
 
     def save_all_caches(self) -> None:
-        """
-        Saves the caches of all managed language servers.
-        """
-        for ls in self.iter_language_servers():
+        """Saves caches of all currently running language servers."""
+        with self._lock:
+            language_servers = list(self._language_servers.values())
+        for ls in language_servers:
             if ls.is_running():
                 ls.save_cache()
 
     def has_suitable_ls_for_file(self, relative_file_path: str) -> bool:
-        return self._get_suitable_language_server(relative_file_path) is not None
+        if self._candidate_for_file(relative_file_path) is not None:
+            return True
+        self._refresh_candidates()
+        return self._candidate_for_file(relative_file_path) is not None
 
     def sync_file_system_changes(self) -> int:
-        """
-        Polls the file system for changes to source files and notifies the language servers of any changes
-        (particularly changes that happened outside of Serena's own file tools, which are not covered by
-        the notifications sent by those tools/CodeEditor).
-
-        :return: the number of individual file change events detected (0 if nothing changed).
-        """
+        """Synchronizes file-system changes with currently running language servers."""
+        if not self.get_active_language_server_ids():
+            return 0
         log.info("Polling file system for changes to source files ...")
         num_changes = self._file_change_notifier.poll_and_notify()
         log.info(f"File system polling complete; {num_changes} change events sent to language servers.")

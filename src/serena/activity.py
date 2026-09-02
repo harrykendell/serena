@@ -12,7 +12,7 @@ from mcp.server.fastmcp import FastMCP
 from serena.jobs import JobManager, JobRecord, JobSnapshot, JobStatus
 from serena.session import get_mcp_session_id  # noqa: F401 - compatibility re-export
 
-ACTIVITY_RESOURCE_URI = "ui://serena/activity-v16.html"
+ACTIVITY_RESOURCE_URI = "ui://serena/activity-v17.html"
 _ACTIVITY_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
 _MAX_RUNS = 32
 _MAX_CALLS_PER_RUN = 100
@@ -475,7 +475,7 @@ def _activity_widget_html() -> str:
   .activity.collapsed .body { display: none; }
   .calls { list-style: none; padding: 0; margin: 0; }
   .call { min-width: 0; }
-  .row-header { width: 100%; display: grid; grid-template-columns: 15px minmax(110px, auto) minmax(0, 1fr) auto 14px; grid-template-areas: "status tool detail elapsed chevron"; gap: 6px; align-items: baseline; min-height: 24px; padding: 3px 0; border: 0; background: transparent; color: inherit; text-align: left; }
+  .row-header { width: 100%; display: grid; grid-template-columns: 15px minmax(0, 1fr) auto 14px; grid-template-areas: "status tool submitted chevron" ". detail elapsed chevron"; column-gap: 6px; row-gap: 0; align-items: start; min-height: 0; padding: 4px 0; border: 0; background: transparent; color: inherit; text-align: left; }
   button.row-header { cursor: pointer; }
   .job-entry { margin: 1px 0; border-radius: 6px; background: color-mix(in srgb, #00491e 5%, transparent); }
   .job-entry .row-header { padding-left: 4px; padding-right: 4px; }
@@ -485,11 +485,12 @@ def _activity_widget_html() -> str:
   .call.failed .status, .call.timed_out .status { color: #dc2626; }
   .call.cancelled .status { opacity: .5; }
   .job-entry.running .status { color: #00491e; }
-  .tool { grid-area: tool; min-width: 0; font-weight: 590; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .job-entry .tool { font-weight: 560; }
-  .detail { grid-area: detail; min-width: 0; font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .70; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .job-entry .detail { opacity: .56; }
-  .elapsed { grid-area: elapsed; white-space: nowrap; font-size: 11px; opacity: .56; font-variant-numeric: tabular-nums; }
+  .tool { grid-area: tool; min-width: 0; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .job-entry .tool { font-weight: 700; }
+  .detail { grid-area: detail; min-width: 0; margin-top: 1px; font: 11px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .58; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 1.25em; }
+  .submitted, .elapsed { justify-self: end; white-space: nowrap; font-size: 10.5px; opacity: .52; font-variant-numeric: tabular-nums; }
+  .submitted { grid-area: submitted; }
+  .elapsed { grid-area: elapsed; }
   .row-chevron { grid-area: chevron; width: 14px; text-align: center; opacity: .46; transition: transform .14s ease; }
   .call:not(.expanded) .row-chevron { transform: rotate(-90deg); }
   .detail-panel { margin: 1px 0 5px 21px; padding: 5px 7px 6px; border-left: 2px solid color-mix(in srgb, #00491e 28%, transparent); border-radius: 0 6px 6px 0; background: color-mix(in srgb, CanvasText 3%, transparent); }
@@ -514,8 +515,8 @@ def _activity_widget_html() -> str:
     .header-detail { font-size: 10.5px; }
     .summary { font-size: 11px; }
     .body { max-height: 202px; padding: 3px 7px 6px; }
-    .row-header { grid-template-columns: 15px minmax(0, 1fr) auto 12px; grid-template-areas: "status tool elapsed chevron" ". detail detail chevron"; column-gap: 5px; row-gap: 0; min-height: 0; padding: 3px 0; align-items: start; }
-    .detail { margin-top: 1px; font-size: 11px; min-height: 1.2em; }
+    .row-header { grid-template-columns: 15px minmax(0, 1fr) auto 12px; column-gap: 5px; padding: 3px 0; }
+    .detail { font-size: 10.5px; }
     .detail-panel { margin-left: 20px; }
   }
 </style>
@@ -572,6 +573,11 @@ def _activity_widget_html() -> str:
     const hours = Math.floor(seconds / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
     return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  }
+
+  function submittedClock(timestamp) {
+    if (!Number.isFinite(timestamp)) return "";
+    return new Date(timestamp * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
 
   function statusIcon(status) {
@@ -773,13 +779,15 @@ def _activity_widget_html() -> str:
     tool.className = "tool";
     const detail = document.createElement("span");
     detail.className = "detail";
+    const submittedNode = document.createElement("span");
+    submittedNode.className = "submitted";
     const elapsedNode = document.createElement("span");
     elapsedNode.className = "elapsed";
     const chevron = document.createElement("span");
     chevron.className = "row-chevron";
     chevron.setAttribute("aria-hidden", "true");
     chevron.textContent = "⌄";
-    rowHeader.append(status, tool, detail, elapsedNode, chevron);
+    rowHeader.append(status, tool, detail, submittedNode, elapsedNode, chevron);
     row.append(rowHeader);
 
     const panel = document.createElement("div");
@@ -865,6 +873,7 @@ def _activity_widget_html() -> str:
       status,
       tool,
       detail,
+      submitted: submittedNode,
       elapsed: elapsedNode,
       chevron,
       panel,
@@ -893,9 +902,10 @@ def _activity_widget_html() -> str:
     refs.status.textContent = statusIcon(entry.status);
     refs.tool.textContent = entry.tool_name;
     refs.tool.title = entry.tool_name;
-    const detailText = [entry.detail, entry.project_name].filter(Boolean).join(" · ");
+    const detailText = entry.detail || "";
     refs.detail.textContent = detailText;
     refs.detail.title = detailText;
+    refs.submitted.textContent = submittedClock(entry.started_at);
     refs.elapsed.textContent = elapsed(entry, now);
 
     const expanded = expandedRows.has(entry.key);
@@ -961,9 +971,7 @@ def _activity_widget_html() -> str:
     const backgroundJobs = otherRunningJobs(next);
 
     headerTool.textContent = activeHeaderCall?.tool_name || "Waiting for activity";
-    const headerDetailText = activeHeaderCall
-      ? [activeHeaderCall.detail, activeHeaderCall.project_name].filter(Boolean).join(" · ")
-      : "";
+    const headerDetailText = activeHeaderCall?.detail || "";
     headerDetail.textContent = headerDetailText;
     headerDetail.title = headerDetailText;
     headerElapsed.textContent = activeHeaderCall ? elapsed(activeHeaderCall, now) : "";

@@ -1,3 +1,4 @@
+import threading
 import time
 
 import pytest
@@ -35,6 +36,21 @@ def test_task_executor_sequence(executor):
     future2 = executor.issue_task(Task(1).run, name="task2")
     assert future1.result() is True
     assert future2.result() is True
+
+
+def test_task_info_reports_execution_timing() -> None:
+    completed = threading.Event()
+    executor = TaskExecutor("timing-test", task_completion_callback=completed.set)
+
+    future = executor.issue_task(lambda: True, name="timed-task")
+    assert future.result(timeout=1) is True
+    assert completed.wait(timeout=1)
+
+    task_info = executor.get_last_executed_task()
+    assert task_info is not None
+    assert task_info.started_at is not None
+    assert task_info.finished_at is not None
+    assert task_info.submitted_at <= task_info.started_at <= task_info.finished_at
 
 
 def test_task_names_are_unique_across_executors() -> None:

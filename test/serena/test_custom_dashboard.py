@@ -12,6 +12,7 @@ from serena.jobs import JobPersistenceInfo, JobRecord, JobRuntimeInfo, JobSnapsh
 from serena.task_executor import TaskExecutor
 from serena.tool_output import ToolOutputPage
 from serena.tools import FetchMediaFileTool
+from solidlsp.ls_config import LanguageServerId
 
 
 class _DummyMemoryLogHandler:
@@ -46,6 +47,9 @@ class _DashboardAgent:
         self.callbacks.append(callback)
 
     def get_active_project(self):
+        return self.project
+
+    def get_default_project(self):
         return self.project
 
     def get_current_tasks(self):
@@ -83,7 +87,18 @@ def _task_info(name: str, *, is_running: bool, state: str, task_id: int, result=
         future.set_exception(RuntimeError("failed"))
     elif state == "cancelled":
         future.cancel()
-    return TaskExecutor.TaskInfo(name=name, is_running=is_running, future=future, task_id=task_id, logged=True)
+    started_at = 1_001.0 if is_running or state != "pending" else None
+    finished_at = 1_002.0 if state in {"completed", "failed", "cancelled"} else None
+    return TaskExecutor.TaskInfo(
+        name=name,
+        is_running=is_running,
+        future=future,
+        task_id=task_id,
+        logged=True,
+        submitted_at=1_000.0,
+        started_at=started_at,
+        finished_at=finished_at,
+    )
 
 
 def test_custom_dashboard_serves_fork_specific_frontend_and_session_api() -> None:
@@ -106,6 +121,27 @@ def test_custom_dashboard_serves_fork_specific_frontend_and_session_api() -> Non
     assert b"Tool executions" in response.data
     assert session["status"] == "success"
     assert session["context"] == "chatgpt"
+
+
+def test_custom_dashboard_uses_default_project_and_dynamic_languages() -> None:
+    memory_manager = SimpleNamespace(list_memories=lambda: SimpleNamespace(get_full_list=list))
+    project = SimpleNamespace(
+        project_name="project-a",
+        project_root="/tmp/project-a",
+        memory_manager=memory_manager,
+        get_language_server_candidates=lambda: [LanguageServerId.PYTHON, LanguageServerId.HTML],
+    )
+    dashboard = SerenaDashboardAPI(
+        memory_log_handler=_DummyMemoryLogHandler(),
+        tool_names=[],
+        agent=_DashboardAgent(project),
+        tool_usage_stats=None,
+    )
+
+    session = dashboard._app.test_client().get("/dashboard/api/session").get_json()
+
+    assert session["active_project"] == {"name": "project-a", "path": "/tmp/project-a"}
+    assert session["languages"] == ["python", "html"]
 
 
 def test_custom_dashboard_serves_live_execution_output_endpoint() -> None:
@@ -206,8 +242,11 @@ def test_execution_history_captures_parameters_and_result_from_tool_logs() -> No
 
     execution = history.get_executions()["executions"][0]
     assert execution["parameters"] == "project='serena'"
+    assert execution["detail"] == "serena"
     assert execution["project"] == "serena"
     assert execution["session_id"] == "abc123"
+    assert execution["submitted_at"] == 1_000.0
+    assert execution["elapsed_seconds"] == 1.0
     assert execution["result"] == "Project activated"
     assert execution["error"] is None
 

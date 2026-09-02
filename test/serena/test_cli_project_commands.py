@@ -79,7 +79,7 @@ class TestProjectCreate:
         result = cli_runner.invoke(ProjectCommands.create, [temp_project_dir_with_python_file])
         assert result.exit_code == 0, f"Command failed: {result.output}"
         assert "Generated project" in result.output
-        assert "python" in result.output.lower()
+        assert "auto-detect" in result.output.lower()
 
         # Verify project.yml was created
         yml_path = os.path.join(temp_project_dir_with_python_file, ".serena", "project.yml")
@@ -254,7 +254,8 @@ class TestProjectCreateHelper:
         config = ProjectCommands._create_project(temp_project_dir_with_python_file, "my-project", ()).project_config
         assert isinstance(config, ProjectConfig)
         assert config.project_name == "my-project"
-        assert len(config.language_servers) >= 1
+        assert config.language_servers == []
+        assert config.auto_detect_language_servers is True
 
     def test_create_project_helper_with_languages(self, temp_project_dir):
         """Test _create_project with language specification."""

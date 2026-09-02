@@ -361,8 +361,11 @@ class LanguageServerId(str, Enum):
         """
         :return: priority of the language for breaking ties between languages; higher is more important.
         """
-        # experimental languages have the lowest priority
+        # experimental alternatives are excluded from auto-detection by default, while
+        # standalone HTML/CSS support remains available at low priority.
         if self.is_experimental():
+            if self in {self.HTML, self.SCSS}:
+                return 1
             return 0
         # We assign lower priority to languages that are supersets of others, such that
         # the "larger" language is only chosen when it matches more strongly

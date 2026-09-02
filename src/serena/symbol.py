@@ -753,7 +753,7 @@ class LanguageServerSymbolRetriever:
             """
             lang_servers: Iterable[SolidLanguageServer] = [self._ls_manager.get_language_server(within_relative_path)]
         else:
-            lang_servers = self._ls_manager.iter_language_servers()
+            lang_servers = self._ls_manager.ensure_all_language_servers()
         for lang_server in lang_servers:
             symbol_roots = lang_server.request_full_symbol_tree(within_relative_path=within_relative_path)
             for root in symbol_roots:

@@ -107,7 +107,8 @@ class GetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead):
             raise ValueError(f"Expected a file path, but got a directory path: {relative_path}. ")
         if not symbol_retriever.can_analyze_file(relative_path):
             raise ValueError(
-                f"Cannot extract symbols from file {relative_path}. Active language servers: {[l.value for l in self.agent.get_active_language_server_ids()]}"
+                f"Cannot extract symbols from file {relative_path}. Language server candidates: "
+                f"{[l.value for l in self.project.get_language_server_candidates()]}"
             )
 
         symbols = symbol_retriever.get_symbol_overview(relative_path)[relative_path]

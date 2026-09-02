@@ -1081,6 +1081,10 @@ class SerenaAgent:
             session_id = self._session_id_context.get()
         return self._session_projects.get_runtime_for_session(session_id)
 
+    def get_default_project(self) -> Project | None:
+        """:return: the most recently selected project, independent of execution/session context"""
+        return self._default_project
+
     def get_active_project(self) -> Project | None:
         """
         :return: the project pinned to this execution, otherwise the current session selection
@@ -1249,8 +1253,12 @@ class SerenaAgent:
                 else:
                     msg = f"The project with name '{proj.project_name}' at {proj.project_root} is activated.\n"
                 if self._language_backend == LanguageBackend.LSP:
-                    language_servers_str = ", ".join([ls.value for ls in proj.project_config.language_servers])
-                    msg += f"Active language servers: {language_servers_str}.\n"
+                    language_servers_str = ", ".join([ls.value for ls in proj.project_config.language_servers]) or "none"
+                    auto_detection = "enabled" if proj.project_config.auto_detect_language_servers else "disabled"
+                    msg += (
+                        f"Configured language servers: {language_servers_str}; automatic detection: {auto_detection}. "
+                        "Language servers start lazily when semantic tools need them.\n"
+                    )
                 msg += f"File encoding: {proj.project_config.encoding}.\n"
 
                 if active_tools.contains_tool_class(ReadMemoryTool):
@@ -1462,6 +1470,8 @@ class SerenaAgent:
 
             if self._project_activation_callback is not None:
                 self._project_activation_callback()
+            if self._dashboard_manager:
+                self._dashboard_manager.update_active_project(project)
             return True
 
         if self._active_project is not None:

@@ -739,7 +739,9 @@ class ProjectCommands(AutoRegisteringGroup):
             languages=languages if languages else None,
             interactive=True,
         )
-        languages_str = ", ".join([lang.value for lang in generated_conf.language_servers]) if generated_conf.language_servers else "N/A"
+        languages_str = (
+            ", ".join([lang.value for lang in generated_conf.language_servers]) if generated_conf.language_servers else "auto-detect"
+        )
         click.echo(f"Generated project with language servers {{{languages_str}}} at {yml_path}.")
         registered_project = serena_config.get_registered_project(str(project_root))
         if registered_project is None:

@@ -37,6 +37,11 @@ project_name: "project_name"
 # Note that when using the JetBrains backend, language servers are not used and this list is correspondingly ignored.
 language_servers: ["python"]
 
+# whether Serena should automatically detect additional applicable language servers for this project.
+# Automatically detected servers are started lazily only when semantic tools need them; explicitly listed
+# servers remain preferred when several servers support the same file type.
+auto_detect_language_servers: true
+
 # the encoding used by text files in the project
 # For a list of possible encodings, see https://docs.python.org/3.11/library/codecs.html#standard-encodings
 encoding: "utf-8"

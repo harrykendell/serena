@@ -495,7 +495,7 @@ class SerenaDashboardAPI:
 
     def _get_log_messages(self, request_log: RequestLog) -> ResponseLog:
         messages = self._memory_log_handler.get_log_messages(from_idx=request_log.start_idx)
-        project = self._agent.get_active_project()
+        project = self._agent.get_default_project()
         project_name = project.project_name if project else None
         return ResponseLog(messages=messages.messages, max_idx=messages.max_idx, active_project=project_name)
 
@@ -517,7 +517,7 @@ class SerenaDashboardAPI:
         from serena.tools.tools_base import Tool
 
         # Get active project info
-        project = self._agent.get_active_project()
+        project = self._agent.get_default_project()
         active_project_name = project.project_name if project else None
         project_info = {
             "name": active_project_name,
@@ -651,7 +651,7 @@ class SerenaDashboardAPI:
             all_languages = [lang.value for lang in LanguageServerId.iter_all(include_experimental=True)]
 
             # Filter out already added languages for the active project
-            project = self._agent.get_active_project()
+            project = self._agent.get_default_project()
             if project:
                 current_languages = [lang.value for lang in project.project_config.language_servers]
                 available_languages = [lang for lang in all_languages if lang not in current_languages]
@@ -664,7 +664,7 @@ class SerenaDashboardAPI:
 
     def _get_memory(self, request_get_memory: RequestGetMemory) -> ResponseGetMemory:
         def run() -> ResponseGetMemory:
-            project = self._agent.get_active_project()
+            project = self._agent.get_default_project()
             if project is None:
                 raise ValueError("No active project")
 
@@ -675,7 +675,7 @@ class SerenaDashboardAPI:
 
     def _save_memory(self, request_save_memory: RequestSaveMemory) -> None:
         def run() -> None:
-            project = self._agent.get_active_project()
+            project = self._agent.get_default_project()
             if project is None:
                 raise ValueError("No active project")
             project.memory_manager.save_memory(request_save_memory.memory_name, request_save_memory.content, is_tool_context=False)
@@ -684,7 +684,7 @@ class SerenaDashboardAPI:
 
     def _delete_memory(self, request_delete_memory: RequestDeleteMemory) -> None:
         def run() -> None:
-            project = self._agent.get_active_project()
+            project = self._agent.get_default_project()
             if project is None:
                 raise ValueError("No active project")
             project.memory_manager.delete_memory(request_delete_memory.memory_name, is_tool_context=False)
@@ -693,7 +693,7 @@ class SerenaDashboardAPI:
 
     def _rename_memory(self, request_rename_memory: RequestRenameMemory) -> str:
         def run() -> str:
-            project = self._agent.get_active_project()
+            project = self._agent.get_default_project()
             if project is None:
                 raise ValueError("No active project")
 
