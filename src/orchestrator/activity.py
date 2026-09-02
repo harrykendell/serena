@@ -158,10 +158,10 @@ def register_activity_resource(mcp: FastMCP) -> None:
         },
     )
     def activity_resource() -> str:
-        return _activity_widget_html()
+        return activity_widget_html()
 
 
-def _activity_widget_html() -> str:
+def activity_widget_html() -> str:
     """Returns the self-contained Orchestrator delegate widget."""
     return r"""
 <div id="orchestrator-activity" class="activity">

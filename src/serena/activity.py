@@ -424,10 +424,10 @@ def register_activity_resource(mcp: FastMCP) -> None:
         },
     )
     def activity_resource() -> str:
-        return _activity_widget_html()
+        return activity_widget_html()
 
 
-def _activity_widget_html() -> str:
+def activity_widget_html() -> str:
     """Returns the self-contained activity widget HTML."""
     return r"""
 <div id="serena-activity" class="activity">
@@ -935,7 +935,7 @@ def _activity_widget_html() -> str:
     const detailText = entry.detail || "";
     refs.detail.textContent = detailText;
     refs.detail.title = detailText;
-    refs.submitted.textContent = submittedClock(entry.started_at);
+    refs.submitted.textContent = submittedClock(entry.submitted_at ?? entry.started_at);
     refs.elapsed.textContent = elapsed(entry, now);
 
     const expanded = expandedRows.has(entry.key);
@@ -1004,7 +1004,7 @@ def _activity_widget_html() -> str:
     const headerDetailText = activeHeaderEntry?.detail || "";
     headerDetail.textContent = headerDetailText;
     headerDetail.title = headerDetailText;
-    headerSubmitted.textContent = activeHeaderEntry ? submittedClock(activeHeaderEntry.started_at) : "";
+    headerSubmitted.textContent = activeHeaderEntry ? submittedClock(activeHeaderEntry.submitted_at ?? activeHeaderEntry.started_at) : "";
     headerElapsed.textContent = activeHeaderEntry ? elapsed(activeHeaderEntry, now) : "";
 
     const toolCount = (next.calls || []).length;

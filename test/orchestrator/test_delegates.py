@@ -61,6 +61,33 @@ def _explore_result() -> dict[str, Any]:
     }
 
 
+def test_dashboard_activity_groups_active_parent_sessions(orchestrator_config: OrchestratorConfig) -> None:
+    store = DelegateStore(orchestrator_config)
+    request = CreateDelegateRequest.model_validate(_create_arguments())
+    first = store.create("parent-a", request)
+    second = store.create("parent-a", request)
+    third = store.create("parent-b", request)
+
+    panels = store.list_dashboard_activity()
+
+    assert len(panels) == 2
+    assert all("parent_session_id" not in panel for panel in panels)
+    assert sorted(len(panel["delegates"]) for panel in panels) == [1, 2]
+    assert {delegate["delegate_id"] for panel in panels for delegate in panel["delegates"]} == {
+        first.delegate_id,
+        second.delegate_id,
+        third.delegate_id,
+    }
+    assert store.dashboard_detail(first.delegate_id).goal == request.goal
+
+    store.cancel(first.delegate_id, "parent-a")
+    store.cancel(second.delegate_id, "parent-a")
+    remaining = store.list_dashboard_activity()
+
+    assert len(remaining) == 1
+    assert remaining[0]["delegates"][0]["delegate_id"] == third.delegate_id
+
+
 def test_manual_delegate_flow_survives_server_recreation(orchestrator_config: OrchestratorConfig) -> None:
     """A fresh worker can claim, complete, and hand back only the bounded typed result."""
     parent_server = OrchestratorMCPFactory(orchestrator_config).create_mcp_server()

@@ -84,33 +84,37 @@
       <section class="tab-panel active" id="tools-panel" role="tabpanel" aria-labelledby="tools-tab" data-panel="tools">
         <div class="section-head">
           <div>
-            <h2 class="section-title">Tool executions</h2>
-            <p class="section-note">Running, queued and completed calls in this Serena session</p>
-          </div>
-          <div class="counter-row" aria-label="Tool execution counts">
-            <span class="counter live"><strong id="execution-running">0</strong> running</span>
-            <span class="counter"><strong id="execution-queued">0</strong> queued</span>
-            <span class="counter"><strong id="execution-done">0</strong> done</span>
+            <h2 class="section-title">Serena tools</h2>
+            <p class="section-note">All tool executions across Serena sessions and projects</p>
           </div>
         </div>
-        <div class="activity-list" id="executions-list">
-          <div class="empty-card">No tool executions recorded yet.</div>
+        <div class="activity-widget-shell">
+          <iframe class="activity-widget-frame" id="tools-activity-widget" src="/dashboard/widget/serena/tools" title="Serena tool activity"></iframe>
         </div>
       </section>
 
       <section class="tab-panel" id="jobs-panel" role="tabpanel" aria-labelledby="jobs-tab" data-panel="jobs" hidden>
         <div class="section-head">
           <div>
-            <h2 class="section-title">Jobs</h2>
-            <p class="section-note" id="jobs-note">Durable long-running Serena jobs</p>
-          </div>
-          <div class="counter-row" aria-label="Job counts">
-            <span class="counter live"><strong id="jobs-running">0</strong> running</span>
-            <span class="counter"><strong id="jobs-done">0</strong> done</span>
+            <h2 class="section-title">Serena jobs</h2>
+            <p class="section-note">All retained durable jobs across Serena sessions and projects</p>
           </div>
         </div>
-        <div class="activity-list" id="jobs-list">
-          <div class="empty-card">No jobs recorded.</div>
+        <div class="activity-widget-shell">
+          <iframe class="activity-widget-frame" id="jobs-activity-widget" src="/dashboard/widget/serena/jobs" title="Serena job activity"></iframe>
+        </div>
+      </section>
+
+      <section class="orchestrator-section" aria-labelledby="orchestrator-title">
+        <div class="section-head">
+          <div>
+            <h2 class="section-title" id="orchestrator-title">Orchestrator</h2>
+            <p class="section-note">One activity panel for each orchestration with active delegates</p>
+          </div>
+          <span class="tab-count" id="orchestrator-panel-count">0</span>
+        </div>
+        <div class="orchestrator-widgets" id="orchestrator-widgets">
+          <div class="empty-card">No active orchestration.</div>
         </div>
       </section>
     </main>

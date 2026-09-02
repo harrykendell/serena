@@ -1,7 +1,9 @@
 from concurrent.futures import Future
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 from mcp.server.fastmcp import Image
 from mcp.types import ResourceLink
 from pydantic import AnyUrl
@@ -101,7 +103,8 @@ def _task_info(name: str, *, is_running: bool, state: str, task_id: int, result=
     )
 
 
-def test_custom_dashboard_serves_fork_specific_frontend_and_session_api() -> None:
+def test_custom_dashboard_serves_fork_specific_frontend_and_session_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
     dashboard = SerenaDashboardAPI(
         memory_log_handler=_DummyMemoryLogHandler(),
         tool_names=[],
@@ -113,12 +116,21 @@ def test_custom_dashboard_serves_fork_specific_frontend_and_session_api() -> Non
     redirect = client.get("/dashboard", base_url="https://serena.kendell.uk")
     response = client.get("/dashboard/")
     session = client.get("/dashboard/api/session").get_json()
+    tools_widget = client.get("/dashboard/widget/serena/tools")
+    jobs_widget = client.get("/dashboard/widget/serena/jobs")
+    orchestrator = client.get("/dashboard/api/orchestrator").get_json()
 
     assert redirect.status_code == 302
     assert redirect.headers["Location"] == "/dashboard/"
     assert response.status_code == 200
     assert b"Agent dashboard" in response.data
-    assert b"Tool executions" in response.data
+    assert b"Serena tools" in response.data
+    assert b"/dashboard/widget/serena/tools" in response.data
+    assert b"Orchestrator" in response.data
+    assert b"window.openai" in tools_widget.data
+    assert b"get_activity" in tools_widget.data
+    assert b"get_activity_job_detail" in jobs_widget.data
+    assert orchestrator == {"status": "success", "panels": []}
     assert session["status"] == "success"
     assert session["context"] == "chatgpt"
 

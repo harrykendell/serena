@@ -656,6 +656,54 @@ class DelegateStore:
             records.sort(key=lambda item: item.created_at, reverse=True)
             return [self._status_response(record) for record in records[: max(0, limit)]]
 
+    def list_dashboard_activity(self, *, limit_per_session: int = 50) -> list[dict[str, Any]]:
+        """Lists global active orchestration groups for the operator dashboard."""
+        with self._lock:
+            grouped: dict[str, list[DelegateRecord]] = {}
+            for delegate_dir in self._config.delegates_dir.glob("d_*"):
+                if not delegate_dir.is_dir():
+                    continue
+                try:
+                    record = self._read_record(delegate_dir.name)
+                except DelegateError:
+                    continue
+                grouped.setdefault(record.parent_session_id, []).append(record)
+
+            panels: list[dict[str, Any]] = []
+            for parent_session_id, records in grouped.items():
+                if not any(record.state in _ACTIVE_STATES for record in records):
+                    continue
+                records.sort(key=lambda item: item.created_at, reverse=True)
+                visible = records[: max(0, limit_per_session)]
+                panel_id = uuid.uuid5(uuid.NAMESPACE_URL, f"orchestrator:{parent_session_id}").hex[:16]
+                panels.append(
+                    {
+                        "panel_id": panel_id,
+                        "started_at": min(record.created_at for record in visible).timestamp() if visible else self._now().timestamp(),
+                        "delegates": [self._status_response(record).model_dump(mode="json") for record in visible],
+                    }
+                )
+
+            panels.sort(key=lambda panel: panel["started_at"], reverse=True)
+            return panels
+
+    def dashboard_detail(self, delegate_id: str) -> DelegatePrivateDetail:
+        """Returns one delegate's operator-visible detail without session ownership filtering."""
+        with self._lock:
+            record = self._read_record(delegate_id)
+            return DelegatePrivateDetail(
+                delegate_id=record.delegate_id,
+                project_name=record.project_name,
+                kind=record.kind,
+                provider_policy=record.provider_policy,
+                active_provider=record.active_provider,
+                state=record.state,
+                goal=record.goal,
+                error=record.error,
+                provider_metadata=dict(record.provider_metadata),
+                audit=self._read_audit(record.delegate_id),
+            )
+
     def due_auto_delegate_ids(self) -> list[str]:
         """Returns auto delegates whose ChatGPT claim window has expired."""
         with self._lock:

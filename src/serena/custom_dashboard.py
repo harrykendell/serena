@@ -14,6 +14,9 @@ from typing import TYPE_CHECKING, Any
 from flask import Flask, Response, abort, request
 from mcp.server.fastmcp import Audio, Image
 
+from orchestrator.config import OrchestratorConfig
+from orchestrator.delegates import DelegateError, DelegateStore
+from serena.dashboard_widgets import orchestrator_dashboard_widget_html, serena_dashboard_widget_html
 from serena.jobs import JobManager, JobStatus
 from serena.task_executor import TaskExecutor
 from serena.tools.media_tools import get_result_file_link, get_result_media, read_result_file_link
@@ -451,6 +454,42 @@ class DashboardJobOverview:
         }
 
 
+class DashboardOrchestratorOverview:
+    """Provides global read-only Orchestrator activity for the operator dashboard."""
+
+    def __init__(self, delegate_store: DelegateStore | None = None) -> None:
+        self._delegate_store = delegate_store
+
+    def _store(self) -> DelegateStore:
+        """Returns the shared durable Orchestrator store, creating it only when queried."""
+        if self._delegate_store is None:
+            self._delegate_store = DelegateStore(OrchestratorConfig.from_environment())
+        return self._delegate_store
+
+    def get_panels(self) -> dict[str, Any]:
+        """Returns all currently active orchestration panels across sessions."""
+        return {"status": "success", "panels": self._store().list_dashboard_activity()}
+
+    def get_panel(self, panel_id: str) -> dict[str, Any]:
+        """Returns one active orchestration panel by its opaque dashboard identifier."""
+        for panel in self._store().list_dashboard_activity():
+            if panel["panel_id"] == panel_id:
+                return {
+                    "run_id": panel["panel_id"],
+                    "started_at": panel["started_at"],
+                    "superseded": False,
+                    "delegates": panel["delegates"],
+                }
+        raise KeyError(panel_id)
+
+    def get_delegate_detail(self, delegate_id: str) -> dict[str, Any]:
+        """Returns operator-visible detail for one durable delegate."""
+        try:
+            return self._store().dashboard_detail(delegate_id).model_dump(mode="json")
+        except DelegateError as exc:
+            raise KeyError(delegate_id) from exc
+
+
 class CustomDashboard:
     """Fork-specific dashboard integration kept outside Serena's upstream frontend implementation."""
 
@@ -459,6 +498,7 @@ class CustomDashboard:
         self._memory_overview = DashboardMemoryOverview(agent)
         self._execution_history = DashboardExecutionHistory(agent, memory_log_handler)
         self._job_overview = DashboardJobOverview(JobManager())
+        self._orchestrator_overview = DashboardOrchestratorOverview()
         self._register_routes(app)
 
     @property
@@ -514,3 +554,33 @@ class CustomDashboard:
             mode = request.args.get("mode", "latest")
             cursor = request.args.get("cursor")
             return self._job_overview.get_output(job_id, mode, cursor)
+
+        @app.route("/dashboard/api/orchestrator", methods=["GET"])
+        def get_orchestrator_panels() -> dict[str, Any]:
+            return self._orchestrator_overview.get_panels()
+
+        @app.route("/dashboard/api/orchestrator/panels/<panel_id>", methods=["GET"])
+        def get_orchestrator_panel(panel_id: str) -> dict[str, Any]:
+            try:
+                return self._orchestrator_overview.get_panel(panel_id)
+            except KeyError:
+                abort(404)
+
+        @app.route("/dashboard/api/orchestrator/delegates/<delegate_id>", methods=["GET"])
+        def get_orchestrator_delegate_detail(delegate_id: str) -> dict[str, Any]:
+            try:
+                return self._orchestrator_overview.get_delegate_detail(delegate_id)
+            except KeyError:
+                abort(404)
+
+        @app.route("/dashboard/widget/serena/<mode>", methods=["GET"])
+        def get_serena_activity_widget(mode: str) -> Response:
+            try:
+                html = serena_dashboard_widget_html(mode)
+            except ValueError:
+                abort(404)
+            return Response(html, mimetype="text/html")
+
+        @app.route("/dashboard/widget/orchestrator/<panel_id>", methods=["GET"])
+        def get_orchestrator_activity_widget(panel_id: str) -> Response:
+            return Response(orchestrator_dashboard_widget_html(panel_id), mimetype="text/html")

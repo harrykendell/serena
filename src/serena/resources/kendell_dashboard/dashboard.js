@@ -882,6 +882,40 @@ function setConnection(state, label) {
   setText("connection-label", label);
 }
 
+function renderOrchestrator(data) {
+  const container = byId("orchestrator-widgets");
+  const panels = data.panels || [];
+  setText("orchestrator-panel-count", panels.length, "0");
+  if (!panels.length) {
+    if (!container.querySelector(".empty-card")) clearAndAppend(container, [makeElement("div", "empty-card", "No active orchestration.")]);
+    return;
+  }
+
+  reconcileKeyed(
+    container,
+    panels,
+    panel => panel.panel_id,
+    panel => {
+      const shell = makeElement("div", "activity-widget-shell");
+      const frame = document.createElement("iframe");
+      frame.className = "activity-widget-frame";
+      frame.src = `/dashboard/widget/orchestrator/${encodeURIComponent(panel.panel_id)}`;
+      frame.title = "Orchestrator activity";
+      shell.append(frame);
+      return shell;
+    },
+    () => {},
+  );
+}
+
+window.addEventListener("message", event => {
+  if (event.origin !== location.origin || event.data?.type !== "serena-activity-height") return;
+  const frame = Array.from(document.querySelectorAll(".activity-widget-frame")).find(candidate => candidate.contentWindow === event.source);
+  if (!frame) return;
+  const height = Math.max(42, Math.min(270, Number(event.data.height) || 42));
+  frame.style.height = `${height}px`;
+});
+
 async function refresh() {
   if (refreshInFlight) return;
   refreshInFlight = true;
@@ -889,11 +923,13 @@ async function refresh() {
   let session;
   let executions;
   let jobs;
+  let orchestrator;
   try {
-    [session, executions, jobs] = await Promise.all([
+    [session, executions, jobs, orchestrator] = await Promise.all([
       getJson("/session"),
       getJson("/executions"),
       getJson("/jobs"),
+      getJson("/orchestrator"),
     ]);
   } catch (error) {
     console.error("Dashboard data refresh failed", error);
@@ -906,8 +942,9 @@ async function refresh() {
   setText("last-update", new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
   try {
     renderOverview(session);
-    renderExecutions(executions);
-    renderJobs(jobs);
+    setText("tools-tab-count", (executions.executions || []).length, "0");
+    setText("jobs-tab-count", (jobs.jobs || []).length, "0");
+    renderOrchestrator(orchestrator);
   } catch (error) {
     console.error("Dashboard render failed", error);
     setConnection("error", "UI error");
@@ -919,6 +956,5 @@ async function refresh() {
 setupTabs();
 setupResourceDialog();
 setupMemoryDialog();
-setupExecutionRenderStability();
 refresh();
 setInterval(refresh, POLL_INTERVAL_MS);
