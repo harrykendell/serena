@@ -828,6 +828,7 @@ def activity_widget_html() -> str:
   const rowsByKey = new Map();
   const expandedRows = new Set();
   let state = window.openai?.toolOutput ?? null;
+  let initialViewResolved = false;
   let otherJobsExpanded = false;
   let timer = null;
   let clockTimer = null;
@@ -835,6 +836,7 @@ def activity_widget_html() -> str:
   let jobDetailTimer = null;
   const resizeMin = 72;
   const resizePanelMax = 720;
+  const initialActivityWindowSeconds = 5 * 60;
 
   function resizeMaxBodyHeight() {
     const chromeHeight = root.getBoundingClientRect().height - body.getBoundingClientRect().height;
@@ -905,6 +907,7 @@ def activity_widget_html() -> str:
   }
 
   header.addEventListener("click", () => {
+    initialViewResolved = true;
     setCollapsed(!root.classList.contains("collapsed"));
   });
   otherJobsButton.addEventListener("click", event => {
@@ -1329,6 +1332,7 @@ def activity_widget_html() -> str:
   function render(next) {
     if (!next || !next.run_id) return;
     state = next;
+    applyInitialCollapsedPolicy(next);
     const now = Date.now() / 1000;
     const activeHeaderEntry = headerEntry(next);
     const backgroundJobs = otherRunningJobs(next);
@@ -1376,8 +1380,32 @@ def activity_widget_html() -> str:
 
   function hasRunningPanelActivity(next) {
     const hasRunningTool = (next?.calls || []).some(call => call.status === "running");
-    const hasRunningJob = currentTurnJobs(next || {}).some(job => job.status === "running");
+    const hasRunningJob = (next?.jobs || []).some(job => job.status === "running");
     return hasRunningTool || hasRunningJob;
+  }
+
+  function latestPanelActivityTimestamp(next) {
+    const timestamps = [
+      ...(next?.calls || []).map(call => call.finished_at ?? call.started_at ?? call.submitted_at),
+      ...(next?.jobs || []).map(job => job.finished_at ?? job.started_at),
+    ].map(Number).filter(Number.isFinite);
+    return timestamps.length > 0 ? Math.max(...timestamps) : null;
+  }
+
+  function applyInitialCollapsedPolicy(next) {
+    if (initialViewResolved) return;
+
+    const itemCount = (next?.calls || []).length + (next?.jobs || []).length;
+    if (itemCount === 0) {
+      if (!root.classList.contains("collapsed")) setCollapsed(true);
+      return;
+    }
+
+    const latestActivity = latestPanelActivityTimestamp(next);
+    const recentlyActive = hasRunningPanelActivity(next)
+      || (latestActivity !== null && Date.now() / 1000 - latestActivity <= initialActivityWindowSeconds);
+    setCollapsed(!recentlyActive);
+    initialViewResolved = true;
   }
 
   function retire() {

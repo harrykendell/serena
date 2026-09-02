@@ -261,9 +261,11 @@ def activity_widget_html() -> str:
   const rows = new Map();
   const expanded = new Set();
   let state = window.openai?.toolOutput ?? null;
+  let initialViewResolved = false;
   let timer = null;
   const resizeMin = 72;
   const resizePanelMax = 720;
+  const initialActivityWindowMs = 5 * 60 * 1000;
 
   function resizeMaxBodyHeight() {
     const chromeHeight = root.getBoundingClientRect().height - body.getBoundingClientRect().height;
@@ -327,12 +329,37 @@ def activity_widget_html() -> str:
 
   const activeStates = new Set(["WAITING_FOR_CHAT", "QUEUED", "RUNNING_CHAT", "RUNNING_CODEX"]);
 
-  header.addEventListener("click", () => {
-    const collapsed = !root.classList.contains("collapsed");
+  function setCollapsed(collapsed) {
     root.classList.toggle("collapsed", collapsed);
     header.setAttribute("aria-expanded", String(!collapsed));
     body.hidden = collapsed;
     window.openai?.notifyIntrinsicHeight?.();
+  }
+
+  function latestPanelActivityTimestamp(next) {
+    const timestamps = (next?.delegates || [])
+      .map(item => Date.parse(item.finished_at || item.started_at || item.created_at || ""))
+      .filter(Number.isFinite);
+    return timestamps.length > 0 ? Math.max(...timestamps) : null;
+  }
+
+  function applyInitialCollapsedPolicy(next) {
+    if (initialViewResolved) return;
+    if ((next?.delegates || []).length === 0) {
+      if (!root.classList.contains("collapsed")) setCollapsed(true);
+      return;
+    }
+
+    const latestActivity = latestPanelActivityTimestamp(next);
+    const recentlyActive = hasActive(next)
+      || (latestActivity !== null && Date.now() - latestActivity <= initialActivityWindowMs);
+    setCollapsed(!recentlyActive);
+    initialViewResolved = true;
+  }
+
+  header.addEventListener("click", () => {
+    initialViewResolved = true;
+    setCollapsed(!root.classList.contains("collapsed"));
   });
 
   function elapsed(item) {
@@ -486,6 +513,7 @@ def activity_widget_html() -> str:
 
   function render(next) {
     state = next;
+    applyInitialCollapsedPolicy(next);
     const delegates = next?.delegates || [];
     root.classList.toggle("empty-state", delegates.length === 0);
     count.textContent = `${delegates.length} ${delegates.length === 1 ? "agent" : "agents"}`;
