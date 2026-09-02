@@ -16,15 +16,6 @@ ACTIVITY_RESOURCE_URI = "ui://serena/activity-v17.html"
 _ACTIVITY_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
 _MAX_RUNS = 32
 _MAX_CALLS_PER_RUN = 100
-_DETAIL_KEYS = (
-    "command",
-    "project",
-    "relative_path",
-    "memory_name",
-    "name_path_pattern",
-    "job_id",
-    "message",
-)
 
 
 @dataclass
@@ -96,6 +87,139 @@ class ActivityJobSource(Protocol):
         ...
 
 
+class _ActivityDetailFormatter:
+    """Builds concise activity detail lines from tool arguments."""
+
+    _MAX_DETAIL_CHARS = 180
+    _SUBJECT_KEYS = (
+        "label",
+        "substring_pattern",
+        "file_mask",
+        "name_path_pattern",
+        "name_path",
+        "regex",
+        "needle",
+        "memory_name",
+        "message",
+        "command",
+        "job_id",
+        "query",
+        "ref",
+        "relative_path",
+        "project",
+        "topic",
+        "remote",
+        "branch",
+        "output_id",
+    )
+    _SCOPE_KEYS = (
+        "relative_path",
+        "paths_include_glob",
+        "project",
+        "cwd",
+        "topic",
+        "remote",
+        "branch",
+    )
+
+    def format(self, tool_name: str, arguments: dict[str, Any]) -> str:
+        """Returns the most useful bounded one-line summary for one tool call."""
+        # prefer composites whose meaning cannot be recovered from generic precedence
+        detail = self._format_tool_specific(tool_name, arguments)
+        if detail:
+            return self._bound(detail)
+
+        # choose the semantic subject, then append a distinct non-empty scope when available
+        subject_key, subject = self._first_scalar(arguments, self._SUBJECT_KEYS)
+        if not subject:
+            return ""
+        if subject_key in self._SCOPE_KEYS:
+            return self._bound(subject)
+
+        _, scope = self._first_scalar(arguments, self._SCOPE_KEYS, excluded_key=subject_key)
+        return self._bound(" · ".join(part for part in (subject, scope) if part))
+
+    def _format_tool_specific(self, tool_name: str, arguments: dict[str, Any]) -> str:
+        """Returns a composite summary for tools whose arguments have coupled meaning."""
+        if tool_name in {"rename_symbol", "rename_memory"}:
+            source_key = "name_path" if tool_name == "rename_symbol" else "old_name"
+            target_key = "new_name"
+            return self._join_scalars(arguments, source_key, target_key, separator=" → ")
+
+        if tool_name == "git_branch":
+            return self._join_scalars(arguments, "action", "name")
+        if tool_name == "git_pull":
+            return self._join_scalars(arguments, "remote", "branch")
+        if tool_name == "replace_content":
+            return self._join_scalars(arguments, "relative_path", "needle")
+        if tool_name == "render_pdf_page":
+            path = self._scalar(arguments, "relative_path")
+            page = self._scalar(arguments, "page")
+            return " · ".join(part for part in (path, f"page {page}" if page else "") if part)
+        if tool_name == "read_tool_output":
+            output_id = self._scalar(arguments, "output_id")
+            if output_id:
+                output_id = f"{output_id[:8]}…" if len(output_id) > 9 else output_id
+            offset = self._scalar(arguments, "offset")
+            return " · ".join(part for part in (output_id, f"offset {offset}" if offset and offset != "0" else "") if part)
+        if tool_name == "git_diff":
+            return self._format_git_diff(arguments)
+        return ""
+
+    def _format_git_diff(self, arguments: dict[str, Any]) -> str:
+        """Returns the selected Git diff scope without exposing unrelated arguments."""
+        parts: list[str] = []
+        paths = arguments.get("paths")
+        if isinstance(paths, list):
+            clean_paths = [self._clean_scalar(path) for path in paths]
+            clean_paths = [path for path in clean_paths if path]
+            if clean_paths:
+                visible = clean_paths[:3]
+                path_summary = ", ".join(visible)
+                if len(clean_paths) > len(visible):
+                    path_summary += f" +{len(clean_paths) - len(visible)}"
+                parts.append(path_summary)
+        if arguments.get("staged") is True:
+            parts.append("staged")
+        return " · ".join(parts)
+
+    def _join_scalars(self, arguments: dict[str, Any], first_key: str, second_key: str, separator: str = " · ") -> str:
+        """Joins two non-empty scalar arguments without introducing placeholder noise."""
+        return separator.join(part for part in (self._scalar(arguments, first_key), self._scalar(arguments, second_key)) if part)
+
+    def _first_scalar(
+        self,
+        arguments: dict[str, Any],
+        keys: tuple[str, ...],
+        excluded_key: str | None = None,
+    ) -> tuple[str, str]:
+        """Returns the first non-empty scalar argument in precedence order."""
+        for key in keys:
+            if key == excluded_key:
+                continue
+            value = self._scalar(arguments, key)
+            if value:
+                return key, value
+        return "", ""
+
+    def _scalar(self, arguments: dict[str, Any], key: str) -> str:
+        """Returns one normalized scalar argument or an empty string."""
+        return self._clean_scalar(arguments.get(key))
+
+    @staticmethod
+    def _clean_scalar(value: object) -> str:
+        """Normalizes safe scalar display values while rejecting structured content."""
+        if not isinstance(value, str | int | float | bool):
+            return ""
+        return " ".join(str(value).split()).strip()
+
+    def _bound(self, detail: str) -> str:
+        """Truncates a detail line to the activity panel's established display bound."""
+        if len(detail) <= self._MAX_DETAIL_CHARS:
+            return detail
+        return detail[: self._MAX_DETAIL_CHARS - 3] + "..."
+
+
 class ActivityTracker:
     """Tracks Serena tool activity and lightweight durable-job state per ChatGPT conversation."""
 
@@ -163,7 +287,7 @@ class ActivityTracker:
             call = ActivityCall(
                 call_id=uuid.uuid4().hex,
                 tool_name=tool_name,
-                detail=self._summarize_arguments(arguments),
+                detail=self._summarize_arguments(tool_name, arguments),
                 started_at=time.time(),
                 project_name=project_name or run.project_name,
                 arguments=self._serialize_value(arguments),
@@ -398,16 +522,9 @@ class ActivityTracker:
         return f"{text[:3900]}\n... detail omitted ...\n{text[-3900:]}"
 
     @staticmethod
-    def _summarize_arguments(arguments: dict[str, Any]) -> str:
+    def _summarize_arguments(tool_name: str, arguments: dict[str, Any]) -> str:
         """Builds a bounded, low-noise detail string from safe display arguments."""
-        for key in _DETAIL_KEYS:
-            value = arguments.get(key)
-            if isinstance(value, str | int | float | bool):
-                detail = " ".join(str(value).split())
-                if len(detail) > 180:
-                    detail = detail[:177] + "..."
-                return detail
-        return ""
+        return _ActivityDetailFormatter().format(tool_name, arguments)
 
 
 def register_activity_resource(mcp: FastMCP) -> None:
@@ -419,7 +536,6 @@ def register_activity_resource(mcp: FastMCP) -> None:
         description="Compact live view of Serena tool calls with lightweight durable-job visibility.",
         mime_type=_ACTIVITY_RESOURCE_MIME_TYPE,
         meta={
-            "ui": {"prefersBorder": True},
             "openai/widgetDescription": "Shows Serena tool calls, current-turn jobs, and a compact indicator for other running jobs.",
         },
     )
@@ -469,12 +585,22 @@ def activity_widget_html() -> str:
   </div>
 </div>
 <style>
-  :root { color-scheme: light dark; }
+  :root {
+    color-scheme: light dark;
+    --surface: #ffffff;
+    --border: #dfe5ec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface: #161f29;
+      --border: #2c3a49;
+    }
+  }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
   body { margin: 0; font: 12px/1.35 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: CanvasText; background: transparent; }
   button { font: inherit; }
-  .activity { width: 100%; min-width: 0; }
+  .activity { width: 100%; min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
   .header { width: 100%; min-height: 42px; display: grid; grid-template-columns: minmax(0, 1fr) auto 12px; gap: 5px; align-items: center; padding: 6px 7px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
   .title { min-width: 0; display: flex; gap: 7px; align-items: center; white-space: nowrap; overflow: hidden; }
   .logo { width: 21px; height: 21px; flex: 0 0 auto; color: #00491e; opacity: .82; }

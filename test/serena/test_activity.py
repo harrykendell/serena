@@ -142,6 +142,75 @@ def test_activity_tracker_records_tool_lifecycle() -> None:
     assert snapshot["calls"][0]["finished_at"] is not None
 
 
+def test_activity_tracker_uses_semantic_tool_detail_lines() -> None:
+    tracker = ActivityTracker(_FakeJobSource())
+    run = tracker.start_run("conversation-a", "serena")
+
+    calls = [
+        tracker.start_tool(
+            "conversation-a",
+            "search_for_pattern",
+            {"substring_pattern": "ActivityTracker.*detail", "relative_path": "src/serena"},
+        ),
+        tracker.start_tool(
+            "conversation-a",
+            "find_file",
+            {"file_mask": "*.py", "relative_path": "src/serena"},
+        ),
+        tracker.start_tool(
+            "conversation-a",
+            "rename_symbol",
+            {"name_path": "ActivityTracker", "relative_path": "src/serena/activity.py", "new_name": "ActivityStore"},
+        ),
+        tracker.start_tool(
+            "conversation-a",
+            "replace_content",
+            {"relative_path": "src/serena/activity.py", "needle": "old value", "repl": "new value", "mode": "literal"},
+        ),
+        tracker.start_tool(
+            "conversation-a",
+            "start_job",
+            {"command": "uv run poe test", "label": "Run activity tests", "cwd": "test"},
+        ),
+        tracker.start_tool(
+            "conversation-a",
+            "git_branch",
+            {"action": "switch", "name": "mcp-media"},
+        ),
+    ]
+
+    snapshot = tracker.get_run("conversation-a", run["run_id"])
+    assert calls == [call["call_id"] for call in snapshot["calls"]]
+    assert [call["detail"] for call in snapshot["calls"]] == [
+        "ActivityTracker.*detail · src/serena",
+        "*.py · src/serena",
+        "ActivityTracker → ActivityStore",
+        "src/serena/activity.py · old value",
+        "Run activity tests · test",
+        "switch · mcp-media",
+    ]
+
+
+def test_activity_tracker_detail_lines_skip_empty_values_and_remain_bounded() -> None:
+    tracker = ActivityTracker(_FakeJobSource())
+    run = tracker.start_run("conversation-a", "serena")
+
+    tracker.start_tool(
+        "conversation-a",
+        "search_for_pattern",
+        {"substring_pattern": "x" * 220, "relative_path": ""},
+    )
+    tracker.start_tool(
+        "conversation-a",
+        "find_symbol",
+        {"name_path_pattern": "ActivityTracker", "relative_path": ""},
+    )
+
+    snapshot = tracker.get_run("conversation-a", run["run_id"])
+    assert snapshot["calls"][0]["detail"] == "x" * 177 + "..."
+    assert snapshot["calls"][1]["detail"] == "ActivityTracker"
+
+
 def test_activity_tracker_exposes_tool_detail_on_demand() -> None:
     tracker = ActivityTracker(_FakeJobSource())
     run = tracker.start_run("conversation-a", "serena")
@@ -339,7 +408,6 @@ def test_activity_resource_uses_mcp_app_contract() -> None:
     assert str(resource.uri) == ACTIVITY_RESOURCE_URI
     assert resource.mimeType == "text/html;profile=mcp-app"
     assert resource.meta == {
-        "ui": {"prefersBorder": True},
         "openai/widgetDescription": "Shows Serena tool calls, current-turn jobs, and a compact indicator for other running jobs.",
     }
     assert content.mime_type == "text/html;profile=mcp-app"
