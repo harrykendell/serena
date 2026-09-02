@@ -70,38 +70,16 @@
       </section>
 
 
-      <nav class="tabs" role="tablist" aria-label="Dashboard views">
-        <button class="tab-button active" id="tools-tab" type="button" role="tab" aria-selected="true" aria-controls="tools-panel" data-tab="tools">
-          Tools
-          <span class="tab-count" id="tools-tab-count">0</span>
-        </button>
-        <button class="tab-button" id="jobs-tab" type="button" role="tab" aria-selected="false" aria-controls="jobs-panel" data-tab="jobs">
-          Jobs
-          <span class="tab-count" id="jobs-tab-count">0</span>
-        </button>
-      </nav>
-
-      <section class="tab-panel active" id="tools-panel" role="tabpanel" aria-labelledby="tools-tab" data-panel="tools">
+      <section class="activity-section" aria-labelledby="serena-activity-title">
         <div class="section-head">
           <div>
-            <h2 class="section-title">Serena tools</h2>
-            <p class="section-note">All tool executions across Serena sessions and projects</p>
+            <h2 class="section-title" id="serena-activity-title">Serena</h2>
+            <p class="section-note">One retained activity panel for each ChatGPT conversation</p>
           </div>
+          <span class="tab-count" id="serena-panel-count">0</span>
         </div>
-        <div class="activity-widget-shell">
-          <iframe class="activity-widget-frame" id="tools-activity-widget" src="/dashboard/widget/serena/tools" title="Serena tool activity"></iframe>
-        </div>
-      </section>
-
-      <section class="tab-panel" id="jobs-panel" role="tabpanel" aria-labelledby="jobs-tab" data-panel="jobs" hidden>
-        <div class="section-head">
-          <div>
-            <h2 class="section-title">Serena jobs</h2>
-            <p class="section-note">All retained durable jobs across Serena sessions and projects</p>
-          </div>
-        </div>
-        <div class="activity-widget-shell">
-          <iframe class="activity-widget-frame" id="jobs-activity-widget" src="/dashboard/widget/serena/jobs" title="Serena job activity"></iframe>
+        <div class="session-widgets" id="serena-widgets">
+          <div class="empty-card">No Serena session activity recorded yet.</div>
         </div>
       </section>
 
@@ -109,12 +87,12 @@
         <div class="section-head">
           <div>
             <h2 class="section-title" id="orchestrator-title">Orchestrator</h2>
-            <p class="section-note">One activity panel for each orchestration with active delegates</p>
+            <p class="section-note">One retained activity panel for each orchestration</p>
           </div>
           <span class="tab-count" id="orchestrator-panel-count">0</span>
         </div>
-        <div class="orchestrator-widgets" id="orchestrator-widgets">
-          <div class="empty-card">No active orchestration.</div>
+        <div class="session-widgets" id="orchestrator-widgets">
+          <div class="empty-card">No orchestration activity recorded yet.</div>
         </div>
       </section>
     </main>

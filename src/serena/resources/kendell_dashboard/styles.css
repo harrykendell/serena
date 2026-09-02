@@ -627,5 +627,7 @@ button { font: inherit; }
   background: transparent;
 }
 
+.activity-section { margin-top: 12px; }
 .orchestrator-section { margin-top: 18px; }
-.orchestrator-widgets { display: grid; gap: 8px; }
+.session-widgets { display: grid; gap: 8px; }
+.activity-widget-shell.retained-session { opacity: .88; }

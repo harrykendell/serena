@@ -8,6 +8,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -16,6 +17,7 @@ from mcp.server.fastmcp import Audio, Image
 
 from orchestrator.config import OrchestratorConfig
 from orchestrator.delegates import DelegateError, DelegateStore
+from serena.dashboard_activity import DashboardActivityArchive
 from serena.dashboard_widgets import orchestrator_dashboard_widget_html, serena_dashboard_widget_html
 from serena.jobs import JobManager, JobStatus
 from serena.task_executor import TaskExecutor
@@ -37,6 +39,7 @@ _TOOL_START_RE = re.compile(
 _TOOL_RESULT_RE = re.compile(rf"\[(?P<task>{_TASK_THREAD_PATTERN})\].*? - Result: (?P<result>.*)$", re.DOTALL)
 _TOOL_ERROR_RE = re.compile(rf"^ERROR.*?\[(?P<task>{_TASK_THREAD_PATTERN})\].*? - (?P<error>.*)$", re.DOTALL)
 _INTERNAL_SESSION_PARAM_RE = re.compile(r",?\s*session_id=(?:'[^']*'|\"[^\"]*\")\s*$")
+_EPHEMERAL_DOWNLOAD_URL_RE = re.compile(r"download_url=(?:'[^']*'|\"[^\"]*\")")
 _EXECUTION_DETAIL_KEYS = ("command", "project", "relative_path", "memory_name", "name_path_pattern", "job_id", "message")
 
 
@@ -70,6 +73,13 @@ def _bounded(value: str) -> str:
     return f"… {omitted} earlier characters omitted …\n{value[-_EXECUTION_FIELD_LIMIT:]}"
 
 
+def _execution_tool_name(task_name: str) -> str:
+    """Converts one TaskExecutor class-style name into the public Serena tool name."""
+    _, _, raw = task_name.partition(":")
+    raw = raw[:-4] if raw.endswith("Tool") else raw
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", raw).lower()
+
+
 @dataclass(frozen=True)
 class DashboardMediaContent:
     """Binary media or file content returned by one completed Serena tool execution."""
@@ -83,12 +93,18 @@ class DashboardMediaContent:
 class DashboardExecutionHistory:
     """Session-local history of Serena tool calls with parameters and bounded results."""
 
-    def __init__(self, agent: SerenaAgent, memory_log_handler: MemoryLogHandler):
+    def __init__(
+        self,
+        agent: SerenaAgent,
+        memory_log_handler: MemoryLogHandler,
+        activity_archive: DashboardActivityArchive | None = None,
+    ):
         self._agent = agent
         self._lock = threading.Lock()
         self._completed: list[TaskExecutor.TaskInfo] = []
         self._last_captured_future: object | None = None
         self._metadata_by_task_name: dict[str, dict[str, str]] = {}
+        self._activity_archive = activity_archive or DashboardActivityArchive()
         self._agent.register_config_changed_callback(self._capture_last_execution)
         add_emit_callback = getattr(memory_log_handler, "add_emit_callback", None)
         if callable(add_emit_callback):
@@ -156,28 +172,45 @@ class DashboardExecutionHistory:
         """Captures parameters, results and errors from Serena's existing tool execution logs."""
         start_match = _TOOL_START_RE.search(message)
         if start_match is not None:
+            task_name = start_match.group("task")
+            parameters = _INTERNAL_SESSION_PARAM_RE.sub("", start_match.group("parameters").strip())
+            parameters = _EPHEMERAL_DOWNLOAD_URL_RE.sub("download_url='<ephemeral>'", parameters)
+            project = start_match.group("project")
+            session_id = start_match.group("session_id")
             with self._lock:
-                metadata = self._metadata_by_task_name.setdefault(start_match.group("task"), {})
-                parameters = _INTERNAL_SESSION_PARAM_RE.sub("", start_match.group("parameters").strip())
+                metadata = self._metadata_by_task_name.setdefault(task_name, {})
                 metadata["parameters"] = _bounded(parameters)
-                project = start_match.group("project")
                 if project:
                     metadata["project"] = project
-                metadata["session_id"] = start_match.group("session_id")
+                metadata["session_id"] = session_id
+            self._activity_archive.record_start(
+                task_name=task_name,
+                session_id=session_id,
+                tool_name=_execution_tool_name(task_name),
+                parameters=_bounded(parameters),
+                detail=_execution_detail(parameters),
+                project_name=project,
+            )
             return
 
         result_match = _TOOL_RESULT_RE.search(message)
         if result_match is not None:
+            task_name = result_match.group("task")
+            result = _bounded(result_match.group("result").strip())
             with self._lock:
-                metadata = self._metadata_by_task_name.setdefault(result_match.group("task"), {})
-                metadata["result"] = _bounded(result_match.group("result").strip())
+                metadata = self._metadata_by_task_name.setdefault(task_name, {})
+                metadata["result"] = result
+            self._activity_archive.record_result(task_name, result=result)
             return
 
         error_match = _TOOL_ERROR_RE.search(message)
         if error_match is not None:
+            task_name = error_match.group("task")
+            error = _bounded(error_match.group("error").strip())
             with self._lock:
-                metadata = self._metadata_by_task_name.setdefault(error_match.group("task"), {})
-                metadata["error"] = _bounded(error_match.group("error").strip())
+                metadata = self._metadata_by_task_name.setdefault(task_name, {})
+                metadata["error"] = error
+            self._activity_archive.record_result(task_name, error=error)
 
     def _serialize(self, task_info: TaskExecutor.TaskInfo) -> dict[str, Any]:
         """Serializes a task execution and its captured call metadata."""
@@ -454,6 +487,141 @@ class DashboardJobOverview:
         }
 
 
+class DashboardSerenaActivityOverview:
+    """Provides retained ChatGPT-session Serena activity for the operator dashboard."""
+
+    def __init__(
+        self,
+        archive: DashboardActivityArchive,
+        execution_history: DashboardExecutionHistory,
+        job_overview: DashboardJobOverview,
+    ) -> None:
+        self._archive = archive
+        self._execution_history = execution_history
+        self._job_overview = job_overview
+
+    def get_panels(self) -> dict[str, Any]:
+        """Returns retained Serena session panels, active sessions first."""
+        executions = self._execution_history.get_executions()
+        self._archive.reconcile_executions(executions.get("executions", []))
+        jobs = self._jobs_by_id()
+        panels: list[dict[str, Any]] = []
+        for session in self._archive.list_sessions():
+            job_ids = self._session_job_ids(session)
+            active = any(call.get("status") in {"running", "queued"} for call in session.get("calls", [])) or any(
+                jobs.get(job_id, {}).get("status") == "running" for job_id in job_ids
+            )
+            panels.append(
+                {
+                    "panel_id": session["panel_id"],
+                    "project_name": session.get("project_name") or "",
+                    "started_at": session.get("started_at"),
+                    "updated_at": session.get("updated_at"),
+                    "active": active,
+                }
+            )
+        panels.sort(key=lambda item: (not item["active"], -float(item.get("updated_at") or 0.0)))
+        return {"status": "success", "panels": panels}
+
+    def get_panel(self, panel_id: str) -> dict[str, Any]:
+        """Returns one retained Serena session in the inline-widget activity shape."""
+        executions = self._execution_history.get_executions()
+        self._archive.reconcile_executions(executions.get("executions", []))
+        session = self._archive.get_session(panel_id)
+        jobs = self._jobs_by_id()
+        job_ids = self._session_job_ids(session)
+        visible_jobs = [self._job_payload(jobs[job_id]) for job_id in job_ids if job_id in jobs]
+        return {
+            "run_id": panel_id,
+            "project_name": session.get("project_name") or "",
+            "started_at": session.get("started_at"),
+            "superseded": False,
+            "calls": [self._call_payload(call) for call in session.get("calls", [])],
+            "jobs": visible_jobs,
+        }
+
+    def get_call_detail(self, panel_id: str, call_id: str) -> dict[str, Any]:
+        """Returns one retained tool call's bounded detail."""
+        call = self._archive.get_call(panel_id, call_id)
+        return {
+            "call_id": call_id,
+            "tool_name": call.get("tool_name") or "",
+            "status": call.get("status") or "completed",
+            "arguments": call.get("parameters") or "{}",
+            "result": call.get("error") or call.get("result"),
+        }
+
+    def get_job_detail(self, job_id: str) -> dict[str, Any]:
+        """Returns one retained durable job in the inline-widget detail shape."""
+        jobs = self._jobs_by_id()
+        item = jobs.get(job_id)
+        if item is None:
+            raise KeyError(job_id)
+        try:
+            output = self._job_overview.get_output(job_id, "latest", None)
+        except (KeyError, RuntimeError, ValueError):
+            output = {"output": "", "has_earlier_output": False, "earlier_output_omitted": False}
+        return {
+            "job_id": job_id,
+            "status": item.get("status"),
+            "project": item.get("project"),
+            "elapsed_seconds": item.get("elapsed_seconds"),
+            "seconds_since_last_output": item.get("seconds_since_last_output"),
+            "memory_bytes": item.get("memory_bytes"),
+            "cpu_seconds": item.get("cpu_seconds"),
+            "process_count": item.get("process_count"),
+            "timeout_seconds": item.get("timeout_seconds"),
+            "return_code": item.get("return_code"),
+            "output": output.get("output") or "",
+            "has_earlier_output": bool(output.get("has_earlier_output")),
+            "earlier_output_omitted": bool(output.get("earlier_output_omitted")),
+        }
+
+    def _jobs_by_id(self) -> dict[str, dict[str, Any]]:
+        """Returns retained durable jobs indexed by job identifier."""
+        payload = self._job_overview.get_jobs()
+        return {str(item["job_id"]): item for item in payload.get("jobs", [])}
+
+    @staticmethod
+    def _session_job_ids(session: dict[str, Any]) -> list[str]:
+        """Returns unique durable jobs launched from one retained ChatGPT session."""
+        result: list[str] = []
+        for call in session.get("calls", []):
+            job_id = call.get("job_id")
+            if job_id and job_id not in result:
+                result.append(str(job_id))
+        return result
+
+    @staticmethod
+    def _call_payload(call: dict[str, Any]) -> dict[str, Any]:
+        """Returns one persistent call in the inline-widget list shape."""
+        return {
+            "call_id": call.get("call_id"),
+            "tool_name": call.get("tool_name") or "",
+            "detail": call.get("detail") or "",
+            "status": call.get("status") or "completed",
+            "submitted_at": call.get("submitted_at") or call.get("started_at"),
+            "started_at": call.get("started_at") or call.get("submitted_at"),
+            "finished_at": call.get("finished_at"),
+            "job_id": call.get("job_id"),
+        }
+
+    @staticmethod
+    def _job_payload(item: dict[str, Any]) -> dict[str, Any]:
+        """Returns one dashboard job in the inline-widget list shape."""
+        created_at = item.get("created_at")
+        finished_at = item.get("finished_at")
+        return {
+            "job_id": item.get("job_id"),
+            "label": item.get("label") or "background job",
+            "project": item.get("project") or "",
+            "status": item.get("status") or "completed",
+            "started_at": datetime.fromisoformat(created_at).timestamp() if isinstance(created_at, str) else time.time(),
+            "finished_at": datetime.fromisoformat(finished_at).timestamp() if isinstance(finished_at, str) else None,
+            "current_turn": True,
+        }
+
+
 class DashboardOrchestratorOverview:
     """Provides global read-only Orchestrator activity for the operator dashboard."""
 
@@ -496,8 +664,14 @@ class CustomDashboard:
     def __init__(self, app: Flask, agent: SerenaAgent, memory_log_handler: MemoryLogHandler):
         self._session_overview = DashboardSessionOverview(agent)
         self._memory_overview = DashboardMemoryOverview(agent)
-        self._execution_history = DashboardExecutionHistory(agent, memory_log_handler)
+        self._activity_archive = DashboardActivityArchive()
+        self._execution_history = DashboardExecutionHistory(agent, memory_log_handler, self._activity_archive)
         self._job_overview = DashboardJobOverview(JobManager())
+        self._serena_activity_overview = DashboardSerenaActivityOverview(
+            self._activity_archive,
+            self._execution_history,
+            self._job_overview,
+        )
         self._orchestrator_overview = DashboardOrchestratorOverview()
         self._register_routes(app)
 
@@ -555,6 +729,31 @@ class CustomDashboard:
             cursor = request.args.get("cursor")
             return self._job_overview.get_output(job_id, mode, cursor)
 
+        @app.route("/dashboard/api/serena", methods=["GET"])
+        def get_serena_panels() -> dict[str, Any]:
+            return self._serena_activity_overview.get_panels()
+
+        @app.route("/dashboard/api/serena/panels/<panel_id>", methods=["GET"])
+        def get_serena_panel(panel_id: str) -> dict[str, Any]:
+            try:
+                return self._serena_activity_overview.get_panel(panel_id)
+            except KeyError:
+                abort(404)
+
+        @app.route("/dashboard/api/serena/panels/<panel_id>/calls/<call_id>", methods=["GET"])
+        def get_serena_call_detail(panel_id: str, call_id: str) -> dict[str, Any]:
+            try:
+                return self._serena_activity_overview.get_call_detail(panel_id, call_id)
+            except KeyError:
+                abort(404)
+
+        @app.route("/dashboard/api/serena/jobs/<job_id>", methods=["GET"])
+        def get_serena_job_detail(job_id: str) -> dict[str, Any]:
+            try:
+                return self._serena_activity_overview.get_job_detail(job_id)
+            except KeyError:
+                abort(404)
+
         @app.route("/dashboard/api/orchestrator", methods=["GET"])
         def get_orchestrator_panels() -> dict[str, Any]:
             return self._orchestrator_overview.get_panels()
@@ -573,13 +772,13 @@ class CustomDashboard:
             except KeyError:
                 abort(404)
 
-        @app.route("/dashboard/widget/serena/<mode>", methods=["GET"])
-        def get_serena_activity_widget(mode: str) -> Response:
+        @app.route("/dashboard/widget/serena/<panel_id>", methods=["GET"])
+        def get_serena_activity_widget(panel_id: str) -> Response:
             try:
-                html = serena_dashboard_widget_html(mode)
-            except ValueError:
+                self._serena_activity_overview.get_panel(panel_id)
+            except KeyError:
                 abort(404)
-            return Response(html, mimetype="text/html")
+            return Response(serena_dashboard_widget_html(panel_id), mimetype="text/html")
 
         @app.route("/dashboard/widget/orchestrator/<panel_id>", methods=["GET"])
         def get_orchestrator_activity_widget(panel_id: str) -> Response:

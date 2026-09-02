@@ -61,7 +61,7 @@ def _explore_result() -> dict[str, Any]:
     }
 
 
-def test_dashboard_activity_groups_active_parent_sessions(orchestrator_config: OrchestratorConfig) -> None:
+def test_dashboard_activity_retains_terminal_parent_sessions(orchestrator_config: OrchestratorConfig) -> None:
     store = DelegateStore(orchestrator_config)
     request = CreateDelegateRequest.model_validate(_create_arguments())
     first = store.create("parent-a", request)
@@ -82,10 +82,13 @@ def test_dashboard_activity_groups_active_parent_sessions(orchestrator_config: O
 
     store.cancel(first.delegate_id, "parent-a")
     store.cancel(second.delegate_id, "parent-a")
-    remaining = store.list_dashboard_activity()
+    retained = store.list_dashboard_activity()
 
-    assert len(remaining) == 1
-    assert remaining[0]["delegates"][0]["delegate_id"] == third.delegate_id
+    assert len(retained) == 2
+    assert retained[0]["active"] is True
+    assert retained[0]["delegates"][0]["delegate_id"] == third.delegate_id
+    assert retained[1]["active"] is False
+    assert {delegate["delegate_id"] for delegate in retained[1]["delegates"]} == {first.delegate_id, second.delegate_id}
 
 
 def test_manual_delegate_flow_survives_server_recreation(orchestrator_config: OrchestratorConfig) -> None:

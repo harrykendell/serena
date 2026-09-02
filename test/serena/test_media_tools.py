@@ -188,6 +188,9 @@ def test_upload_file_writes_chatgpt_file_inside_project(project: Project, tmp_pa
     assert destination.read_bytes() == data
     assert stat.S_IMODE(destination.stat().st_mode) == expected_new_mode
     assert "Uploaded edited.txt" in result
+    assert "source snapshot: serena-file://export/" in result
+    snapshot_token = result.rsplit("/", maxsplit=1)[1]
+    assert (tmp_path / ".serena-home" / "chat_file_snapshots" / snapshot_token).read_bytes() == data
     assert tool.get_mcp_tool_meta() == {"openai/fileParams": ["file"]}
 
     with pytest.raises(FileExistsError):

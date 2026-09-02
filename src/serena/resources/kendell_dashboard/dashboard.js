@@ -882,12 +882,12 @@ function setConnection(state, label) {
   setText("connection-label", label);
 }
 
-function renderOrchestrator(data) {
-  const container = byId("orchestrator-widgets");
-  const panels = data.panels || [];
-  setText("orchestrator-panel-count", panels.length, "0");
+function renderSessionWidgets(containerId, countId, panels, kind) {
+  const container = byId(containerId);
+  setText(countId, panels.length, "0");
   if (!panels.length) {
-    if (!container.querySelector(".empty-card")) clearAndAppend(container, [makeElement("div", "empty-card", "No active orchestration.")]);
+    const label = kind === "serena" ? "No Serena session activity recorded yet." : "No orchestration activity recorded yet.";
+    if (!container.querySelector(".empty-card")) clearAndAppend(container, [makeElement("div", "empty-card", label)]);
     return;
   }
 
@@ -896,15 +896,18 @@ function renderOrchestrator(data) {
     panels,
     panel => panel.panel_id,
     panel => {
-      const shell = makeElement("div", "activity-widget-shell");
+      const shell = makeElement("div", `activity-widget-shell ${panel.active ? "active-session" : "retained-session"}`);
       const frame = document.createElement("iframe");
       frame.className = "activity-widget-frame";
-      frame.src = `/dashboard/widget/orchestrator/${encodeURIComponent(panel.panel_id)}`;
-      frame.title = "Orchestrator activity";
+      frame.src = `/dashboard/widget/${kind}/${encodeURIComponent(panel.panel_id)}`;
+      frame.title = kind === "serena" ? "Serena session activity" : "Orchestrator activity";
       shell.append(frame);
       return shell;
     },
-    () => {},
+    (shell, panel) => {
+      shell.classList.toggle("active-session", Boolean(panel.active));
+      shell.classList.toggle("retained-session", !panel.active);
+    },
   );
 }
 
@@ -921,14 +924,12 @@ async function refresh() {
   refreshInFlight = true;
 
   let session;
-  let executions;
-  let jobs;
+  let serena;
   let orchestrator;
   try {
-    [session, executions, jobs, orchestrator] = await Promise.all([
+    [session, serena, orchestrator] = await Promise.all([
       getJson("/session"),
-      getJson("/executions"),
-      getJson("/jobs"),
+      getJson("/serena"),
       getJson("/orchestrator"),
     ]);
   } catch (error) {
@@ -942,9 +943,8 @@ async function refresh() {
   setText("last-update", new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
   try {
     renderOverview(session);
-    setText("tools-tab-count", (executions.executions || []).length, "0");
-    setText("jobs-tab-count", (jobs.jobs || []).length, "0");
-    renderOrchestrator(orchestrator);
+    renderSessionWidgets("serena-widgets", "serena-panel-count", serena.panels || [], "serena");
+    renderSessionWidgets("orchestrator-widgets", "orchestrator-panel-count", orchestrator.panels || [], "orchestrator");
   } catch (error) {
     console.error("Dashboard render failed", error);
     setConnection("error", "UI error");
@@ -953,7 +953,6 @@ async function refresh() {
   }
 }
 
-setupTabs();
 setupResourceDialog();
 setupMemoryDialog();
 refresh();

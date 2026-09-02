@@ -105,31 +105,39 @@ def _task_info(name: str, *, is_running: bool, state: str, task_id: int, result=
 
 def test_custom_dashboard_serves_fork_specific_frontend_and_session_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
+    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
+    log_handler = _DummyMemoryLogHandler()
     dashboard = SerenaDashboardAPI(
-        memory_log_handler=_DummyMemoryLogHandler(),
+        memory_log_handler=log_handler,
         tool_names=[],
         agent=_DashboardAgent(),
         tool_usage_stats=None,
     )
     client = dashboard._app.test_client()
+    log_handler.emit_message(
+        "INFO [Task-1:GetCurrentConfigTool] serena.tools.tools_base:_log_tool_application:291 - "
+        "get_current_config: ; project: serena; session_id: session-a"
+    )
 
     redirect = client.get("/dashboard", base_url="https://serena.kendell.uk")
     response = client.get("/dashboard/")
     session = client.get("/dashboard/api/session").get_json()
-    tools_widget = client.get("/dashboard/widget/serena/tools")
-    jobs_widget = client.get("/dashboard/widget/serena/jobs")
+    serena = client.get("/dashboard/api/serena").get_json()
+    panel_id = serena["panels"][0]["panel_id"]
+    serena_widget = client.get(f"/dashboard/widget/serena/{panel_id}")
     orchestrator = client.get("/dashboard/api/orchestrator").get_json()
 
     assert redirect.status_code == 302
     assert redirect.headers["Location"] == "/dashboard/"
     assert response.status_code == 200
     assert b"Agent dashboard" in response.data
-    assert b"Serena tools" in response.data
-    assert b"/dashboard/widget/serena/tools" in response.data
+    assert b"One retained activity panel for each ChatGPT conversation" in response.data
+    assert b"serena-widgets" in response.data
     assert b"Orchestrator" in response.data
-    assert b"window.openai" in tools_widget.data
-    assert b"get_activity" in tools_widget.data
-    assert b"get_activity_job_detail" in jobs_widget.data
+    assert b"window.openai" in serena_widget.data
+    assert b"get_activity" in serena_widget.data
+    assert b"get_activity_job_detail" in serena_widget.data
+    assert len(serena["panels"]) == 1
     assert orchestrator == {"status": "success", "panels": []}
     assert session["status"] == "success"
     assert session["context"] == "chatgpt"

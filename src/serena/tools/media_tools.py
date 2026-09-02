@@ -81,7 +81,10 @@ class _FileSnapshotStore:
 
     @classmethod
     def _prune(cls, root: Path, incoming_size: int) -> None:
-        """Evicts least-recently-used snapshots until a new snapshot fits within bounds."""
+        """Evicts unreferenced LRU snapshots until a new snapshot fits within bounds."""
+        from serena.dashboard_activity import DashboardActivityArchive
+
+        pinned = DashboardActivityArchive.retained_file_tokens_from_disk()
         snapshots: list[tuple[Path, os.stat_result]] = []
         total_size = 0
         for path in root.iterdir():
@@ -93,16 +96,19 @@ class _FileSnapshotStore:
                 continue
             if not stat.S_ISREG(file_stat.st_mode):
                 continue
-            snapshots.append((path, file_stat))
             total_size += file_stat.st_size
+            if path.name not in pinned:
+                snapshots.append((path, file_stat))
 
         snapshots.sort(key=lambda item: item[1].st_mtime)
-        while snapshots and (len(snapshots) >= cls._MAX_SNAPSHOTS or total_size + incoming_size > cls._MAX_TOTAL_SIZE):
+        total_count = sum(1 for path in root.iterdir() if path.is_file() and not path.name.startswith("."))
+        while snapshots and (total_count >= cls._MAX_SNAPSHOTS or total_size + incoming_size > cls._MAX_TOTAL_SIZE):
             path, file_stat = snapshots.pop(0)
             try:
                 path.unlink()
             except FileNotFoundError:
                 continue
+            total_count -= 1
             total_size -= file_stat.st_size
 
     @classmethod
@@ -441,10 +447,11 @@ class UploadFileTool(Tool, ToolMarkerCanEdit, ToolMarkerOptional):
         :param file: ChatGPT file reference supplied by ``openai/fileParams``
         :param relative_path: destination path relative to the active project root
         :param overwrite: whether an existing destination file may be replaced
-        :return: uploaded filename, byte count, and SHA-256 digest
+        :return: uploaded filename, byte count, SHA-256 digest, and immutable source snapshot reference
         """
         source = OpenAIFile.model_validate(file)
         self.project.validate_relative_path(relative_path)
+        source_name = source.file_name or source.file_id
 
         root = Path(self.get_project_root()).resolve()
         destination = (root / relative_path).resolve(strict=False)
@@ -460,6 +467,11 @@ class UploadFileTool(Tool, ToolMarkerCanEdit, ToolMarkerOptional):
         temporary_path = self._create_temporary_upload_path(destination)
         try:
             byte_count, sha256 = self._download_to(source, temporary_path)
+            source_snapshot = _FileSnapshotStore.snapshot(
+                temporary_path,
+                display_name=source_name,
+                description="Immutable ChatGPT upload snapshot retained by Serena",
+            )
             if destination.exists() and not overwrite:
                 raise FileExistsError(f"Destination already exists: {relative_path}")
             if destination.exists() and original_mode is None:
@@ -470,8 +482,9 @@ class UploadFileTool(Tool, ToolMarkerCanEdit, ToolMarkerOptional):
         finally:
             temporary_path.unlink(missing_ok=True)
 
-        source_name = source.file_name or source.file_id
-        return f"Uploaded {source_name} to {relative_path} ({byte_count} bytes, sha256={sha256})"
+        return (
+            f"Uploaded {source_name} to {relative_path} ({byte_count} bytes, sha256={sha256}); source snapshot: {source_snapshot.link.uri}"
+        )
 
 
 class FetchMediaFileTool(_McpMediaTool):

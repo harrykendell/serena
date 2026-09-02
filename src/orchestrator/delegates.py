@@ -656,8 +656,8 @@ class DelegateStore:
             records.sort(key=lambda item: item.created_at, reverse=True)
             return [self._status_response(record) for record in records[: max(0, limit)]]
 
-    def list_dashboard_activity(self, *, limit_per_session: int = 50) -> list[dict[str, Any]]:
-        """Lists global active orchestration groups for the operator dashboard."""
+    def list_dashboard_activity(self, *, limit_per_session: int = 50, max_sessions: int = 128) -> list[dict[str, Any]]:
+        """Lists retained orchestration groups for the operator dashboard."""
         with self._lock:
             grouped: dict[str, list[DelegateRecord]] = {}
             for delegate_dir in self._config.delegates_dir.glob("d_*"):
@@ -671,21 +671,25 @@ class DelegateStore:
 
             panels: list[dict[str, Any]] = []
             for parent_session_id, records in grouped.items():
-                if not any(record.state in _ACTIVE_STATES for record in records):
-                    continue
                 records.sort(key=lambda item: item.created_at, reverse=True)
                 visible = records[: max(0, limit_per_session)]
+                if not visible:
+                    continue
+                active = any(record.state in _ACTIVE_STATES for record in visible)
+                updated_at = max((record.finished_at or record.started_at or record.created_at).timestamp() for record in visible)
                 panel_id = uuid.uuid5(uuid.NAMESPACE_URL, f"orchestrator:{parent_session_id}").hex[:16]
                 panels.append(
                     {
                         "panel_id": panel_id,
-                        "started_at": min(record.created_at for record in visible).timestamp() if visible else self._now().timestamp(),
+                        "started_at": min(record.created_at for record in visible).timestamp(),
+                        "updated_at": updated_at,
+                        "active": active,
                         "delegates": [self._status_response(record).model_dump(mode="json") for record in visible],
                     }
                 )
 
-            panels.sort(key=lambda panel: panel["started_at"], reverse=True)
-            return panels
+            panels.sort(key=lambda panel: (not panel["active"], -panel["updated_at"]))
+            return panels[: max(0, max_sessions)]
 
     def dashboard_detail(self, delegate_id: str) -> DelegatePrivateDetail:
         """Returns one delegate's operator-visible detail without session ownership filtering."""
