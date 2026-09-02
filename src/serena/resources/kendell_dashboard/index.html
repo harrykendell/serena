@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#f7f9fb" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#10161d" media="(prefers-color-scheme: dark)">
-  <title>Serena dashboard</title>
+  <title>Serena + Orchestrator dashboard</title>
   <link rel="icon" href="serena-logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
   <script src="dashboard.js" defer></script>
@@ -15,10 +15,13 @@
   <div class="app-shell">
     <header class="site-header">
       <div class="brand">
-        <img class="brand-mark" src="serena-logo.svg" alt="">
+        <div class="brand-marks" aria-hidden="true">
+          <img class="brand-mark" src="serena-logo.svg" alt="">
+          <img class="brand-mark" src="orchestrator-logo.svg" alt="">
+        </div>
         <div class="brand-copy">
-          <span class="brand-title">Serena</span>
-          <span class="brand-subtitle">Agent dashboard</span>
+          <span class="brand-title">Serena + Orchestrator</span>
+          <span class="brand-subtitle">MCP dashboard</span>
         </div>
       </div>
       <div class="connection" id="connection-state" data-state="loading">
@@ -70,29 +73,38 @@
       </section>
 
 
-      <section class="activity-section" aria-labelledby="serena-activity-title">
-        <div class="section-head">
-          <div>
-            <h2 class="section-title" id="serena-activity-title">Serena</h2>
-            <p class="section-note">One retained activity panel for each ChatGPT conversation</p>
-          </div>
-          <span class="tab-count" id="serena-panel-count">0</span>
+      <section class="activity-workspace" aria-label="Agent activity">
+        <div class="tabs activity-view-tabs" role="tablist" aria-label="Activity source">
+          <button class="tab-button active" type="button" role="tab" data-activity-view-tab="serena" aria-selected="true" aria-controls="serena-activity-panel">Serena</button>
+          <button class="tab-button" type="button" role="tab" data-activity-view-tab="orchestrator" aria-selected="false" aria-controls="orchestrator-activity-panel" tabindex="-1">Orchestrator</button>
         </div>
-        <div class="session-widgets" id="serena-widgets">
-          <div class="empty-card">No Serena session activity recorded yet.</div>
-        </div>
-      </section>
 
-      <section class="orchestrator-section" aria-labelledby="orchestrator-title">
-        <div class="section-head">
-          <div>
-            <h2 class="section-title" id="orchestrator-title">Orchestrator</h2>
-            <p class="section-note">One retained activity panel for each orchestration</p>
-          </div>
-          <span class="tab-count" id="orchestrator-panel-count">0</span>
-        </div>
-        <div class="session-widgets" id="orchestrator-widgets">
-          <div class="empty-card">No orchestration activity recorded yet.</div>
+        <div class="activity-columns" id="activity-columns" data-active-view="serena">
+          <section class="activity-section" id="serena-activity-panel" role="tabpanel" aria-labelledby="serena-activity-title">
+            <div class="section-head">
+              <div>
+                <h2 class="section-title" id="serena-activity-title">Serena</h2>
+                <p class="section-note">One retained activity panel for each ChatGPT conversation</p>
+              </div>
+              <span class="tab-count" id="serena-panel-count">0</span>
+            </div>
+            <div class="session-widgets" id="serena-widgets">
+              <div class="empty-card">No Serena session activity recorded yet.</div>
+            </div>
+          </section>
+
+          <section class="orchestrator-section" id="orchestrator-activity-panel" role="tabpanel" aria-labelledby="orchestrator-title">
+            <div class="section-head">
+              <div>
+                <h2 class="section-title" id="orchestrator-title">Orchestrator</h2>
+                <p class="section-note">One retained activity panel for each orchestration</p>
+              </div>
+              <span class="tab-count" id="orchestrator-panel-count">0</span>
+            </div>
+            <div class="session-widgets" id="orchestrator-widgets">
+              <div class="empty-card">No orchestration activity recorded yet.</div>
+            </div>
+          </section>
         </div>
       </section>
     </main>

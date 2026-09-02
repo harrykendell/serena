@@ -31,6 +31,7 @@ class DashboardActivityArchive:
         if self._root.stat().st_mode & 0o077:
             self._root.chmod(0o700)
         self._lock = threading.RLock()
+        self._instance_id = uuid.uuid4().hex
         self._call_by_task: dict[str, tuple[str, str]] = {}
         self._interrupt_stale_calls()
 
@@ -55,6 +56,7 @@ class DashboardActivityArchive:
         parameters: str,
         detail: str,
         project_name: str | None,
+        scope: str = "",
         timestamp: float | None = None,
     ) -> str:
         """Records one started tool call and returns its persistent call identifier."""
@@ -69,9 +71,11 @@ class DashboardActivityArchive:
             calls.append(
                 {
                     "call_id": call_id,
+                    "instance_id": self._instance_id,
                     "task_name": task_name,
                     "tool_name": tool_name,
                     "detail": detail,
+                    "scope": scope,
                     "status": "running",
                     "submitted_at": now,
                     "started_at": now,
@@ -117,16 +121,20 @@ class DashboardActivityArchive:
             self._write_session(session)
 
     def reconcile_executions(self, executions: Iterable[dict[str, Any]]) -> None:
-        """Reconciles current task timing and cancellation state into the persistent archive."""
+        """Reconciles current-process task timing and cancellation state into the persistent archive."""
         by_task = {str(item.get("name")): item for item in executions if item.get("name")}
         with self._lock:
             for path in self._session_paths():
                 session = self._read_path(path)
-                changed = False
+                session_changed = False
                 for call in session.get("calls", []):
+                    if call.get("instance_id") != self._instance_id:
+                        continue
                     item = by_task.get(str(call.get("task_name")))
                     if item is None:
                         continue
+
+                    call_changed = False
                     for key, source in (
                         ("submitted_at", "submitted_at"),
                         ("started_at", "started_at"),
@@ -136,14 +144,15 @@ class DashboardActivityArchive:
                         value = item.get(source)
                         if value is not None and call.get(key) != value:
                             call[key] = value
-                            changed = True
+                            call_changed = True
                     status = item.get("status")
                     if status and call.get("status") != status:
                         call["status"] = status
-                        changed = True
-                    if changed:
-                        session["updated_at"] = time.time()
-                if changed:
+                        call_changed = True
+                    if call_changed:
+                        session_changed = True
+                if session_changed:
+                    session["updated_at"] = time.time()
                     self._write_path(path, session)
 
     def list_sessions(self) -> list[dict[str, Any]]:
@@ -159,6 +168,21 @@ class DashboardActivityArchive:
             if session.get("panel_id") == panel_id:
                 return session
         raise KeyError(panel_id)
+
+    def set_display_name(self, session_id: str, display_name: str) -> str:
+        """Sets the operator-facing name for one retained ChatGPT conversation."""
+        normalized = " ".join(display_name.split())
+        if not normalized:
+            raise ValueError("Conversation names must not be empty")
+        if len(normalized) > 80:
+            raise ValueError("Conversation names must be at most 80 characters")
+
+        with self._lock:
+            session = self._read_session(session_id)
+            session["display_name"] = normalized
+            session["updated_at"] = time.time()
+            self._write_session(session)
+        return normalized
 
     def get_call(self, panel_id: str, call_id: str) -> dict[str, Any]:
         """Returns one persisted call belonging to a retained session panel."""
@@ -215,7 +239,7 @@ class DashboardActivityArchive:
         for path in self._session_paths():
             session = self._read_path(path)
             for call in reversed(session.get("calls", [])):
-                if call.get("task_name") == task_name and call.get("status") == "running":
+                if call.get("instance_id") == self._instance_id and call.get("task_name") == task_name and call.get("status") == "running":
                     owner = (str(session["session_id"]), str(call["call_id"]))
                     self._call_by_task[task_name] = owner
                     return owner

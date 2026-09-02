@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from mcp.server.fastmcp import FastMCP
+from mcp.types import RequestParams
 
 from orchestrator.activity import ACTIVITY_RESOURCE_URI, OrchestratorActivityTracker, register_activity_resource
 from orchestrator.config import OrchestratorConfig
+from orchestrator.dashboard_sessions import OrchestratorDashboardSessionArchive
 from orchestrator.delegates import CreateDelegateRequest, DelegateKind, DelegateStore
 from orchestrator.mcp import OrchestratorMCPFactory
 
@@ -21,6 +25,21 @@ def _request(goal: str) -> CreateDelegateRequest:
         goal=goal,
         acceptance_criteria=["Return a concise finding."],
     )
+
+
+def _mcp_context(session_id: str) -> Any:
+    """Builds one MCP context carrying the ChatGPT conversation identity."""
+    meta = RequestParams.Meta.model_validate({"openai/session": session_id})
+    return SimpleNamespace(request_context=SimpleNamespace(meta=meta), session=object())
+
+
+def _call_tool(server: FastMCP, name: str, arguments: dict[str, Any], session_id: str) -> dict[str, Any]:
+    """Calls one MCP tool with a stable ChatGPT session identity."""
+
+    async def call() -> dict[str, Any]:
+        return await server._tool_manager.call_tool(name, arguments, context=_mcp_context(session_id))
+
+    return asyncio.run(call())
 
 
 @pytest.fixture
@@ -110,3 +129,23 @@ def test_activity_tools_use_orchestrator_specific_widget_and_private_polling_con
     assert detail_meta is not None
     assert detail_meta["ui"] == {"visibility": ["app"]}
     assert detail_meta["openai/visibility"] == "private"
+
+
+def test_show_orchestrator_activity_persists_and_refreshes_conversation_title(
+    orchestrator_config: OrchestratorConfig,
+) -> None:
+    """Opening the activity panel persists the model-supplied conversation title by ChatGPT session."""
+    server = OrchestratorMCPFactory(orchestrator_config).create_mcp_server()
+
+    _call_tool(server, "show_orchestrator_activity", {"conversation_title": "Dashboard Naming"}, "conversation-a")
+    first = OrchestratorDashboardSessionArchive(orchestrator_config).list_sessions()
+
+    assert len(first) == 1
+    assert first[0]["session_id"] == "conversation-a"
+    assert first[0]["display_name"] == "Dashboard Naming"
+
+    _call_tool(server, "show_orchestrator_activity", {"conversation_title": "Automatic Session Titles"}, "conversation-a")
+    refreshed = OrchestratorDashboardSessionArchive(orchestrator_config).list_sessions()
+
+    assert len(refreshed) == 1
+    assert refreshed[0]["display_name"] == "Automatic Session Titles"

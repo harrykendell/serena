@@ -79,6 +79,12 @@ button { font: inherit; }
   min-width: 0;
 }
 
+.brand-marks {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+}
 .brand-mark { flex: 0 0 auto; width: 34px; height: 34px; }
 .brand-copy { min-width: 0; }
 .brand-title,
@@ -619,6 +625,24 @@ button { font: inherit; }
   background: var(--surface);
 }
 
+.activity-widget-entry {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.activity-widget-heading {
+  min-width: 0;
+  padding: 0 4px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: .78rem;
+  font-weight: 600;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .activity-widget-frame {
   display: block;
   width: 100%;
@@ -627,7 +651,30 @@ button { font: inherit; }
   background: transparent;
 }
 
-.activity-section { margin-top: 12px; }
-.orchestrator-section { margin-top: 18px; }
+.activity-workspace {
+  container-name: activity-workspace;
+  container-type: inline-size;
+  margin-top: 12px;
+}
+.activity-view-tabs { display: none; margin-top: 0; }
+.activity-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(500px, 1fr));
+  align-items: start;
+  gap: 12px;
+}
+.activity-section,
+.orchestrator-section {
+  min-width: 0;
+  margin-top: 0;
+}
 .session-widgets { display: grid; gap: 8px; }
 .activity-widget-shell.retained-session { opacity: .88; }
+
+@container activity-workspace (max-width: 1011px) {
+  .activity-view-tabs { display: flex; }
+  .activity-view-tabs .tab-button { flex: 1 1 0; justify-content: center; }
+  .activity-columns { display: block; margin-top: 12px; }
+  .activity-columns[data-active-view="serena"] .orchestrator-section,
+  .activity-columns[data-active-view="orchestrator"] .activity-section { display: none; }
+}

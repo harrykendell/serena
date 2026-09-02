@@ -177,17 +177,23 @@ def test_activity_tracker_uses_semantic_tool_detail_lines() -> None:
             "git_branch",
             {"action": "switch", "name": "mcp-media"},
         ),
+        tracker.start_tool(
+            "conversation-a",
+            "read_file",
+            {"relative_path": "src/serena/activity.py"},
+        ),
     ]
 
     snapshot = tracker.get_run("conversation-a", run["run_id"])
     assert calls == [call["call_id"] for call in snapshot["calls"]]
-    assert [call["detail"] for call in snapshot["calls"]] == [
-        "ActivityTracker.*detail · src/serena",
-        "*.py · src/serena",
-        "ActivityTracker → ActivityStore",
-        "src/serena/activity.py · old value",
-        "Run activity tests · test",
-        "switch · mcp-media",
+    assert [(call["detail"], call.get("scope", "")) for call in snapshot["calls"]] == [
+        ("ActivityTracker.*detail", "src/serena"),
+        ("*.py", "src/serena"),
+        ("ActivityTracker → ActivityStore", "src/serena/activity.py"),
+        ("old value", "src/serena/activity.py"),
+        ("Run activity tests", "test"),
+        ("switch · mcp-media", ""),
+        ("", "src/serena/activity.py"),
     ]
 
 
@@ -208,7 +214,9 @@ def test_activity_tracker_detail_lines_skip_empty_values_and_remain_bounded() ->
 
     snapshot = tracker.get_run("conversation-a", run["run_id"])
     assert snapshot["calls"][0]["detail"] == "x" * 177 + "..."
+    assert snapshot["calls"][0].get("scope", "") == ""
     assert snapshot["calls"][1]["detail"] == "ActivityTracker"
+    assert snapshot["calls"][1].get("scope", "") == ""
 
 
 def test_activity_tracker_exposes_tool_detail_on_demand() -> None:
@@ -416,6 +424,9 @@ def test_activity_resource_uses_mcp_app_contract() -> None:
     assert 'window.openai.callTool("get_activity_job_detail"' in content.content
     assert 'id="activity-logo" class="logo"' in content.content
     assert 'id="activity-header-tool">Waiting for activity</strong>' in content.content
+    assert 'id="activity-header-scope" class="header-scope"' in content.content
+    assert 'toolName.className = "tool-name"' in content.content
+    assert 'scope.className = "scope"' in content.content
     assert 'id="activity-header-submitted" class="header-submitted"' in content.content
     assert 'id="activity-header-elapsed" class="summary"' in content.content
     assert 'id="activity-header-stats" class="header-stats">0 tools · 0 jobs</span>' in content.content

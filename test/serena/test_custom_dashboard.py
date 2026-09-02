@@ -8,6 +8,8 @@ from mcp.server.fastmcp import Image
 from mcp.types import ResourceLink
 from pydantic import AnyUrl
 
+from orchestrator.config import OrchestratorConfig
+from orchestrator.dashboard_sessions import OrchestratorDashboardSessionArchive
 from serena.custom_dashboard import DashboardExecutionHistory, DashboardJobOverview
 from serena.dashboard import SerenaDashboardAPI
 from serena.jobs import JobPersistenceInfo, JobRecord, JobRuntimeInfo, JobSnapshot, JobStatus
@@ -130,7 +132,9 @@ def test_custom_dashboard_serves_fork_specific_frontend_and_session_api(tmp_path
     assert redirect.status_code == 302
     assert redirect.headers["Location"] == "/dashboard/"
     assert response.status_code == 200
-    assert b"Agent dashboard" in response.data
+    assert b"Serena + Orchestrator" in response.data
+    assert b"MCP dashboard" in response.data
+    assert b"orchestrator-logo.svg" in response.data
     assert b"One retained activity panel for each ChatGPT conversation" in response.data
     assert b"serena-widgets" in response.data
     assert b"Orchestrator" in response.data
@@ -141,6 +145,83 @@ def test_custom_dashboard_serves_fork_specific_frontend_and_session_api(tmp_path
     assert orchestrator == {"status": "success", "panels": []}
     assert session["status"] == "success"
     assert session["context"] == "chatgpt"
+
+
+def test_custom_dashboard_can_name_retained_serena_conversation_before_first_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
+    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
+    log_handler = _DummyMemoryLogHandler()
+    dashboard = SerenaDashboardAPI(
+        memory_log_handler=log_handler,
+        tool_names=[],
+        agent=_DashboardAgent(),
+        tool_usage_stats=None,
+    )
+    client = dashboard._app.test_client()
+
+    assert dashboard.set_serena_session_name("session-a", "Dashboard naming") == "Dashboard naming"
+    overview = client.get("/dashboard/api/serena").get_json()
+
+    assert len(overview["panels"]) == 1
+    assert overview["panels"][0]["display_name"] == "Dashboard naming"
+
+
+def test_custom_dashboard_shows_named_orchestrator_conversation_before_first_delegate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retained Orchestrator session metadata creates a named dashboard panel before delegation starts."""
+    orchestrator_root = tmp_path / "orchestrator-home"
+    monkeypatch.setenv("ORCHESTRATOR_HOME", str(orchestrator_root))
+    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
+    config = OrchestratorConfig.from_environment(orchestrator_root)
+    OrchestratorDashboardSessionArchive(config).set_display_name("session-a", "Automatic Session Titles")
+
+    dashboard = SerenaDashboardAPI(
+        memory_log_handler=_DummyMemoryLogHandler(),
+        tool_names=[],
+        agent=_DashboardAgent(),
+        tool_usage_stats=None,
+    )
+    overview = dashboard._app.test_client().get("/dashboard/api/orchestrator").get_json()
+
+    assert len(overview["panels"]) == 1
+    panel = overview["panels"][0]
+    assert panel["display_name"] == "Automatic Session Titles"
+    assert panel["delegates"] == []
+
+
+def test_retained_serena_panel_preserves_semantic_detail_and_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
+    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
+    log_handler = _DummyMemoryLogHandler()
+    dashboard = SerenaDashboardAPI(
+        memory_log_handler=log_handler,
+        tool_names=[],
+        agent=_DashboardAgent(),
+        tool_usage_stats=None,
+    )
+    client = dashboard._app.test_client()
+
+    log_handler.emit_message(
+        "INFO [Task-1:SearchForPatternTool] serena.tools.tools_base:_log_tool_application:291 - "
+        "search_for_pattern: substring_pattern='ActivityTracker.*detail', relative_path='src/serena'; "
+        "project: serena; session_id: session-a"
+    )
+    log_handler.emit_message(
+        "INFO [Task-2:ReplaceInFilesTool] serena.tools.tools_base:_log_tool_application:291 - "
+        "replace_in_files: needle='old value', repl='new value', mode='literal', relative_path='src/serena'; "
+        "project: serena; session_id: session-a"
+    )
+
+    overview = client.get("/dashboard/api/serena").get_json()
+    panel_id = overview["panels"][0]["panel_id"]
+    panel = client.get(f"/dashboard/api/serena/panels/{panel_id}").get_json()
+
+    calls = {call["tool_name"]: call for call in panel["calls"]}
+    assert calls["search_for_pattern"]["detail"] == "ActivityTracker.*detail"
+    assert calls["search_for_pattern"]["scope"] == "src/serena"
+    assert calls["replace_in_files"]["detail"] == "old value"
+    assert calls["replace_in_files"]["scope"] == "src/serena"
 
 
 def test_custom_dashboard_uses_default_project_and_dynamic_languages() -> None:

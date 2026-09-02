@@ -80,6 +80,11 @@ class OrchestratorConfig:
         return self.state_root / "provider-state"
 
     @property
+    def dashboard_sessions_dir(self) -> Path:
+        """Returns the directory reserved for retained dashboard session metadata."""
+        return self.state_root / "dashboard-sessions"
+
+    @property
     def codex_logs_dir(self) -> Path:
         """Returns the directory reserved for private Codex provider logs."""
         return self.logs_dir / "providers" / "codex"
@@ -92,6 +97,7 @@ class OrchestratorConfig:
             self.logs_dir,
             self.worktrees_dir,
             self.provider_state_dir,
+            self.dashboard_sessions_dir,
             self.codex_logs_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)

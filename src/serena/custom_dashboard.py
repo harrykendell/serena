@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import base64
 import re
 import threading
@@ -16,7 +15,9 @@ from flask import Flask, Response, abort, request
 from mcp.server.fastmcp import Audio, Image
 
 from orchestrator.config import OrchestratorConfig
+from orchestrator.dashboard_sessions import OrchestratorDashboardSessionArchive
 from orchestrator.delegates import DelegateError, DelegateStore
+from serena.activity import ActivityDetailFormatter
 from serena.dashboard_activity import DashboardActivityArchive
 from serena.dashboard_widgets import orchestrator_dashboard_widget_html, serena_dashboard_widget_html
 from serena.jobs import JobManager, JobStatus
@@ -40,29 +41,6 @@ _TOOL_RESULT_RE = re.compile(rf"\[(?P<task>{_TASK_THREAD_PATTERN})\].*? - Result
 _TOOL_ERROR_RE = re.compile(rf"^ERROR.*?\[(?P<task>{_TASK_THREAD_PATTERN})\].*? - (?P<error>.*)$", re.DOTALL)
 _INTERNAL_SESSION_PARAM_RE = re.compile(r",?\s*session_id=(?:'[^']*'|\"[^\"]*\")\s*$")
 _EPHEMERAL_DOWNLOAD_URL_RE = re.compile(r"download_url=(?:'[^']*'|\"[^\"]*\")")
-_EXECUTION_DETAIL_KEYS = ("command", "project", "relative_path", "memory_name", "name_path_pattern", "job_id", "message")
-
-
-def _execution_detail(parameters: str | None) -> str:
-    """Returns one concise primary argument for a tool execution."""
-    if not parameters:
-        return ""
-    try:
-        expression = ast.parse(f"_tool({parameters})", mode="eval").body
-        if isinstance(expression, ast.Call):
-            by_name = {keyword.arg: keyword.value for keyword in expression.keywords if keyword.arg is not None}
-            for key in _EXECUTION_DETAIL_KEYS:
-                node = by_name.get(key)
-                if node is None:
-                    continue
-                value = ast.literal_eval(node)
-                if isinstance(value, str | int | float | bool):
-                    detail = " ".join(str(value).split())
-                    return detail[:177] + "..." if len(detail) > 180 else detail
-    except (SyntaxError, ValueError):
-        pass
-    detail = " ".join(parameters.split())
-    return detail[:177] + "..." if len(detail) > 180 else detail
 
 
 def _bounded(value: str) -> str:
@@ -104,7 +82,8 @@ class DashboardExecutionHistory:
         self._completed: list[TaskExecutor.TaskInfo] = []
         self._last_captured_future: object | None = None
         self._metadata_by_task_name: dict[str, dict[str, str]] = {}
-        self._activity_archive = activity_archive or DashboardActivityArchive()
+        self._activity_archive = activity_archive
+        self._activity_formatter = ActivityDetailFormatter()
         self._agent.register_config_changed_callback(self._capture_last_execution)
         add_emit_callback = getattr(memory_log_handler, "add_emit_callback", None)
         if callable(add_emit_callback):
@@ -173,24 +152,32 @@ class DashboardExecutionHistory:
         start_match = _TOOL_START_RE.search(message)
         if start_match is not None:
             task_name = start_match.group("task")
+            tool_name = _execution_tool_name(task_name)
             parameters = _INTERNAL_SESSION_PARAM_RE.sub("", start_match.group("parameters").strip())
             parameters = _EPHEMERAL_DOWNLOAD_URL_RE.sub("download_url='<ephemeral>'", parameters)
             project = start_match.group("project")
             session_id = start_match.group("session_id")
+            summary = self._activity_formatter.format_parameters(tool_name, parameters)
+
+            # retain the complete dashboard execution metadata independently of the compact activity summary
             with self._lock:
                 metadata = self._metadata_by_task_name.setdefault(task_name, {})
                 metadata["parameters"] = _bounded(parameters)
                 if project:
                     metadata["project"] = project
                 metadata["session_id"] = session_id
-            self._activity_archive.record_start(
-                task_name=task_name,
-                session_id=session_id,
-                tool_name=_execution_tool_name(task_name),
-                parameters=_bounded(parameters),
-                detail=_execution_detail(parameters),
-                project_name=project,
-            )
+
+            # persist the same semantic detail/scope pair used by the inline ChatGPT activity tracker
+            if self._activity_archive is not None:
+                self._activity_archive.record_start(
+                    task_name=task_name,
+                    session_id=session_id,
+                    tool_name=tool_name,
+                    parameters=_bounded(parameters),
+                    detail=summary.detail,
+                    scope=summary.scope,
+                    project_name=project,
+                )
             return
 
         result_match = _TOOL_RESULT_RE.search(message)
@@ -200,7 +187,8 @@ class DashboardExecutionHistory:
             with self._lock:
                 metadata = self._metadata_by_task_name.setdefault(task_name, {})
                 metadata["result"] = result
-            self._activity_archive.record_result(task_name, result=result)
+            if self._activity_archive is not None:
+                self._activity_archive.record_result(task_name, result=result)
             return
 
         error_match = _TOOL_ERROR_RE.search(message)
@@ -210,7 +198,8 @@ class DashboardExecutionHistory:
             with self._lock:
                 metadata = self._metadata_by_task_name.setdefault(task_name, {})
                 metadata["error"] = error
-            self._activity_archive.record_result(task_name, error=error)
+            if self._activity_archive is not None:
+                self._activity_archive.record_result(task_name, error=error)
 
     def _serialize(self, task_info: TaskExecutor.TaskInfo) -> dict[str, Any]:
         """Serializes a task execution and its captured call metadata."""
@@ -230,6 +219,10 @@ class DashboardExecutionHistory:
         started_at = task_info.started_at
         finished_at = task_info.finished_at
         elapsed_seconds = max(0.0, (finished_at or time.time()) - started_at) if started_at is not None else None
+        parameters = metadata.get("parameters")
+        summary = self._activity_formatter.format_parameters(
+            _execution_tool_name(task_info.name), parameters if isinstance(parameters, str) else None
+        )
 
         return {
             "task_id": task_info.task_id,
@@ -238,7 +231,7 @@ class DashboardExecutionHistory:
             "finished_successfully": task_info.finished_successfully(),
             "project": metadata.get("project"),
             "session_id": metadata.get("session_id"),
-            "detail": _execution_detail(metadata.get("parameters")),
+            "detail": summary.detail or summary.scope,
             "submitted_at": task_info.submitted_at,
             "started_at": started_at,
             "finished_at": finished_at,
@@ -499,6 +492,7 @@ class DashboardSerenaActivityOverview:
         self._archive = archive
         self._execution_history = execution_history
         self._job_overview = job_overview
+        self._activity_formatter = ActivityDetailFormatter()
 
     def get_panels(self) -> dict[str, Any]:
         """Returns retained Serena session panels, active sessions first."""
@@ -515,6 +509,7 @@ class DashboardSerenaActivityOverview:
                 {
                     "panel_id": session["panel_id"],
                     "project_name": session.get("project_name") or "",
+                    "display_name": session.get("display_name") or "",
                     "started_at": session.get("started_at"),
                     "updated_at": session.get("updated_at"),
                     "active": active,
@@ -592,13 +587,20 @@ class DashboardSerenaActivityOverview:
                 result.append(str(job_id))
         return result
 
-    @staticmethod
-    def _call_payload(call: dict[str, Any]) -> dict[str, Any]:
+    def _call_payload(self, call: dict[str, Any]) -> dict[str, Any]:
         """Returns one persistent call in the inline-widget list shape."""
+        tool_name = call.get("tool_name") or ""
+        parameters = call.get("parameters")
+        summary = self._activity_formatter.format_parameters(tool_name, parameters if isinstance(parameters, str) else None)
+
+        # re-derive historical entries from retained parameters; fall back to stored fields when parameters are unavailable
+        detail = summary.detail if summary.detail or summary.scope else call.get("detail") or ""
+        scope = summary.scope if summary.detail or summary.scope else call.get("scope") or ""
         return {
             "call_id": call.get("call_id"),
-            "tool_name": call.get("tool_name") or "",
-            "detail": call.get("detail") or "",
+            "tool_name": tool_name,
+            "detail": detail,
+            "scope": scope,
             "status": call.get("status") or "completed",
             "submitted_at": call.get("submitted_at") or call.get("started_at"),
             "started_at": call.get("started_at") or call.get("submitted_at"),
@@ -625,8 +627,13 @@ class DashboardSerenaActivityOverview:
 class DashboardOrchestratorOverview:
     """Provides global read-only Orchestrator activity for the operator dashboard."""
 
-    def __init__(self, delegate_store: DelegateStore | None = None) -> None:
+    def __init__(
+        self,
+        delegate_store: DelegateStore | None = None,
+        session_archive: OrchestratorDashboardSessionArchive | None = None,
+    ) -> None:
         self._delegate_store = delegate_store
+        self._session_archive = session_archive
 
     def _store(self) -> DelegateStore:
         """Returns the shared durable Orchestrator store, creating it only when queried."""
@@ -634,13 +641,42 @@ class DashboardOrchestratorOverview:
             self._delegate_store = DelegateStore(OrchestratorConfig.from_environment())
         return self._delegate_store
 
+    def _sessions(self) -> OrchestratorDashboardSessionArchive:
+        """Returns retained Orchestrator conversation metadata."""
+        if self._session_archive is None:
+            self._session_archive = OrchestratorDashboardSessionArchive(OrchestratorConfig.from_environment())
+        return self._session_archive
+
+    def _panels(self) -> list[dict[str, Any]]:
+        """Merges durable delegate activity with retained conversation metadata."""
+        by_id = {panel["panel_id"]: dict(panel) for panel in self._store().list_dashboard_activity()}
+        for session in self._sessions().list_sessions():
+            panel_id = str(session["panel_id"])
+            panel = by_id.setdefault(
+                panel_id,
+                {
+                    "panel_id": panel_id,
+                    "started_at": session.get("started_at"),
+                    "updated_at": session.get("updated_at"),
+                    "active": False,
+                    "delegates": [],
+                },
+            )
+            panel["display_name"] = session.get("display_name") or ""
+            panel["started_at"] = min(float(panel.get("started_at") or session["started_at"]), float(session["started_at"]))
+            panel["updated_at"] = max(float(panel.get("updated_at") or 0.0), float(session.get("updated_at") or 0.0))
+
+        panels = list(by_id.values())
+        panels.sort(key=lambda panel: (not panel["active"], -float(panel.get("updated_at") or 0.0)))
+        return panels
+
     def get_panels(self) -> dict[str, Any]:
-        """Returns all currently active orchestration panels across sessions."""
-        return {"status": "success", "panels": self._store().list_dashboard_activity()}
+        """Returns retained orchestration panels across ChatGPT sessions."""
+        return {"status": "success", "panels": self._panels()}
 
     def get_panel(self, panel_id: str) -> dict[str, Any]:
-        """Returns one active orchestration panel by its opaque dashboard identifier."""
-        for panel in self._store().list_dashboard_activity():
+        """Returns one retained orchestration panel by its opaque dashboard identifier."""
+        for panel in self._panels():
             if panel["panel_id"] == panel_id:
                 return {
                     "run_id": panel["panel_id"],
@@ -674,6 +710,10 @@ class CustomDashboard:
         )
         self._orchestrator_overview = DashboardOrchestratorOverview()
         self._register_routes(app)
+
+    def set_serena_session_name(self, session_id: str, display_name: str) -> str:
+        """Sets the retained dashboard name for one ChatGPT conversation."""
+        return self._activity_archive.set_display_name(session_id, display_name)
 
     @property
     def static_dir(self) -> Path:

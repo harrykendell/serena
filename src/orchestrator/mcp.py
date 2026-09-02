@@ -15,6 +15,7 @@ from pydantic_settings import SettingsConfigDict
 from orchestrator.activity import ACTIVITY_RESOURCE_URI, OrchestratorActivityTracker, register_activity_resource
 from orchestrator.batches import BatchTaskRequest, CreateDelegateBatchRequest, DelegateBatchError, DelegateBatchStore
 from orchestrator.config import OrchestratorConfig
+from orchestrator.dashboard_sessions import OrchestratorDashboardSessionArchive
 from orchestrator.delegates import CreateDelegateRequest, DelegateError, DelegateKind, DelegateState, DelegateStore, ProviderPolicy
 from orchestrator.guidance import DELEGATION_GUIDE_RESOURCE_URI, register_delegation_guide_resource
 from orchestrator.providers import CodexCliProvider, ProviderRouter
@@ -38,6 +39,7 @@ class OrchestratorMCPFactory:
     def __init__(self, config: OrchestratorConfig | None = None) -> None:
         self._config = config or OrchestratorConfig.from_environment()
         self._delegate_store = DelegateStore(self._config)
+        self._dashboard_sessions = OrchestratorDashboardSessionArchive(self._config)
         self._batch_store = DelegateBatchStore(self._config, self._delegate_store)
         self._providers = ProviderRouter([CodexCliProvider(self._config, self._delegate_store)])
         self._scheduler = AutoFallbackScheduler(self._config, self._delegate_store, self._providers)
@@ -323,8 +325,10 @@ class OrchestratorMCPFactory:
             name="show_orchestrator_activity",
             title="Show Orchestrator Activity",
             description=(
-                "Shows a compact live Orchestrator delegate panel for this ChatGPT session. "
-                "Call it once before a multi-step delegation workflow."
+                "Shows a compact live Orchestrator delegate panel for this ChatGPT session. Supply conversation_title "
+                "as a concise 3-8 word description of the current ChatGPT conversation, inferred from conversation context; "
+                "refresh it whenever this panel is reopened if the conversation focus has materially changed. Call it once "
+                "before a multi-step delegation workflow."
             ),
             annotations=ToolAnnotations(title="Show Orchestrator Activity", readOnlyHint=True, destructiveHint=False),
             meta={
@@ -336,8 +340,10 @@ class OrchestratorMCPFactory:
             },
             structured_output=True,
         )
-        async def show_orchestrator_activity(mcp_ctx: Context) -> dict[str, Any]:
-            return await asyncio.to_thread(self._activity_tracker.start_run, get_mcp_session_id(mcp_ctx))
+        async def show_orchestrator_activity(conversation_title: str, mcp_ctx: Context) -> dict[str, Any]:
+            session_id = get_mcp_session_id(mcp_ctx)
+            await asyncio.to_thread(self._dashboard_sessions.set_display_name, session_id, conversation_title)
+            return await asyncio.to_thread(self._activity_tracker.start_run, session_id)
 
         @mcp.tool(
             name="get_orchestrator_activity",

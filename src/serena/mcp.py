@@ -418,8 +418,12 @@ class SerenaMCPFactory:
             name="show_activity",
             title="Show Serena Activity",
             description=(
-                "Shows a compact live Serena command panel. Call this once in each multi-step assistant turn, before "
-                "the first substantive Serena tool; do not reuse a panel from an earlier turn or call it for a single quick lookup."
+                "Shows one compact live Serena command panel for a multi-step assistant response. Supply conversation_title "
+                "as a concise 3-8 word description of the current ChatGPT conversation, inferred from the conversation context; "
+                "refresh it whenever this panel is reopened if the conversation focus has materially changed. Call this at most "
+                "once after each user message, before the first substantive Serena tool. If show_activity has already been called "
+                "since the user's latest message, never call it again in that response, including after tool results, progress "
+                "updates, errors, retries, reconnects, or context compaction. Do not call it for a single quick lookup."
             ),
             annotations=ToolAnnotations(title="Show Serena Activity", readOnlyHint=True, destructiveHint=False),
             meta={
@@ -431,10 +435,11 @@ class SerenaMCPFactory:
             },
             structured_output=True,
         )
-        async def show_activity(mcp_ctx: Context) -> dict[str, Any]:
+        async def show_activity(conversation_title: str, mcp_ctx: Context) -> dict[str, Any]:
             session_id = get_mcp_session_id(mcp_ctx)
             project = agent.get_active_project_for_session(session_id)
             project_name = project.project_name if project is not None else ""
+            await asyncio.to_thread(agent.set_dashboard_session_name, session_id, conversation_title)
             return await asyncio.to_thread(self._activity_tracker.start_run, session_id, project_name)
 
         @mcp.tool(

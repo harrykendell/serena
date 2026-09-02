@@ -1,3 +1,4 @@
+import ast
 import json
 import threading
 import time
@@ -26,6 +27,7 @@ class ActivityCall:
     tool_name: str
     detail: str
     started_at: float
+    scope: str = ""
     project_name: str = ""
     arguments: str = field(default="{}", repr=False)
     finished_at: float | None = None
@@ -45,6 +47,8 @@ class ActivityCall:
             "finished_at": self.finished_at,
             "status": self.status,
         }
+        if self.scope:
+            payload["scope"] = self.scope
         if self.job_id is not None:
             payload["job_id"] = self.job_id
         if self.job_label is not None:
@@ -87,8 +91,16 @@ class ActivityJobSource(Protocol):
         ...
 
 
-class _ActivityDetailFormatter:
-    """Builds concise activity detail lines from tool arguments."""
+@dataclass(frozen=True)
+class ActivitySummary:
+    """Concise semantic summary for one activity entry."""
+
+    detail: str = ""
+    scope: str = ""
+
+
+class ActivityDetailFormatter:
+    """Builds concise semantic summaries from tool arguments."""
 
     _MAX_DETAIL_CHARS = 180
     _SUBJECT_KEYS = (
@@ -122,70 +134,132 @@ class _ActivityDetailFormatter:
         "branch",
     )
 
-    def format(self, tool_name: str, arguments: dict[str, Any]) -> str:
-        """Returns the most useful bounded one-line summary for one tool call."""
+    def format(self, tool_name: str, arguments: dict[str, Any]) -> ActivitySummary:
+        """Returns the most useful bounded detail and scope for one tool call."""
         # prefer composites whose meaning cannot be recovered from generic precedence
-        detail = self._format_tool_specific(tool_name, arguments)
-        if detail:
-            return self._bound(detail)
+        summary = self._format_tool_specific(tool_name, arguments)
+        if summary is not None:
+            return self._bound_summary(summary)
 
-        # choose the semantic subject, then append a distinct non-empty scope when available
+        # choose the semantic subject, then separate any distinct scope for top-line display
         subject_key, subject = self._first_scalar(arguments, self._SUBJECT_KEYS)
         if not subject:
-            return ""
+            return ActivitySummary()
         if subject_key in self._SCOPE_KEYS:
-            return self._bound(subject)
+            return self._bound_summary(ActivitySummary(scope=subject))
 
-        _, scope = self._first_scalar(arguments, self._SCOPE_KEYS, excluded_key=subject_key)
-        return self._bound(" · ".join(part for part in (subject, scope) if part))
+        _, scope = self._first_scalar(
+            arguments, self._SCOPE_KEYS, excluded_key=subject_key
+        )
+        return self._bound_summary(ActivitySummary(detail=subject, scope=scope))
 
-    def _format_tool_specific(self, tool_name: str, arguments: dict[str, Any]) -> str:
+    def format_parameters(
+        self, tool_name: str, parameters: str | None
+    ) -> ActivitySummary:
+        """Returns a semantic summary from Serena's logged keyword-argument representation."""
+        if not parameters:
+            return ActivitySummary()
+
+        # parse the logger's Python-like keyword argument representation without evaluating code
+        try:
+            expression = ast.parse(f"_tool({parameters})", mode="eval").body
+            if not isinstance(expression, ast.Call):
+                raise ValueError("tool parameters did not parse as a call")
+            arguments: dict[str, Any] = {}
+            for keyword in expression.keywords:
+                if keyword.arg is None:
+                    continue
+                arguments[keyword.arg] = ast.literal_eval(keyword.value)
+            return self.format(tool_name, arguments)
+        except (SyntaxError, ValueError, TypeError):
+            # preserve a useful bounded fallback for malformed or non-literal historical log entries
+            return ActivitySummary(detail=self._bound(" ".join(parameters.split())))
+
+    def _format_tool_specific(
+        self, tool_name: str, arguments: dict[str, Any]
+    ) -> ActivitySummary | None:
         """Returns a composite summary for tools whose arguments have coupled meaning."""
         if tool_name in {"rename_symbol", "rename_memory"}:
             source_key = "name_path" if tool_name == "rename_symbol" else "old_name"
-            target_key = "new_name"
-            return self._join_scalars(arguments, source_key, target_key, separator=" → ")
+            detail = self._join_scalars(
+                arguments, source_key, "new_name", separator=" → "
+            )
+            scope = (
+                self._scalar(arguments, "relative_path")
+                if tool_name == "rename_symbol"
+                else ""
+            )
+            return ActivitySummary(detail=detail, scope=scope)
 
         if tool_name == "git_branch":
-            return self._join_scalars(arguments, "action", "name")
+            return ActivitySummary(
+                detail=self._join_scalars(arguments, "action", "name")
+            )
         if tool_name == "git_pull":
-            return self._join_scalars(arguments, "remote", "branch")
+            return ActivitySummary(
+                detail=self._scalar(arguments, "branch"),
+                scope=self._scalar(arguments, "remote"),
+            )
         if tool_name == "replace_content":
-            return self._join_scalars(arguments, "relative_path", "needle")
+            return ActivitySummary(
+                detail=self._scalar(arguments, "needle"),
+                scope=self._scalar(arguments, "relative_path"),
+            )
         if tool_name == "render_pdf_page":
-            path = self._scalar(arguments, "relative_path")
             page = self._scalar(arguments, "page")
-            return " · ".join(part for part in (path, f"page {page}" if page else "") if part)
+            return ActivitySummary(
+                detail=f"page {page}" if page else "",
+                scope=self._scalar(arguments, "relative_path"),
+            )
         if tool_name == "read_tool_output":
             output_id = self._scalar(arguments, "output_id")
             if output_id:
                 output_id = f"{output_id[:8]}…" if len(output_id) > 9 else output_id
             offset = self._scalar(arguments, "offset")
-            return " · ".join(part for part in (output_id, f"offset {offset}" if offset and offset != "0" else "") if part)
+            detail = " · ".join(
+                part
+                for part in (
+                    output_id,
+                    f"offset {offset}" if offset and offset != "0" else "",
+                )
+                if part
+            )
+            return ActivitySummary(detail=detail)
         if tool_name == "git_diff":
             return self._format_git_diff(arguments)
-        return ""
+        return None
 
-    def _format_git_diff(self, arguments: dict[str, Any]) -> str:
-        """Returns the selected Git diff scope without exposing unrelated arguments."""
-        parts: list[str] = []
+    def _format_git_diff(self, arguments: dict[str, Any]) -> ActivitySummary:
+        """Returns the selected Git diff scope and staged qualifier."""
+        scope = ""
         paths = arguments.get("paths")
         if isinstance(paths, list):
             clean_paths = [self._clean_scalar(path) for path in paths]
             clean_paths = [path for path in clean_paths if path]
             if clean_paths:
                 visible = clean_paths[:3]
-                path_summary = ", ".join(visible)
+                scope = ", ".join(visible)
                 if len(clean_paths) > len(visible):
-                    path_summary += f" +{len(clean_paths) - len(visible)}"
-                parts.append(path_summary)
-        if arguments.get("staged") is True:
-            parts.append("staged")
-        return " · ".join(parts)
+                    scope += f" +{len(clean_paths) - len(visible)}"
+        detail = "staged" if arguments.get("staged") is True else ""
+        return ActivitySummary(detail=detail, scope=scope)
 
-    def _join_scalars(self, arguments: dict[str, Any], first_key: str, second_key: str, separator: str = " · ") -> str:
+    def _join_scalars(
+        self,
+        arguments: dict[str, Any],
+        first_key: str,
+        second_key: str,
+        separator: str = " · ",
+    ) -> str:
         """Joins two non-empty scalar arguments without introducing placeholder noise."""
-        return separator.join(part for part in (self._scalar(arguments, first_key), self._scalar(arguments, second_key)) if part)
+        return separator.join(
+            part
+            for part in (
+                self._scalar(arguments, first_key),
+                self._scalar(arguments, second_key),
+            )
+            if part
+        )
 
     def _first_scalar(
         self,
@@ -213,11 +287,17 @@ class _ActivityDetailFormatter:
             return ""
         return " ".join(str(value).split()).strip()
 
-    def _bound(self, detail: str) -> str:
-        """Truncates a detail line to the activity panel's established display bound."""
-        if len(detail) <= self._MAX_DETAIL_CHARS:
-            return detail
-        return detail[: self._MAX_DETAIL_CHARS - 3] + "..."
+    def _bound_summary(self, summary: ActivitySummary) -> ActivitySummary:
+        """Truncates each summary component to the activity panel's established display bound."""
+        return ActivitySummary(
+            detail=self._bound(summary.detail), scope=self._bound(summary.scope)
+        )
+
+    def _bound(self, text: str) -> str:
+        """Truncates one summary component to the activity panel's established display bound."""
+        if len(text) <= self._MAX_DETAIL_CHARS:
+            return text
+        return text[: self._MAX_DETAIL_CHARS - 3] + "..."
 
 
 class ActivityTracker:
@@ -242,11 +322,15 @@ class ActivityTracker:
         """
         with self._lock:
             previous_run_id = self._current_run_by_session.get(session_id)
-            previous_run = self._runs.get(previous_run_id) if previous_run_id is not None else None
+            previous_run = (
+                self._runs.get(previous_run_id) if previous_run_id is not None else None
+            )
             continuing_calls: list[ActivityCall] = []
             if previous_run is not None:
                 previous_run.superseded = True
-                continuing_calls = [call for call in previous_run.calls if call.status == "running"]
+                continuing_calls = [
+                    call for call in previous_run.calls if call.status == "running"
+                ]
 
             run = ActivityRun(
                 run_id=uuid.uuid4().hex,
@@ -284,10 +368,12 @@ class ActivityTracker:
             if run is None:
                 return None
 
+            summary = self._summarize_arguments(tool_name, arguments)
             call = ActivityCall(
                 call_id=uuid.uuid4().hex,
                 tool_name=tool_name,
-                detail=self._summarize_arguments(tool_name, arguments),
+                detail=summary.detail,
+                scope=summary.scope,
                 started_at=time.time(),
                 project_name=project_name or run.project_name,
                 arguments=self._serialize_value(arguments),
@@ -312,14 +398,18 @@ class ActivityTracker:
             # collect every panel that retains the carried call
             owners: list[tuple[ActivityRun, ActivityCall]] = []
             for run in self._runs.values():
-                owners.extend((run, call) for call in run.calls if call.call_id == call_id)
+                owners.extend(
+                    (run, call) for call in run.calls if call.call_id == call_id
+                )
             if not owners:
                 return
 
             # update the call lifecycle consistently across old and continuing panels
             status = "completed" if succeeded else "failed"
             finished_at = time.time()
-            serialized_result = self._serialize_value(result) if result is not None else None
+            serialized_result = (
+                self._serialize_value(result) if result is not None else None
+            )
             for _, call in owners:
                 call.status = status
                 call.finished_at = finished_at
@@ -357,13 +447,22 @@ class ActivityTracker:
 
         records = self._list_jobs_safely()
         visible_records = [
-            record for record in records if record.job_id in current_job_ids or (not superseded and record.status is JobStatus.RUNNING)
+            record
+            for record in records
+            if record.job_id in current_job_ids
+            or (not superseded and record.status is JobStatus.RUNNING)
         ]
         visible_records.sort(key=lambda record: record.created_at, reverse=True)
-        payload["jobs"] = [self._job_payload(record) | {"current_turn": record.job_id in current_job_ids} for record in visible_records]
+        payload["jobs"] = [
+            self._job_payload(record)
+            | {"current_turn": record.job_id in current_job_ids}
+            for record in visible_records
+        ]
         return payload
 
-    def get_call_detail(self, session_id: str, run_id: str, call_id: str) -> dict[str, Any]:
+    def get_call_detail(
+        self, session_id: str, run_id: str, call_id: str
+    ) -> dict[str, Any]:
         """Returns bounded parameters and result detail for one call in a session-owned run."""
         with self._lock:
             run = self._runs.get(run_id)
@@ -380,7 +479,9 @@ class ActivityTracker:
                     }
         raise ValueError("Activity call is not available in this run")
 
-    def get_job_detail(self, session_id: str, run_id: str, job_id: str) -> dict[str, Any]:
+    def get_job_detail(
+        self, session_id: str, run_id: str, job_id: str
+    ) -> dict[str, Any]:
         """Returns runtime metadata and bounded output for one job visible in a session-owned run."""
         # validate panel ownership and retained current-turn jobs
         with self._lock:
@@ -393,7 +494,8 @@ class ActivityTracker:
         # admit globally running jobs only while this is the current panel
         if not current_turn:
             visible_background_job = any(
-                record.job_id == job_id and record.status is JobStatus.RUNNING for record in self._list_jobs_safely()
+                record.job_id == job_id and record.status is JobStatus.RUNNING
+                for record in self._list_jobs_safely()
             )
             if superseded or not visible_background_job:
                 raise ValueError("Activity job is not available in this run")
@@ -418,9 +520,15 @@ class ActivityTracker:
             "cpu_seconds": runtime.cpu_seconds,
             "process_count": runtime.process_count,
             "output": output.output if output is not None else "",
-            "output_truncated": output.output_truncated if output is not None else False,
-            "earlier_output_omitted": output.earlier_output_omitted if output is not None else False,
-            "has_earlier_output": output.has_earlier_output if output is not None else False,
+            "output_truncated": output.output_truncated
+            if output is not None
+            else False,
+            "earlier_output_omitted": output.earlier_output_omitted
+            if output is not None
+            else False,
+            "has_earlier_output": output.has_earlier_output
+            if output is not None
+            else False,
             "cursor_reset": output.cursor_reset if output is not None else False,
         }
 
@@ -457,7 +565,9 @@ class ActivityTracker:
             "project": record.project_name or "",
             "status": record.status.value,
             "started_at": datetime.fromisoformat(record.created_at).timestamp(),
-            "finished_at": datetime.fromisoformat(record.finished_at).timestamp() if record.finished_at is not None else None,
+            "finished_at": datetime.fromisoformat(record.finished_at).timestamp()
+            if record.finished_at is not None
+            else None,
         }
 
     @staticmethod
@@ -469,7 +579,11 @@ class ActivityTracker:
                 payload = json.loads(payload)
             except json.JSONDecodeError:
                 return None, None
-        elif isinstance(payload, tuple) and len(payload) == 2 and isinstance(payload[1], dict):
+        elif (
+            isinstance(payload, tuple)
+            and len(payload) == 2
+            and isinstance(payload[1], dict)
+        ):
             payload = payload[1]
         elif not isinstance(payload, dict):
             structured = getattr(payload, "structuredContent", None)
@@ -522,9 +636,11 @@ class ActivityTracker:
         return f"{text[:3900]}\n... detail omitted ...\n{text[-3900:]}"
 
     @staticmethod
-    def _summarize_arguments(tool_name: str, arguments: dict[str, Any]) -> str:
-        """Builds a bounded, low-noise detail string from safe display arguments."""
-        return _ActivityDetailFormatter().format(tool_name, arguments)
+    def _summarize_arguments(
+        tool_name: str, arguments: dict[str, Any]
+    ) -> ActivitySummary:
+        """Builds bounded, low-noise semantic summary fields from safe display arguments."""
+        return ActivityDetailFormatter().format(tool_name, arguments)
 
 
 def register_activity_resource(mcp: FastMCP) -> None:
@@ -558,7 +674,7 @@ def activity_widget_html() -> str:
         </svg>
       </span>
       <span class="header-tool">
-        <strong id="activity-header-tool">Waiting for activity</strong>
+        <span class="header-tool-line"><strong id="activity-header-tool">Waiting for activity</strong><span id="activity-header-scope" class="header-scope"></span></span>
         <span id="activity-header-detail" class="header-detail"></span>
       </span>
       <span class="header-overview">
@@ -576,12 +692,15 @@ def activity_widget_html() -> str:
     <span id="activity-chevron" class="chevron" aria-hidden="true">⌄</span>
   </button>
   <div id="activity-body" class="body" aria-live="polite">
-    <div id="activity-empty" class="empty">Waiting for commands...</div>
-    <ol id="activity-calls" class="calls"></ol>
-    <button id="activity-other-jobs" class="other-jobs" type="button" aria-expanded="false" hidden>
-      <span id="activity-other-jobs-label"></span><span class="other-jobs-chevron" aria-hidden="true">⌄</span>
-    </button>
-    <ol id="activity-background-jobs" class="calls background-jobs"></ol>
+    <div class="body-scroll">
+      <div id="activity-empty" class="empty">Waiting for commands...</div>
+      <ol id="activity-calls" class="calls"></ol>
+      <button id="activity-other-jobs" class="other-jobs" type="button" aria-expanded="false" hidden>
+        <span id="activity-other-jobs-label"></span><span class="other-jobs-chevron" aria-hidden="true">⌄</span>
+      </button>
+      <ol id="activity-background-jobs" class="calls background-jobs"></ol>
+    </div>
+    <div id="activity-resize-handle" class="resize-handle" role="separator" aria-orientation="horizontal" aria-label="Resize Serena activity panel" aria-valuemin="72" aria-valuemax="720" tabindex="0" title="Drag to resize; double-click to reset"></div>
   </div>
 </div>
 <style>
@@ -601,12 +720,18 @@ def activity_widget_html() -> str:
   body { margin: 0; font: 12px/1.35 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: CanvasText; background: transparent; }
   button { font: inherit; }
   .activity { width: 100%; min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+  .resize-handle { height: 7px; cursor: ns-resize; position: relative; touch-action: none; user-select: none; }
+  .resize-handle::before { content: ""; position: absolute; left: 50%; top: 2px; width: 34px; height: 2px; transform: translateX(-50%); border-radius: 999px; background: color-mix(in srgb, CanvasText 22%, transparent); }
+  .resize-handle:hover::before, .resize-handle:focus-visible::before, .activity.resizing .resize-handle::before { background: color-mix(in srgb, #00491e 60%, CanvasText); }
+  .activity.collapsed .resize-handle { display: none; }
   .header { width: 100%; min-height: 42px; display: grid; grid-template-columns: minmax(0, 1fr) auto 12px; gap: 5px; align-items: center; padding: 6px 7px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
   .title { min-width: 0; display: flex; gap: 7px; align-items: center; white-space: nowrap; overflow: hidden; }
   .logo { width: 21px; height: 21px; flex: 0 0 auto; color: #00491e; opacity: .82; }
   .logo svg { display: block; width: 100%; height: 100%; }
   .header-tool, .header-overview { min-width: 0; display: grid; gap: 1px; overflow: hidden; }
-  #activity-header-tool { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .header-tool-line { min-width: 0; display: flex; gap: 5px; align-items: baseline; overflow: hidden; }
+  #activity-header-tool { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .header-scope { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 10.5px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .48; }
   .header-detail, .header-stats { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; line-height: 1.2; opacity: .58; }
   .header-detail { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .header-meta { justify-self: end; min-width: 0; }
@@ -624,7 +749,10 @@ def activity_widget_html() -> str:
   .activity.collapsed.empty-state .header-status { display: inline; }
   .chevron, .other-jobs-chevron { width: 14px; text-align: center; transition: transform .14s ease; opacity: .58; }
   .activity.collapsed .chevron, .other-jobs[aria-expanded="false"] .other-jobs-chevron { transform: rotate(-90deg); }
-  .body { max-height: 202px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent); padding: 3px 7px 6px; }
+  .body { max-height: var(--activity-body-height, 202px); overflow: hidden; border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent); }
+  .body-scroll { max-height: calc(var(--activity-body-height, 202px) - 7px); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 3px 7px 6px; }
+  .activity.resized .body { height: var(--activity-body-height); }
+  .activity.resized .body-scroll { height: calc(var(--activity-body-height) - 7px); }
   .activity.collapsed .body { display: none; }
   .calls { list-style: none; padding: 0; margin: 0; }
   .call { min-width: 0; }
@@ -638,8 +766,10 @@ def activity_widget_html() -> str:
   .call.failed .status, .call.timed_out .status { color: #dc2626; }
   .call.cancelled .status { opacity: .5; }
   .job-entry.running .status { color: #00491e; }
-  .tool { grid-area: tool; min-width: 0; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .job-entry .tool { font-weight: 700; }
+  .tool { grid-area: tool; min-width: 0; display: flex; gap: 5px; align-items: baseline; white-space: nowrap; overflow: hidden; }
+  .tool-name { flex: 0 1 auto; font-weight: 700; }
+  .scope { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; font: 10.5px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .48; }
+  .job-entry .tool-name { font-weight: 700; }
   .detail { grid-area: detail; min-width: 0; margin-top: 1px; font: 10.5px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .58; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 1.25em; }
   .submitted, .elapsed { justify-self: end; white-space: nowrap; font-size: 10.5px; opacity: .52; font-variant-numeric: tabular-nums; }
   .submitted { grid-area: submitted; }
@@ -666,7 +796,8 @@ def activity_widget_html() -> str:
     .header { min-height: 42px; grid-template-columns: minmax(0, 1fr) auto 12px; gap: 5px; padding: 6px 7px; }
     .header-detail { font-size: 10.5px; }
     .summary { font-size: 11px; }
-    .body { max-height: 202px; padding: 3px 7px 6px; }
+    .body { max-height: var(--activity-body-height, 202px); }
+    .body-scroll { padding: 3px 7px 6px; }
     .row-header { grid-template-columns: 15px minmax(0, 1fr) auto 12px; column-gap: 5px; padding: 3px 0; }
     .detail { font-size: 10.5px; }
     .detail-panel { margin-left: 20px; }
@@ -680,7 +811,9 @@ def activity_widget_html() -> str:
 
   const header = document.getElementById("activity-header");
   const body = document.getElementById("activity-body");
+  const resizeHandle = document.getElementById("activity-resize-handle");
   const headerTool = document.getElementById("activity-header-tool");
+  const headerScope = document.getElementById("activity-header-scope");
   const headerDetail = document.getElementById("activity-header-detail");
   const headerStats = document.getElementById("activity-header-stats");
   const headerSubmitted = document.getElementById("activity-header-submitted");
@@ -700,6 +833,68 @@ def activity_widget_html() -> str:
   let clockTimer = null;
   let clockDelay = null;
   let jobDetailTimer = null;
+  const resizeMin = 72;
+  const resizePanelMax = 720;
+
+  function resizeMaxBodyHeight() {
+    const chromeHeight = root.getBoundingClientRect().height - body.getBoundingClientRect().height;
+    return Math.max(resizeMin, Math.floor(resizePanelMax - chromeHeight));
+  }
+
+  function setBodyHeight(height) {
+    const resizeMax = resizeMaxBodyHeight();
+    const bounded = Math.max(resizeMin, Math.min(resizeMax, Math.round(height)));
+    resizeHandle.setAttribute("aria-valuemax", String(resizeMax));
+    root.classList.add("resized");
+    root.style.setProperty("--activity-body-height", `${bounded}px`);
+    resizeHandle.setAttribute("aria-valuenow", String(bounded));
+    window.openai?.notifyIntrinsicHeight?.();
+  }
+
+  function resetBodyHeight() {
+    root.classList.remove("resized");
+    root.style.removeProperty("--activity-body-height");
+    resizeHandle.removeAttribute("aria-valuenow");
+    window.openai?.notifyIntrinsicHeight?.();
+  }
+
+  resizeHandle.addEventListener("pointerdown", event => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = body.getBoundingClientRect().height;
+    root.classList.add("resizing");
+    resizeHandle.setPointerCapture(event.pointerId);
+
+    const move = moveEvent => setBodyHeight(startHeight + moveEvent.clientY - startY);
+    const finish = finishEvent => {
+      root.classList.remove("resizing");
+      resizeHandle.removeEventListener("pointermove", move);
+      resizeHandle.removeEventListener("pointerup", finish);
+      resizeHandle.removeEventListener("pointercancel", finish);
+      if (resizeHandle.hasPointerCapture(finishEvent.pointerId)) resizeHandle.releasePointerCapture(finishEvent.pointerId);
+    };
+    resizeHandle.addEventListener("pointermove", move);
+    resizeHandle.addEventListener("pointerup", finish);
+    resizeHandle.addEventListener("pointercancel", finish);
+  });
+  resizeHandle.addEventListener("dblclick", resetBodyHeight);
+  resizeHandle.addEventListener("keydown", event => {
+    if (event.key === "Home") {
+      event.preventDefault();
+      setBodyHeight(resizeMin);
+      return;
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      setBodyHeight(resizeMaxBodyHeight());
+      return;
+    }
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    const current = body.getBoundingClientRect().height;
+    setBodyHeight(current + (event.key === "ArrowDown" ? 20 : -20));
+  });
 
   function setCollapsed(collapsed) {
     root.classList.toggle("collapsed", collapsed);
@@ -765,6 +960,7 @@ def activity_widget_html() -> str:
       key: `job:${job.job_id}`,
       kind: "job",
       tool_name: "start_job",
+      scope: job.project || "",
       detail: job.label || "background job",
     };
   }
@@ -933,6 +1129,11 @@ def activity_widget_html() -> str:
     status.className = "status";
     const tool = document.createElement("span");
     tool.className = "tool";
+    const toolName = document.createElement("span");
+    toolName.className = "tool-name";
+    const scope = document.createElement("span");
+    scope.className = "scope";
+    tool.append(toolName, scope);
     const detail = document.createElement("span");
     detail.className = "detail";
     const submittedNode = document.createElement("span");
@@ -1028,6 +1229,8 @@ def activity_widget_html() -> str:
       header: rowHeader,
       status,
       tool,
+      toolName,
+      scope,
       detail,
       submitted: submittedNode,
       elapsed: elapsedNode,
@@ -1056,8 +1259,12 @@ def activity_widget_html() -> str:
     row._activityEntry = entry;
     row.className = `call ${entry.status}${isJob ? " job-entry" : ""}`;
     refs.status.textContent = statusIcon(entry.status);
-    refs.tool.textContent = entry.tool_name;
-    refs.tool.title = entry.tool_name;
+    refs.toolName.textContent = entry.tool_name;
+    refs.toolName.title = entry.tool_name;
+    const scopeText = entry.scope || "";
+    refs.scope.textContent = scopeText;
+    refs.scope.title = scopeText;
+    refs.scope.hidden = !scopeText;
     const detailText = entry.detail || "";
     refs.detail.textContent = detailText;
     refs.detail.title = detailText;
@@ -1127,6 +1334,10 @@ def activity_widget_html() -> str:
     const backgroundJobs = otherRunningJobs(next);
 
     headerTool.textContent = activeHeaderEntry?.tool_name || "Waiting for activity";
+    const headerScopeText = activeHeaderEntry?.scope || "";
+    headerScope.textContent = headerScopeText;
+    headerScope.title = headerScopeText;
+    headerScope.hidden = !headerScopeText;
     const headerDetailText = activeHeaderEntry?.detail || "";
     headerDetail.textContent = headerDetailText;
     headerDetail.title = headerDetailText;

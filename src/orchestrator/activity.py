@@ -177,8 +177,11 @@ def activity_widget_html() -> str:
     <span id="activity-chevron" class="chevron" aria-hidden="true">⌄</span>
   </button>
   <div id="activity-body" class="body" aria-live="polite">
-    <div id="activity-empty" class="empty">Waiting for activity...</div>
-    <ol id="activity-delegates" class="delegates"></ol>
+    <div class="body-scroll">
+      <div id="activity-empty" class="empty">Waiting for activity...</div>
+      <ol id="activity-delegates" class="delegates"></ol>
+    </div>
+    <div id="activity-resize-handle" class="resize-handle" role="separator" aria-orientation="horizontal" aria-label="Resize Orchestrator activity panel" aria-valuemin="72" aria-valuemax="720" tabindex="0" title="Drag to resize; double-click to reset"></div>
   </div>
 </div>
 <style>
@@ -187,6 +190,10 @@ def activity_widget_html() -> str:
   body { margin: 0; font: 12px/1.35 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: CanvasText; background: transparent; }
   button { font: inherit; color: inherit; }
   .activity { width: 100%; min-width: 0; }
+  .resize-handle { height: 7px; cursor: ns-resize; position: relative; touch-action: none; user-select: none; }
+  .resize-handle::before { content: ""; position: absolute; left: 50%; top: 2px; width: 34px; height: 2px; transform: translateX(-50%); border-radius: 999px; background: color-mix(in srgb, CanvasText 22%, transparent); }
+  .resize-handle:hover::before, .resize-handle:focus-visible::before, .activity.resizing .resize-handle::before { background: color-mix(in srgb, #00491e 60%, CanvasText); }
+  .activity.collapsed .resize-handle { display: none; }
   .header { width: 100%; min-height: 42px; display: grid; grid-template-columns: minmax(0, 1fr) auto 12px; gap: 5px; align-items: center; padding: 6px 7px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
   .title { min-width: 0; display: flex; gap: 7px; align-items: center; white-space: nowrap; overflow: hidden; }
   .logo { width: 21px; height: 21px; flex: 0 0 auto; color: #00491e; opacity: .82; }
@@ -200,7 +207,10 @@ def activity_widget_html() -> str:
   .chevron { width: 14px; text-align: center; transition: transform .14s ease; opacity: .58; }
   .activity.collapsed .chevron { transform: rotate(-90deg); }
   .activity.collapsed .body { display: none; }
-  .body { max-height: 202px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent); padding: 3px 7px 6px; }
+  .body { max-height: var(--activity-body-height, 202px); overflow: hidden; border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent); }
+  .body-scroll { max-height: calc(var(--activity-body-height, 202px) - 7px); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 3px 7px 6px; }
+  .activity.resized .body { height: var(--activity-body-height); }
+  .activity.resized .body-scroll { height: calc(var(--activity-body-height) - 7px); }
   .empty { padding: 5px 0 2px; opacity: .58; }
   .delegates { list-style: none; margin: 0; padding: 0; }
   .row { min-width: 0; }
@@ -242,6 +252,7 @@ def activity_widget_html() -> str:
 
   const header = document.getElementById("activity-header");
   const body = document.getElementById("activity-body");
+  const resizeHandle = document.getElementById("activity-resize-handle");
   const logo = document.getElementById("activity-logo");
   const count = document.getElementById("activity-count");
   const headerStatus = document.getElementById("activity-header-status");
@@ -251,6 +262,68 @@ def activity_widget_html() -> str:
   const expanded = new Set();
   let state = window.openai?.toolOutput ?? null;
   let timer = null;
+  const resizeMin = 72;
+  const resizePanelMax = 720;
+
+  function resizeMaxBodyHeight() {
+    const chromeHeight = root.getBoundingClientRect().height - body.getBoundingClientRect().height;
+    return Math.max(resizeMin, Math.floor(resizePanelMax - chromeHeight));
+  }
+
+  function setBodyHeight(height) {
+    const resizeMax = resizeMaxBodyHeight();
+    const bounded = Math.max(resizeMin, Math.min(resizeMax, Math.round(height)));
+    resizeHandle.setAttribute("aria-valuemax", String(resizeMax));
+    root.classList.add("resized");
+    root.style.setProperty("--activity-body-height", `${bounded}px`);
+    resizeHandle.setAttribute("aria-valuenow", String(bounded));
+    window.openai?.notifyIntrinsicHeight?.();
+  }
+
+  function resetBodyHeight() {
+    root.classList.remove("resized");
+    root.style.removeProperty("--activity-body-height");
+    resizeHandle.removeAttribute("aria-valuenow");
+    window.openai?.notifyIntrinsicHeight?.();
+  }
+
+  resizeHandle.addEventListener("pointerdown", event => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = body.getBoundingClientRect().height;
+    root.classList.add("resizing");
+    resizeHandle.setPointerCapture(event.pointerId);
+
+    const move = moveEvent => setBodyHeight(startHeight + moveEvent.clientY - startY);
+    const finish = finishEvent => {
+      root.classList.remove("resizing");
+      resizeHandle.removeEventListener("pointermove", move);
+      resizeHandle.removeEventListener("pointerup", finish);
+      resizeHandle.removeEventListener("pointercancel", finish);
+      if (resizeHandle.hasPointerCapture(finishEvent.pointerId)) resizeHandle.releasePointerCapture(finishEvent.pointerId);
+    };
+    resizeHandle.addEventListener("pointermove", move);
+    resizeHandle.addEventListener("pointerup", finish);
+    resizeHandle.addEventListener("pointercancel", finish);
+  });
+  resizeHandle.addEventListener("dblclick", resetBodyHeight);
+  resizeHandle.addEventListener("keydown", event => {
+    if (event.key === "Home") {
+      event.preventDefault();
+      setBodyHeight(resizeMin);
+      return;
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      setBodyHeight(resizeMaxBodyHeight());
+      return;
+    }
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    const current = body.getBoundingClientRect().height;
+    setBodyHeight(current + (event.key === "ArrowDown" ? 20 : -20));
+  });
 
   const activeStates = new Set(["WAITING_FOR_CHAT", "QUEUED", "RUNNING_CHAT", "RUNNING_CODEX"]);
 

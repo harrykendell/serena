@@ -16,6 +16,7 @@ const executionRenderState = {
   snapshot: null,
 };
 let refreshInFlight = false;
+let initialActivityViewSelected = false;
 
 function byId(id) {
   return document.getElementById(id);
@@ -284,6 +285,37 @@ function setupTabs() {
   });
   window.addEventListener("hashchange", () => activateTab(location.hash === "#jobs" ? "jobs" : "tools", false));
   activateTab(location.hash === "#jobs" ? "jobs" : "tools", false);
+}
+
+function activateActivityView(name) {
+  const selected = name === "orchestrator" ? "orchestrator" : "serena";
+  byId("activity-columns").dataset.activeView = selected;
+  document.querySelectorAll("[data-activity-view-tab]").forEach((button) => {
+    const active = button.dataset.activityViewTab === selected;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+}
+
+function isTabbedActivityMode() {
+  return byId("activity-columns")?.getBoundingClientRect().width <= 1011;
+}
+
+function setupActivityViewTabs() {
+  const buttons = Array.from(document.querySelectorAll("[data-activity-view-tab]"));
+  buttons.forEach((button, index) => {
+    button.addEventListener("click", () => activateActivityView(button.dataset.activityViewTab));
+    button.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      const offset = event.key === "ArrowRight" ? 1 : -1;
+      const target = buttons[(index + offset + buttons.length) % buttons.length];
+      target.focus();
+      activateActivityView(target.dataset.activityViewTab);
+    });
+  });
+  activateActivityView("serena");
 }
 
 async function getJson(path) {
@@ -896,17 +928,35 @@ function renderSessionWidgets(containerId, countId, panels, kind) {
     panels,
     panel => panel.panel_id,
     panel => {
+      const entry = makeElement("div", "activity-widget-entry");
+      if (panel.display_name) entry.append(makeElement("div", "activity-widget-heading", panel.display_name));
+
       const shell = makeElement("div", `activity-widget-shell ${panel.active ? "active-session" : "retained-session"}`);
       const frame = document.createElement("iframe");
       frame.className = "activity-widget-frame";
       frame.src = `/dashboard/widget/${kind}/${encodeURIComponent(panel.panel_id)}`;
       frame.title = kind === "serena" ? "Serena session activity" : "Orchestrator activity";
       shell.append(frame);
-      return shell;
+      entry.append(shell);
+      return entry;
     },
-    (shell, panel) => {
-      shell.classList.toggle("active-session", Boolean(panel.active));
-      shell.classList.toggle("retained-session", !panel.active);
+    (entry, panel) => {
+      const shell = entry.querySelector(".activity-widget-shell");
+      if (shell) {
+        shell.classList.toggle("active-session", Boolean(panel.active));
+        shell.classList.toggle("retained-session", !panel.active);
+      }
+
+      let heading = entry.querySelector(".activity-widget-heading");
+      if (panel.display_name) {
+        if (!heading) {
+          heading = makeElement("div", "activity-widget-heading");
+          entry.prepend(heading);
+        }
+        heading.textContent = panel.display_name;
+      } else if (heading) {
+        heading.remove();
+      }
     },
   );
 }
@@ -915,7 +965,7 @@ window.addEventListener("message", event => {
   if (event.origin !== location.origin || event.data?.type !== "serena-activity-height") return;
   const frame = Array.from(document.querySelectorAll(".activity-widget-frame")).find(candidate => candidate.contentWindow === event.source);
   if (!frame) return;
-  const height = Math.max(42, Math.min(270, Number(event.data.height) || 42));
+  const height = Math.max(42, Math.min(720, Number(event.data.height) || 42));
   frame.style.height = `${height}px`;
 });
 
@@ -945,6 +995,12 @@ async function refresh() {
     renderOverview(session);
     renderSessionWidgets("serena-widgets", "serena-panel-count", serena.panels || [], "serena");
     renderSessionWidgets("orchestrator-widgets", "orchestrator-panel-count", orchestrator.panels || [], "orchestrator");
+
+    if (!initialActivityViewSelected) {
+      const orchestratorActive = (orchestrator.panels || []).some(panel => panel.active);
+      if (isTabbedActivityMode() && orchestratorActive) activateActivityView("orchestrator");
+      initialActivityViewSelected = true;
+    }
   } catch (error) {
     console.error("Dashboard render failed", error);
     setConnection("error", "UI error");
@@ -955,5 +1011,6 @@ async function refresh() {
 
 setupResourceDialog();
 setupMemoryDialog();
+setupActivityViewTabs();
 refresh();
 setInterval(refresh, POLL_INTERVAL_MS);

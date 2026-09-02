@@ -630,6 +630,7 @@ class SerenaAgent:
         self._project_activation_error: str | None = project_activation_error
         self._gui_log_viewer: Optional["GuiLogViewer"] = None
         self._dashboard_manager: DashboardManager | None = None
+        self._dashboard_api: SerenaDashboardAPI | None = None
         self._tool_output_store = ToolOutputStore()
         self._project_prompt_status = ProjectPromptProvisionStatus()
         self._session_mode_selection_definition = modes
@@ -765,6 +766,7 @@ class SerenaAgent:
                 trusted_hosts=self.serena_config.web_dashboard_trusted_hosts,
                 port=web_dashboard_port,
             )
+            self._dashboard_api = dashboard_api
 
         # propagate the initial config/state to listeners, particularly to the dashboard API.
         # Note: The only ongoing task can be the LS initialisation, which does not change the config
@@ -1026,6 +1028,12 @@ class SerenaAgent:
         if self._dashboard_manager is None:
             return None
         return self._dashboard_manager.url
+
+    def set_dashboard_session_name(self, session_id: str, display_name: str) -> str | None:
+        """Sets the retained dashboard name for one ChatGPT conversation when available."""
+        if self._dashboard_api is None:
+            return None
+        return self._dashboard_api.set_serena_session_name(session_id, display_name)
 
     def open_dashboard(self) -> bool:
         """

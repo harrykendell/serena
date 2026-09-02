@@ -231,6 +231,10 @@ class SerenaDashboardAPI:
         # * determine if a newer Serena version is available
         threading.Thread(target=self._determine_newer_serena_version, daemon=True).start()
 
+    def set_serena_session_name(self, session_id: str, display_name: str) -> str:
+        """Sets the retained dashboard name for one ChatGPT conversation."""
+        return self._custom_dashboard.set_serena_session_name(session_id, display_name)
+
     @property
     def memory_log_handler(self) -> MemoryLogHandler:
         return self._memory_log_handler
