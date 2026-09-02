@@ -752,6 +752,8 @@ class LanguageServerSymbolRetriever:
             PHP language server rather than being rejected by all LSes via is_ignored_path.
             """
             lang_servers: Iterable[SolidLanguageServer] = [self._ls_manager.get_language_server(within_relative_path)]
+        elif within_relative_path:
+            lang_servers = self._ls_manager.ensure_language_servers_for_path(within_relative_path)
         else:
             lang_servers = self._ls_manager.ensure_all_language_servers()
         for lang_server in lang_servers:

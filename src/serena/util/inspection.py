@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import TypeVar
 
@@ -50,6 +50,22 @@ def _preferred_language_server_for_filename(filename: str, matchers: dict[Langua
         (language for language, matcher in matchers.items() if matcher.is_relevant_filename(filename)),
         None,
     )
+
+
+def detect_language_servers_for_files(file_paths: Iterable[str | Path], ls_ids: list[LanguageServerId]) -> list[LanguageServerId]:
+    """Returns preferred language servers represented by ``file_paths`` in precedence order.
+
+    :param file_paths: source-file paths whose basenames shall be inspected
+    :param ls_ids: ordered candidate language servers
+    :return: candidate language servers that own at least one provided file
+    """
+    matchers = {language: language.get_source_fn_matcher() for language in ls_ids}
+    detected: set[LanguageServerId] = set()
+    for file_path in file_paths:
+        language = _preferred_language_server_for_filename(Path(file_path).name, matchers)
+        if language is not None:
+            detected.add(language)
+    return [language for language in ls_ids if language in detected]
 
 
 def compute_language_server_support_composition(

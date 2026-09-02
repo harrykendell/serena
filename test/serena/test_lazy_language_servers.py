@@ -48,8 +48,11 @@ class _FakeProject:
     def determine_language_server_candidates(self) -> list[LanguageServerId]:
         return list(self._candidates)
 
-    def gather_source_files(self) -> list[str]:
-        return []
+    def gather_source_files(self, relative_path: str = "") -> list[str]:
+        root = Path(self.project_root) / relative_path
+        if root.is_file():
+            return [relative_path]
+        return [str(path.relative_to(self.project_root)) for path in root.rglob("*") if path.is_file()]
 
 
 def test_web_languages_are_auto_detected_without_explicit_configuration(tmp_path: Path) -> None:
@@ -93,6 +96,41 @@ def test_language_server_starts_lazily_and_is_reused(tmp_path: Path) -> None:
 
         assert first is second
         assert len(factory.created) == 1
+    finally:
+        manager.stop_all()
+
+
+def test_directory_scope_starts_only_relevant_language_servers(tmp_path: Path) -> None:
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "module.py").write_text("value = 1\n")
+    (tmp_path / "flake.nix").write_text("{}\n")
+    factory = _FakeFactory()
+    project = _FakeProject(tmp_path, [LanguageServerId.PYTHON, LanguageServerId.NIX])
+    manager = LanguageServerManager.lazy([LanguageServerId.PYTHON, LanguageServerId.NIX], factory, project, idle_timeout=0)
+
+    try:
+        servers = manager.ensure_language_servers_for_path("src")
+
+        assert [server.ls_id for server in servers] == [LanguageServerId.PYTHON]
+        assert [server.ls_id for server in factory.created] == [LanguageServerId.PYTHON]
+    finally:
+        manager.stop_all()
+
+
+def test_directory_scope_starts_each_language_present_in_subtree(tmp_path: Path) -> None:
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "module.py").write_text("value = 1\n")
+    (src_dir / "shell.nix").write_text("{}\n")
+    factory = _FakeFactory()
+    project = _FakeProject(tmp_path, [LanguageServerId.PYTHON, LanguageServerId.NIX])
+    manager = LanguageServerManager.lazy([LanguageServerId.PYTHON, LanguageServerId.NIX], factory, project, idle_timeout=0)
+
+    try:
+        servers = manager.ensure_language_servers_for_path("src")
+
+        assert [server.ls_id for server in servers] == [LanguageServerId.PYTHON, LanguageServerId.NIX]
     finally:
         manager.stop_all()
 

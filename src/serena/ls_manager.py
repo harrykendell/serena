@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from sensai.util.logging import LogTime
 
 from serena.config.serena_config import ProjectConfig, SerenaPaths
+from serena.util.inspection import detect_language_servers_for_files
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.lsp_protocol_handler.lsp_types import DidChangeWatchedFilesParams, FileChangeType, FileEvent
@@ -240,9 +241,23 @@ class LanguageServerManager:
             ls_id = self._candidate_languages[0]
         return self._ensure_language_server(ls_id)
 
+    def ensure_language_servers_for_path(self, relative_path: str) -> list[SolidLanguageServer]:
+        """Starts language servers required for a directory-scoped semantic query.
+
+        :param relative_path: project-relative directory whose source files define the required servers
+        :return: running language servers relevant to the requested subtree
+        """
+        source_files = self._project.gather_source_files(relative_path=relative_path)
+        candidate_languages = detect_language_servers_for_files(source_files, self._candidate_languages)
+
+        if not candidate_languages and source_files:
+            self._refresh_candidates()
+            candidate_languages = detect_language_servers_for_files(source_files, self._candidate_languages)
+
+        return [self._ensure_language_server(ls_id) for ls_id in candidate_languages]
+
     def ensure_all_language_servers(self) -> list[SolidLanguageServer]:
-        """Starts and returns every candidate server required for complete project-wide semantic queries."""
-        self._refresh_candidates()
+        """Starts and returns every known candidate server for complete project-wide semantic queries."""
         return [self._ensure_language_server(ls_id) for ls_id in self._candidate_languages]
 
     def restart_language_server(self, language: LanguageServerId) -> SolidLanguageServer:
