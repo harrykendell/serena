@@ -123,6 +123,7 @@ def _config(
 ) -> OrchestratorConfig:
     return OrchestratorConfig(
         state_root=(tmp_path / "orchestrator-home").resolve(),
+        codex_enabled=True,
         codex_executable=str(executable),
         codex_concurrency=concurrency,
         codex_timeout_seconds=timeout,
@@ -206,6 +207,7 @@ def test_codex_provider_resolves_executable_from_user_shell_path(monkeypatch, tm
     monkeypatch.setattr("orchestrator.providers.user_shell_environment", lambda: environment)
     config = OrchestratorConfig(
         state_root=(tmp_path / "orchestrator-home").resolve(),
+        codex_enabled=True,
         codex_executable="codex",
         codex_concurrency=1,
         codex_timeout_seconds=3.0,

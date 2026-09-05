@@ -233,13 +233,7 @@ def activity_widget_html() -> str:
   .audit { margin-top: 5px; max-height: 90px; overflow: auto; white-space: pre-wrap; font: 10.5px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .72; }
   .row-actions { margin: 1px 0 5px 20px; display: flex; align-items: stretch; gap: 6px; }
   .row-actions[hidden] { display: none; }
-  .copy-action, .fallback-action { border: 1px solid color-mix(in srgb, CanvasText 14%, transparent); background: transparent; border-radius: 5px; padding: 4px 7px; cursor: pointer; font-size: 10.5px; }
-  .copy-action { flex: 0 0 auto; }
-  .fallback-action { position: relative; flex: 1 1 auto; min-width: 145px; overflow: hidden; text-align: left; }
-  .fallback-action[hidden] { display: none; }
-  .fallback-action:disabled { cursor: default; opacity: .65; }
-  .fallback-progress { position: absolute; inset: 0 auto 0 0; width: 100%; background: color-mix(in srgb, #00491e 9%, transparent); pointer-events: none; }
-  .fallback-label { position: relative; z-index: 1; }
+  .copy-action { flex: 0 0 auto; border: 1px solid color-mix(in srgb, CanvasText 14%, transparent); background: transparent; border-radius: 5px; padding: 4px 7px; cursor: pointer; font-size: 10.5px; }
   @keyframes pulse { 50% { opacity: .28; } }
   @media (prefers-color-scheme: dark) { .logo { color: #70c990; } .header-status.running, .row.running .status { color: #70c990; } }
   @media (prefers-reduced-motion: reduce) { .row.running .status { animation: none; } .chevron { transition: none; } }
@@ -420,51 +414,12 @@ def activity_widget_html() -> str:
     }
   }
 
-  function fallbackTiming(item) {
-    const created = Date.parse(item.created_at || "");
-    const deadline = Date.parse(item.claim_deadline || "");
-    if (!Number.isFinite(created) || !Number.isFinite(deadline) || deadline <= created) return null;
-    const totalMs = deadline - created;
-    const remainingMs = Math.max(0, deadline - Date.now());
-    return { remainingMs, fraction: Math.min(1, remainingMs / totalMs) };
-  }
-
-  function formatRemaining(milliseconds) {
-    const seconds = Math.max(0, Math.ceil(milliseconds / 1000));
-    if (seconds < 60) return `${seconds}s`;
-    return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-  }
-
-  async function useCodexNow(item, button) {
-    if (!window.openai?.callTool || item.state !== "WAITING_FOR_CHAT") return;
-    button.disabled = true;
-    const labelNode = button.querySelector(".fallback-label");
-    if (labelNode) labelNode.textContent = "Starting Codex...";
-    try {
-      const result = await window.openai.callTool("delegate_reroute", { delegate_id: item.delegate_id, provider_policy: "codex" });
-      const nextItem = result?.structuredContent ?? result?.structured_content ?? result;
-      if (nextItem?.delegate_id !== item.delegate_id) throw new Error("Mismatched delegate reroute");
-    } catch (_) {
-      button.disabled = false;
-      if (labelNode) labelNode.textContent = "Use Codex now";
-    }
-  }
-
   function updateRowActions(item, refs) {
     const waiting = item.state === "WAITING_FOR_CHAT";
     refs.actions.hidden = !waiting;
     if (!waiting) return;
 
     refs.copyAction.textContent = "Copy launch prompt";
-    refs.fallbackAction.hidden = item.provider_policy !== "auto" || !item.claim_deadline;
-    if (refs.fallbackAction.hidden) return;
-
-    const timing = fallbackTiming(item);
-    refs.fallbackAction.disabled = false;
-    refs.fallbackProgress.style.width = `${(timing?.fraction ?? 0) * 100}%`;
-    refs.fallbackLabel.textContent = timing
-      ? `Use Codex now · auto in ${formatRemaining(timing.remainingMs)}`
-      : "Use Codex now";
   }
 
   async function loadDetail(item, detail) {
@@ -538,15 +493,11 @@ def activity_widget_html() -> str:
         const metaNode = document.createElement("span"); metaNode.className = "meta";
         const actions = document.createElement("div"); actions.className = "row-actions"; actions.hidden = true;
         const copyAction = document.createElement("button"); copyAction.className = "copy-action"; copyAction.type = "button";
-        const fallbackAction = document.createElement("button"); fallbackAction.className = "fallback-action"; fallbackAction.type = "button"; fallbackAction.hidden = true;
-        const fallbackProgress = document.createElement("span"); fallbackProgress.className = "fallback-progress";
-        const fallbackLabel = document.createElement("span"); fallbackLabel.className = "fallback-label";
-        fallbackAction.append(fallbackProgress, fallbackLabel); actions.append(copyAction, fallbackAction);
+        actions.append(copyAction);
         const detail = document.createElement("div"); detail.className = "detail"; detail.hidden = true;
         button.append(status, labelNode, submittedNode, elapsedNode, metaNode); row.append(button, actions, detail);
-        row._refs = { status, labelNode, submittedNode, elapsedNode, metaNode, actions, copyAction, fallbackAction, fallbackProgress, fallbackLabel, detail };
+        row._refs = { status, labelNode, submittedNode, elapsedNode, metaNode, actions, copyAction, detail };
         copyAction.addEventListener("click", event => { event.stopPropagation(); copyLaunchPrompt(row._item, copyAction); });
-        fallbackAction.addEventListener("click", event => { event.stopPropagation(); useCodexNow(row._item, fallbackAction); });
         button.addEventListener("click", () => {
           const isOpen = expanded.has(item.delegate_id);
           if (isOpen) { expanded.delete(item.delegate_id); detail.hidden = true; }

@@ -18,7 +18,7 @@ from orchestrator.config import OrchestratorConfig
 from orchestrator.dashboard_sessions import OrchestratorDashboardSessionArchive
 from orchestrator.delegates import CreateDelegateRequest, DelegateError, DelegateKind, DelegateState, DelegateStore, ProviderPolicy
 from orchestrator.guidance import DELEGATION_GUIDE_RESOURCE_URI, register_delegation_guide_resource
-from orchestrator.providers import CodexCliProvider, ProviderRouter
+from orchestrator.providers import CodexCliProvider, DelegateProvider, ProviderRouter
 from orchestrator.scheduler import AutoFallbackScheduler
 from orchestrator.session import get_mcp_session_id
 
@@ -41,8 +41,11 @@ class OrchestratorMCPFactory:
         self._delegate_store = DelegateStore(self._config)
         self._dashboard_sessions = OrchestratorDashboardSessionArchive(self._config)
         self._batch_store = DelegateBatchStore(self._config, self._delegate_store)
-        self._providers = ProviderRouter([CodexCliProvider(self._config, self._delegate_store)])
-        self._scheduler = AutoFallbackScheduler(self._config, self._delegate_store, self._providers)
+        providers: list[DelegateProvider] = []
+        if self._config.codex_enabled:
+            providers.append(CodexCliProvider(self._config, self._delegate_store))
+        self._providers = ProviderRouter(providers)
+        self._scheduler = AutoFallbackScheduler(self._config, self._delegate_store, self._providers) if self._config.codex_enabled else None
         self._activity_tracker = OrchestratorActivityTracker(self._delegate_store)
 
     @property
@@ -52,7 +55,8 @@ class OrchestratorMCPFactory:
 
     def close(self) -> None:
         """Stops Orchestrator-owned background scheduling for this factory."""
-        self._scheduler.close()
+        if self._scheduler is not None:
+            self._scheduler.close()
 
     def create_mcp_server(
         self,
@@ -77,10 +81,9 @@ class OrchestratorMCPFactory:
             port=port,
             streamable_http_path=streamable_http_path,
             instructions=(
-                "Orchestrator is an independent delegation service. "
-                "Use it for bounded ChatGPT/Codex delegation and provider lifecycle, not Serena coding/project/jobs tools. "
-                "Repository edits through Serena are live in the active project checkout; modifying Codex delegates always run "
-                "in Orchestrator-isolated Git worktrees and never in Serena's live checkout. "
+                "Orchestrator is an independent delegation service for bounded human-run ChatGPT delegates. "
+                "Codex execution and automatic provider fallback are currently disabled. "
+                "Use Serena separately for coding/project/jobs work inside each worker Chat. "
                 f"Read {DELEGATION_GUIDE_RESOURCE_URI} for route selection and hand-off examples."
             ),
         )
@@ -109,17 +112,15 @@ class OrchestratorMCPFactory:
             return asdict(info)
 
     def _register_delegate_tools(self, mcp: FastMCP) -> None:
-        """Registers the bounded ChatGPT/Codex delegate lifecycle surface."""
+        """Registers the bounded human-run ChatGPT delegate lifecycle surface."""
 
         @mcp.tool(
             name="create_delegate",
             title="Create Delegate",
             description=(
-                "Creates a bounded delegate. provider_policy=chat returns a one-line fresh-chat claim prompt; "
-                "provider_policy=codex queues unattended Codex execution; provider_policy=auto waits for ChatGPT "
-                "until the configured claim deadline, then safely falls back to Codex when policy allows. "
-                "If the task modifies code, Serena-backed ChatGPT work edits the live checkout while any Codex execution "
-                "uses an Orchestrator-isolated Git worktree; never route modifying Codex into the live checkout."
+                "Creates a bounded delegate for a human-run ChatGPT worker. Use provider_policy=chat; Codex execution "
+                "and automatic fallback are currently disabled. If the task modifies code, the worker should use Serena "
+                "in its own ChatGPT conversation, which edits the active project's live checkout."
             ),
         )
         def create_delegate(
@@ -140,6 +141,11 @@ class OrchestratorMCPFactory:
         ) -> dict[str, Any]:
             session_id = get_mcp_session_id(mcp_ctx)
             try:
+                if not self._config.codex_enabled and provider_policy != ProviderPolicy.CHAT:
+                    raise ValueError(
+                        "Codex delegation is currently disabled; use provider_policy=chat and run the returned prompt "
+                        "in a human-run ChatGPT conversation."
+                    )
                 request = CreateDelegateRequest(
                     project_name=project_name,
                     project_root=project_root,
@@ -158,7 +164,7 @@ class OrchestratorMCPFactory:
                 response = self._delegate_store.create(session_id, request)
                 self._activity_tracker.note_delegate(session_id, response.delegate_id)
                 self._providers.start(response.provider_policy, response.delegate_id)
-                if response.provider_policy == ProviderPolicy.AUTO:
+                if response.provider_policy == ProviderPolicy.AUTO and self._scheduler is not None:
                     self._scheduler.notify()
                 return response.model_dump(mode="json")
             except (DelegateError, ValidationError, ValueError) as exc:
@@ -185,6 +191,11 @@ class OrchestratorMCPFactory:
         ) -> dict[str, Any]:
             session_id = get_mcp_session_id(mcp_ctx)
             try:
+                if not self._config.codex_enabled and provider_policy != ProviderPolicy.CHAT:
+                    raise ValueError(
+                        "Codex delegation is currently disabled; use provider_policy=chat and run each returned prompt "
+                        "in a human-run ChatGPT conversation."
+                    )
                 if batch_id is None:
                     if project_name is None or tasks is None:
                         raise DelegateBatchError("Creating a delegate batch requires project_name and tasks.")
@@ -207,7 +218,7 @@ class OrchestratorMCPFactory:
                     self._activity_tracker.note_delegate(session_id, launch.delegate_id)
                     self._providers.start(launch.provider_policy, launch.delegate_id)
                     automatic = automatic or launch.provider_policy == ProviderPolicy.AUTO
-                if automatic:
+                if automatic and self._scheduler is not None:
                     self._scheduler.notify()
                 return response.model_dump(mode="json")
             except (DelegateBatchError, DelegateError, ValidationError, ValueError) as exc:
@@ -230,10 +241,7 @@ class OrchestratorMCPFactory:
         @mcp.tool(
             name="complete_delegate",
             title="Complete Delegate",
-            description=(
-                "Validates and persists the bounded typed result from the ChatGPT session that claimed the delegate. "
-                "Codex delegates complete internally through their provider runner."
-            ),
+            description="Validates and persists the bounded typed result from the ChatGPT session that claimed the delegate.",
         )
         def complete_delegate(delegate_id: str, result: dict[str, Any], mcp_ctx: Context) -> dict[str, Any]:
             session_id = get_mcp_session_id(mcp_ctx)
@@ -272,40 +280,39 @@ class OrchestratorMCPFactory:
             except DelegateError as exc:
                 raise ToolError(str(exc)) from exc
 
-        @mcp.tool(
-            name="delegate_reroute",
-            title="Reroute Delegate",
-            description=(
-                "Explicitly changes the provider policy while a delegate is still waiting for ChatGPT. "
-                "Use codex to start unattended work now, chat to disable fallback, or auto to restart the claim window."
-            ),
-            annotations=ToolAnnotations(title="Reroute Delegate", readOnlyHint=False, destructiveHint=False),
-            meta={
-                "ui": {"visibility": ["model", "app"]},
-                "openai/widgetAccessible": True,
-            },
-            structured_output=True,
-        )
-        def delegate_reroute(delegate_id: str, provider_policy: ProviderPolicy, mcp_ctx: Context) -> dict[str, Any]:
-            session_id = get_mcp_session_id(mcp_ctx)
-            try:
-                response = self._delegate_store.reroute_waiting(delegate_id, session_id, provider_policy)
-                if response.state == DelegateState.QUEUED:
-                    self._providers.start(response.provider_policy, delegate_id)
-                elif response.provider_policy == ProviderPolicy.AUTO:
-                    self._scheduler.notify()
-                self._activity_tracker.note_delegate(session_id, delegate_id)
-                return response.model_dump(mode="json")
-            except DelegateError as exc:
-                raise ToolError(str(exc)) from exc
+        if self._config.codex_enabled:
+
+            @mcp.tool(
+                name="delegate_reroute",
+                title="Reroute Delegate",
+                description=(
+                    "Explicitly changes the provider policy while a delegate is still waiting for ChatGPT. "
+                    "Use codex to start unattended work now, chat to disable fallback, or auto to restart the claim window."
+                ),
+                annotations=ToolAnnotations(title="Reroute Delegate", readOnlyHint=False, destructiveHint=False),
+                meta={
+                    "ui": {"visibility": ["model", "app"]},
+                    "openai/widgetAccessible": True,
+                },
+                structured_output=True,
+            )
+            def delegate_reroute(delegate_id: str, provider_policy: ProviderPolicy, mcp_ctx: Context) -> dict[str, Any]:
+                session_id = get_mcp_session_id(mcp_ctx)
+                try:
+                    response = self._delegate_store.reroute_waiting(delegate_id, session_id, provider_policy)
+                    if response.state == DelegateState.QUEUED:
+                        self._providers.start(response.provider_policy, delegate_id)
+                    elif response.provider_policy == ProviderPolicy.AUTO and self._scheduler is not None:
+                        self._scheduler.notify()
+                    self._activity_tracker.note_delegate(session_id, delegate_id)
+                    return response.model_dump(mode="json")
+                except DelegateError as exc:
+                    raise ToolError(str(exc)) from exc
 
         @mcp.tool(
             name="delegate_cancel",
             title="Cancel Delegate",
-            description=(
-                "Cancels active delegate work owned by this parent or worker session. "
-                "For Codex, Orchestrator also terminates its queued/running provider process safely."
-            ),
+            description="Cancels active delegate work owned by this parent or worker session.",
         )
         def delegate_cancel(delegate_id: str, mcp_ctx: Context, reason: str = "") -> dict[str, Any]:
             session_id = get_mcp_session_id(mcp_ctx)

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import RequestParams
 
 from orchestrator.config import OrchestratorConfig
@@ -33,6 +34,15 @@ def _tool_names(server) -> set[str]:
         return {tool.name for tool in await server.list_tools()}
 
     return asyncio.run(inspect())
+
+
+def _call_tool(server, name: str, arguments: dict[str, object], session_id: str = "parent-session") -> dict[str, object]:
+    async def call() -> dict[str, object]:
+        meta = RequestParams.Meta.model_validate({"openai/session": session_id})
+        context = SimpleNamespace(request_context=SimpleNamespace(meta=meta), session=object())
+        return await server._tool_manager.call_tool(name, arguments, context=context)
+
+    return asyncio.run(call())
 
 
 @pytest.fixture
@@ -80,7 +90,7 @@ def test_orchestrator_accepts_custom_streamable_http_path(orchestrator_config: O
 
 
 def test_orchestrator_exposes_delegation_routing_guide(orchestrator_config: OrchestratorConfig) -> None:
-    """Orchestrator exposes route selection and both supported hand-off workflows."""
+    """Orchestrator exposes the human-run ChatGPT hand-off workflow."""
 
     async def inspect() -> tuple[set[str], str]:
         server = OrchestratorMCPFactory(orchestrator_config).create_mcp_server()
@@ -93,17 +103,13 @@ def test_orchestrator_exposes_delegation_routing_guide(orchestrator_config: Orch
     assert DELEGATION_GUIDE_RESOURCE_URI in resources
     assert "## Route selection" in content
     assert "## Parent -> ChatGPT worker -> Serena -> Orchestrator" in content
-    assert "## Parent -> Codex worktree -> review" in content
-    assert "Orchestrator does not resolve Serena projects" in content
-    assert "## Checkout ownership" in content
-    assert "Serena work is live" in content
-    assert "Codex code work is isolated" in content
-    assert "Never instruct Codex to modify Serena's live checkout" in content
-    assert "integration into the live checkout explicit" in content
+    assert "Codex execution and automatic provider fallback are disabled" in content
+    assert "Use `provider_policy=chat`" in content
+    assert "human-run ChatGPT delegate state" in content
 
 
-def test_create_delegate_exposes_checkout_ownership(orchestrator_config: OrchestratorConfig) -> None:
-    """The primary delegation tool tells agents which checkout each coding route may mutate."""
+def test_create_delegate_describes_human_run_chat_workflow(orchestrator_config: OrchestratorConfig) -> None:
+    """The primary delegation tool directs coding work to a human-run ChatGPT worker using Serena."""
 
     async def inspect() -> str:
         server = OrchestratorMCPFactory(orchestrator_config).create_mcp_server()
@@ -112,9 +118,24 @@ def test_create_delegate_exposes_checkout_ownership(orchestrator_config: Orchest
 
     description = asyncio.run(inspect())
 
-    assert "Serena-backed ChatGPT work edits the live checkout" in description
-    assert "Codex execution uses an Orchestrator-isolated Git worktree" in description
-    assert "never route modifying Codex into the live checkout" in description
+    assert "human-run ChatGPT worker" in description
+    assert "Codex execution and automatic fallback are currently disabled" in description
+    assert "worker should use Serena" in description
+
+
+def test_default_orchestrator_rejects_codex_and_auto_routing(orchestrator_config: OrchestratorConfig) -> None:
+    """The default MCP accepts only human-run ChatGPT delegation."""
+    server = OrchestratorMCPFactory(orchestrator_config).create_mcp_server()
+    arguments = {
+        "project_name": "test-project",
+        "kind": "explore",
+        "goal": "Inspect the project.",
+        "acceptance_criteria": ["Return a bounded result."],
+    }
+
+    for provider_policy in ("codex", "auto"):
+        with pytest.raises(ToolError, match="Codex delegation is currently disabled"):
+            _call_tool(server, "create_delegate", {**arguments, "provider_policy": provider_policy})
 
 
 def test_serena_and_orchestrator_have_disjoint_tool_surfaces(side_by_side_servers) -> None:

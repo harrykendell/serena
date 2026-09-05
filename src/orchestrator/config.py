@@ -21,6 +21,7 @@ class OrchestratorConfig:
     """Defines Orchestrator-owned persistent state and Codex provider configuration."""
 
     state_root: Path
+    codex_enabled: bool = False
     codex_executable: str = "codex"
     codex_concurrency: int = 2
     codex_timeout_seconds: float = 1_800.0
