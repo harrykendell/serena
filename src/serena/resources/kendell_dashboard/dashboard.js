@@ -16,6 +16,7 @@ const executionRenderState = {
   snapshot: null,
 };
 let refreshInFlight = false;
+let initialActivityStateLoaded = false;
 let initialActivityViewSelected = false;
 
 function byId(id) {
@@ -746,6 +747,11 @@ function formatEpochClock(timestamp) {
   return new Date(timestamp * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function formatEpochDate(timestamp) {
+  if (!Number.isFinite(timestamp)) return "—";
+  return new Date(timestamp * 1000).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
+}
+
 function formatDuration(seconds) {
   if (seconds === null || seconds === undefined) return "—";
   if (seconds < 60) return `${Math.max(0, Math.round(seconds))}s`;
@@ -914,6 +920,41 @@ function setConnection(state, label) {
   setText("connection-label", label);
 }
 
+function updateSessionWidgetHeading(entry, panel) {
+  let heading = entry.querySelector(".activity-widget-heading");
+  if (!panel.display_name) {
+    heading?.remove();
+    return;
+  }
+
+  if (!heading) {
+    heading = makeElement("div", "activity-widget-heading");
+    heading.append(
+      makeElement("span", "activity-widget-title"),
+      makeElement("span", "activity-widget-date"),
+    );
+    entry.prepend(heading);
+  }
+
+  heading.querySelector(".activity-widget-title").textContent = panel.display_name;
+  const date = heading.querySelector(".activity-widget-date");
+  const dateText = formatEpochDate(panel.started_at);
+  date.textContent = dateText;
+  date.hidden = dateText === "—";
+}
+
+function sessionWidgetBootstrap(panel, kind) {
+  const toolOutput = kind === "serena"
+    ? panel.initial_state
+    : {
+        run_id: panel.panel_id,
+        started_at: panel.started_at || 0,
+        superseded: false,
+        delegates: panel.delegates || [],
+      };
+  return JSON.stringify({ panel_id: panel.panel_id, tool_output: toolOutput });
+}
+
 function renderSessionWidgets(containerId, countId, panels, kind) {
   const container = byId(containerId);
   setText(countId, panels.length, "0");
@@ -929,12 +970,15 @@ function renderSessionWidgets(containerId, countId, panels, kind) {
     panel => panel.panel_id,
     panel => {
       const entry = makeElement("div", "activity-widget-entry");
-      if (panel.display_name) entry.append(makeElement("div", "activity-widget-heading", panel.display_name));
+      updateSessionWidgetHeading(entry, panel);
 
       const shell = makeElement("div", `activity-widget-shell ${panel.active ? "active-session" : "retained-session"}`);
       const frame = document.createElement("iframe");
       frame.className = "activity-widget-frame";
-      frame.src = `/dashboard/widget/${kind}/${encodeURIComponent(panel.panel_id)}`;
+      frame.name = sessionWidgetBootstrap(panel, kind);
+      frame.loading = panel.active ? "eager" : "lazy";
+      frame.addEventListener("load", () => frame.removeAttribute("name"), { once: true });
+      frame.src = `/dashboard/widget/${kind}`;
       frame.title = kind === "serena" ? "Serena session activity" : "Orchestrator activity";
       shell.append(frame);
       entry.append(shell);
@@ -947,16 +991,7 @@ function renderSessionWidgets(containerId, countId, panels, kind) {
         shell.classList.toggle("retained-session", !panel.active);
       }
 
-      let heading = entry.querySelector(".activity-widget-heading");
-      if (panel.display_name) {
-        if (!heading) {
-          heading = makeElement("div", "activity-widget-heading");
-          entry.prepend(heading);
-        }
-        heading.textContent = panel.display_name;
-      } else if (heading) {
-        heading.remove();
-      }
+      updateSessionWidgetHeading(entry, panel);
     },
   );
 }
@@ -979,7 +1014,7 @@ async function refresh() {
   try {
     [session, serena, orchestrator] = await Promise.all([
       getJson("/session"),
-      getJson("/serena"),
+      getJson(initialActivityStateLoaded ? "/serena" : "/serena?include_state=1"),
       getJson("/orchestrator"),
     ]);
   } catch (error) {
@@ -995,6 +1030,7 @@ async function refresh() {
     renderOverview(session);
     renderSessionWidgets("serena-widgets", "serena-panel-count", serena.panels || [], "serena");
     renderSessionWidgets("orchestrator-widgets", "orchestrator-panel-count", orchestrator.panels || [], "orchestrator");
+    initialActivityStateLoaded = true;
 
     if (!initialActivityViewSelected) {
       const orchestratorActive = (orchestrator.panels || []).some(panel => panel.active);

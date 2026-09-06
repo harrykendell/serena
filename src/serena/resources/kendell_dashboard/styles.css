@@ -620,9 +620,7 @@ button { font: inherit; }
 
 .activity-widget-shell {
   overflow: hidden;
-  border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--surface);
 }
 
 .activity-widget-entry {
@@ -633,14 +631,29 @@ button { font: inherit; }
 
 .activity-widget-heading {
   min-width: 0;
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
   padding: 0 4px;
   overflow: hidden;
   color: var(--muted);
   font-size: .78rem;
   font-weight: 600;
   line-height: 1.15;
-  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.activity-widget-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.activity-widget-date {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-weight: 450;
+  opacity: .72;
 }
 
 .activity-widget-frame {

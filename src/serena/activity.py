@@ -730,8 +730,8 @@ def activity_widget_html() -> str:
   .logo svg { display: block; width: 100%; height: 100%; }
   .header-tool, .header-overview { min-width: 0; display: grid; gap: 1px; overflow: hidden; }
   .header-tool-line { min-width: 0; display: flex; gap: 5px; align-items: baseline; overflow: hidden; }
-  #activity-header-tool { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .header-scope { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 10.5px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .48; }
+  #activity-header-tool { flex: 0 0 auto; white-space: nowrap; }
+  .header-scope { min-width: 0; flex: 1 1 0; overflow: hidden; direction: rtl; text-align: left; text-overflow: ellipsis; white-space: nowrap; font: 10.5px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .48; }
   .header-detail, .header-stats { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; line-height: 1.2; opacity: .58; }
   .header-detail { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .header-meta { justify-self: end; min-width: 0; }
@@ -767,8 +767,8 @@ def activity_widget_html() -> str:
   .call.cancelled .status { opacity: .5; }
   .job-entry.running .status { color: #00491e; }
   .tool { grid-area: tool; min-width: 0; display: flex; gap: 5px; align-items: baseline; white-space: nowrap; overflow: hidden; }
-  .tool-name { flex: 0 1 auto; font-weight: 700; }
-  .scope { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; font: 10.5px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .48; }
+  .tool-name { flex: 0 0 auto; font-weight: 700; }
+  .scope { min-width: 0; flex: 1 1 0; overflow: hidden; direction: rtl; text-align: left; text-overflow: ellipsis; font: 10.5px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .48; }
   .job-entry .tool-name { font-weight: 700; }
   .detail { grid-area: detail; min-width: 0; margin-top: 1px; font: 10.5px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .58; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 1.25em; }
   .submitted, .elapsed { justify-self: end; white-space: nowrap; font-size: 10.5px; opacity: .52; font-variant-numeric: tabular-nums; }

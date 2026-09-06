@@ -125,8 +125,8 @@ def test_custom_dashboard_serves_fork_specific_frontend_and_session_api(tmp_path
     response = client.get("/dashboard/")
     session = client.get("/dashboard/api/session").get_json()
     serena = client.get("/dashboard/api/serena").get_json()
-    panel_id = serena["panels"][0]["panel_id"]
-    serena_widget = client.get(f"/dashboard/widget/serena/{panel_id}")
+    serena_with_state = client.get("/dashboard/api/serena?include_state=1").get_json()
+    serena_widget = client.get("/dashboard/widget/serena")
     orchestrator = client.get("/dashboard/api/orchestrator").get_json()
 
     assert redirect.status_code == 302
@@ -141,7 +141,9 @@ def test_custom_dashboard_serves_fork_specific_frontend_and_session_api(tmp_path
     assert b"window.openai" in serena_widget.data
     assert b"get_activity" in serena_widget.data
     assert b"get_activity_job_detail" in serena_widget.data
+    assert serena_widget.headers["Cache-Control"] == "private, max-age=3600"
     assert len(serena["panels"]) == 1
+    assert serena_with_state["panels"][0]["initial_state"]["run_id"] == serena["panels"][0]["panel_id"]
     assert orchestrator == {"status": "success", "panels": []}
     assert session["status"] == "success"
     assert session["context"] == "chatgpt"

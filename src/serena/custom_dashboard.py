@@ -494,7 +494,7 @@ class DashboardSerenaActivityOverview:
         self._job_overview = job_overview
         self._activity_formatter = ActivityDetailFormatter()
 
-    def get_panels(self) -> dict[str, Any]:
+    def get_panels(self, include_state: bool = False) -> dict[str, Any]:
         """Returns retained Serena session panels, active sessions first."""
         executions = self._execution_history.get_executions()
         self._archive.reconcile_executions(executions.get("executions", []))
@@ -505,16 +505,17 @@ class DashboardSerenaActivityOverview:
             active = any(call.get("status") in {"running", "queued"} for call in session.get("calls", [])) or any(
                 jobs.get(job_id, {}).get("status") == "running" for job_id in job_ids
             )
-            panels.append(
-                {
-                    "panel_id": session["panel_id"],
-                    "project_name": session.get("project_name") or "",
-                    "display_name": session.get("display_name") or "",
-                    "started_at": session.get("started_at"),
-                    "updated_at": session.get("updated_at"),
-                    "active": active,
-                }
-            )
+            panel = {
+                "panel_id": session["panel_id"],
+                "project_name": session.get("project_name") or "",
+                "display_name": session.get("display_name") or "",
+                "started_at": session.get("started_at"),
+                "updated_at": session.get("updated_at"),
+                "active": active,
+            }
+            if include_state:
+                panel["initial_state"] = self._panel_state(session, jobs)
+            panels.append(panel)
         panels.sort(key=lambda item: (not item["active"], -float(item.get("updated_at") or 0.0)))
         return {"status": "success", "panels": panels}
 
@@ -523,11 +524,14 @@ class DashboardSerenaActivityOverview:
         executions = self._execution_history.get_executions()
         self._archive.reconcile_executions(executions.get("executions", []))
         session = self._archive.get_session(panel_id)
-        jobs = self._jobs_by_id()
+        return self._panel_state(session, self._jobs_by_id())
+
+    def _panel_state(self, session: dict[str, Any], jobs: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        """Returns one retained session snapshot ready for immediate widget rendering."""
         job_ids = self._session_job_ids(session)
         visible_jobs = [self._job_payload(jobs[job_id]) for job_id in job_ids if job_id in jobs]
         return {
-            "run_id": panel_id,
+            "run_id": session["panel_id"],
             "project_name": session.get("project_name") or "",
             "started_at": session.get("started_at"),
             "superseded": False,
@@ -771,7 +775,8 @@ class CustomDashboard:
 
         @app.route("/dashboard/api/serena", methods=["GET"])
         def get_serena_panels() -> dict[str, Any]:
-            return self._serena_activity_overview.get_panels()
+            include_state = request.args.get("include_state") == "1"
+            return self._serena_activity_overview.get_panels(include_state=include_state)
 
         @app.route("/dashboard/api/serena/panels/<panel_id>", methods=["GET"])
         def get_serena_panel(panel_id: str) -> dict[str, Any]:
@@ -812,14 +817,16 @@ class CustomDashboard:
             except KeyError:
                 abort(404)
 
+        @app.route("/dashboard/widget/serena", defaults={"panel_id": ""}, methods=["GET"])
         @app.route("/dashboard/widget/serena/<panel_id>", methods=["GET"])
         def get_serena_activity_widget(panel_id: str) -> Response:
-            try:
-                self._serena_activity_overview.get_panel(panel_id)
-            except KeyError:
-                abort(404)
-            return Response(serena_dashboard_widget_html(panel_id), mimetype="text/html")
+            response = Response(serena_dashboard_widget_html(panel_id or None), mimetype="text/html")
+            response.headers["Cache-Control"] = "private, max-age=3600"
+            return response
 
+        @app.route("/dashboard/widget/orchestrator", defaults={"panel_id": ""}, methods=["GET"])
         @app.route("/dashboard/widget/orchestrator/<panel_id>", methods=["GET"])
         def get_orchestrator_activity_widget(panel_id: str) -> Response:
-            return Response(orchestrator_dashboard_widget_html(panel_id), mimetype="text/html")
+            response = Response(orchestrator_dashboard_widget_html(panel_id or None), mimetype="text/html")
+            response.headers["Cache-Control"] = "private, max-age=3600"
+            return response
