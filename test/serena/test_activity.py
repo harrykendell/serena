@@ -1,6 +1,8 @@
 import asyncio
+import json
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import RequestParams
 
 from serena.activity import ACTIVITY_RESOURCE_URI, ActivityTracker, get_mcp_session_id, register_activity_resource
+from serena.activity_history import ActivityHistoryStore
 from serena.config.context_mode import SerenaAgentContext
 from serena.jobs import JobOutputChunk, JobRecord, JobRuntimeInfo, JobSnapshot, JobStatus
 from serena.mcp import SerenaMCPFactory
@@ -140,6 +143,36 @@ def test_activity_tracker_records_tool_lifecycle() -> None:
         }
     ]
     assert snapshot["calls"][0]["finished_at"] is not None
+
+
+def test_activity_tracker_rehydrates_historical_turn_after_restart(tmp_path: Path) -> None:
+    source = _FakeJobSource([_job_record("job-a", "retained job", JobStatus.COMPLETED)])
+    store = ActivityHistoryStore(tmp_path / "activity-runs")
+    tracker = ActivityTracker(source, history_store=store)
+    run = tracker.start_run("conversation-a", "serena")
+    call_id = tracker.start_tool(
+        "conversation-a",
+        "search_for_pattern",
+        {"substring_pattern": "ActivityTracker", "relative_path": "src/serena"},
+    )
+    tracker.finish_tool(call_id, succeeded=True, result={"matches": 3})
+    job_call_id = tracker.start_tool("conversation-a", "start_job", {"label": "retained job"})
+    tracker.finish_tool(job_call_id, succeeded=True, result={"job_id": "job-a", "label": "retained job"})
+    tracker.get_run("conversation-a", run["run_id"])
+    interrupted_id = tracker.start_tool("conversation-a", "execute_shell_command", {"command": "sleep 30"})
+
+    restored = ActivityTracker(_FakeJobSource(), history_store=store)
+    snapshot = restored.get_run("conversation-a", run["run_id"])
+    detail = restored.get_call_detail("conversation-a", run["run_id"], call_id or "")
+
+    assert snapshot["superseded"] is True
+    assert [call["tool_name"] for call in snapshot["calls"]] == ["search_for_pattern", "start_job", "execute_shell_command"]
+    assert snapshot["calls"][-1]["call_id"] == interrupted_id
+    assert snapshot["calls"][-1]["status"] == "cancelled"
+    assert snapshot["calls"][-1]["finished_at"] is not None
+    assert [(job["job_id"], job["current_turn"]) for job in snapshot["jobs"]] == [("job-a", True)]
+    assert json.loads(detail["arguments"]) == {"substring_pattern": "ActivityTracker", "relative_path": "src/serena"}
+    assert json.loads(detail["result"]) == {"matches": 3}
 
 
 def test_activity_tracker_uses_semantic_tool_detail_lines() -> None:

@@ -10,12 +10,13 @@ from typing import Any, Protocol, cast
 
 from mcp.server.fastmcp import FastMCP
 
+from serena.activity_history import ActivityHistoryStore
 from serena.jobs import JobManager, JobRecord, JobSnapshot, JobStatus
 from serena.session import get_mcp_session_id  # noqa: F401 - compatibility re-export
 
 ACTIVITY_RESOURCE_URI = "ui://serena/activity-v17.html"
 _ACTIVITY_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
-_MAX_RUNS = 32
+_MAX_RUNS = 128
 _MAX_CALLS_PER_RUN = 100
 
 
@@ -55,6 +56,36 @@ class ActivityCall:
             payload["job_label"] = self.job_label
         return payload
 
+    def storage_dict(self) -> dict[str, Any]:
+        """Serializes complete bounded call state required for historical rehydration."""
+        return {
+            **self.as_dict(),
+            "scope": self.scope,
+            "arguments": self.arguments,
+            "result": self.result,
+            "job_id": self.job_id,
+            "job_label": self.job_label,
+        }
+
+    @classmethod
+    def from_storage_dict(cls, payload: dict[str, Any]) -> "ActivityCall":
+        """Reconstructs one retained call from its persisted representation."""
+        finished_at = payload.get("finished_at")
+        return cls(
+            call_id=str(payload["call_id"]),
+            tool_name=str(payload.get("tool_name") or ""),
+            detail=str(payload.get("detail") or ""),
+            scope=str(payload.get("scope") or ""),
+            project_name=str(payload.get("project_name") or ""),
+            arguments=str(payload.get("arguments") or "{}"),
+            started_at=float(payload.get("started_at") or 0.0),
+            finished_at=float(finished_at) if isinstance(finished_at, int | float) else None,
+            status=str(payload.get("status") or "completed"),
+            result=str(payload["result"]) if payload.get("result") is not None else None,
+            job_id=str(payload["job_id"]) if payload.get("job_id") is not None else None,
+            job_label=str(payload["job_label"]) if payload.get("job_label") is not None else None,
+        )
+
 
 @dataclass
 class ActivityRun:
@@ -66,6 +97,7 @@ class ActivityRun:
     started_at: float
     calls: list[ActivityCall] = field(default_factory=list)
     job_ids: list[str] = field(default_factory=list)
+    retained_jobs: list[dict[str, Any]] = field(default_factory=list, repr=False)
     superseded: bool = False
 
     def as_dict(self) -> dict[str, Any]:
@@ -77,6 +109,36 @@ class ActivityRun:
             "superseded": self.superseded,
             "calls": [call.as_dict() for call in self.calls],
         }
+
+    def storage_dict(self) -> dict[str, Any]:
+        """Serializes complete bounded run state required for historical rehydration."""
+        return {
+            "run_id": self.run_id,
+            "session_id": self.session_id,
+            "project_name": self.project_name,
+            "started_at": self.started_at,
+            "superseded": self.superseded,
+            "calls": [call.storage_dict() for call in self.calls],
+            "job_ids": list(self.job_ids),
+            "retained_jobs": self.retained_jobs,
+        }
+
+    @classmethod
+    def from_storage_dict(cls, payload: dict[str, Any]) -> "ActivityRun":
+        """Reconstructs one retained run from its persisted representation."""
+        calls = payload.get("calls")
+        job_ids = payload.get("job_ids")
+        retained_jobs = payload.get("retained_jobs")
+        return cls(
+            run_id=str(payload["run_id"]),
+            session_id=str(payload["session_id"]),
+            project_name=str(payload.get("project_name") or ""),
+            started_at=float(payload.get("started_at") or 0.0),
+            calls=[ActivityCall.from_storage_dict(call) for call in calls if isinstance(call, dict)] if isinstance(calls, list) else [],
+            job_ids=[str(job_id) for job_id in job_ids if isinstance(job_id, str)] if isinstance(job_ids, list) else [],
+            retained_jobs=[dict(job) for job in retained_jobs if isinstance(job, dict)] if isinstance(retained_jobs, list) else [],
+            superseded=bool(payload.get("superseded")),
+        )
 
 
 class ActivityJobSource(Protocol):
@@ -306,13 +368,69 @@ class ActivityTracker:
     _JOB_LIST_LIMIT = 100
     _JOB_CACHE_SECONDS = 2.0
 
-    def __init__(self, job_source: ActivityJobSource | None = None) -> None:
+    def __init__(
+        self,
+        job_source: ActivityJobSource | None = None,
+        history_store: ActivityHistoryStore | None = None,
+    ) -> None:
         self._lock = threading.RLock()
         self._runs: OrderedDict[str, ActivityRun] = OrderedDict()
         self._current_run_by_session: dict[str, str] = {}
         self._job_source = job_source or JobManager()
         self._job_cache_at = 0.0
         self._job_cache: list[JobRecord] = []
+        self._history_store = history_store if history_store is not None else (ActivityHistoryStore() if job_source is None else None)
+        self._load_history()
+
+    def _load_history(self) -> None:
+        """Loads persisted runs as historical panels without making them current."""
+        if self._history_store is None:
+            return
+
+        loaded_at = time.time()
+        for payload in self._history_store.load():
+            try:
+                run = ActivityRun.from_storage_dict(payload)
+            except (KeyError, TypeError, ValueError):
+                continue
+
+            changed = not run.superseded
+            run.superseded = True
+            for call in run.calls:
+                if call.status != "running":
+                    continue
+                call.status = "cancelled"
+                call.finished_at = call.finished_at or loaded_at
+                changed = True
+            self._runs[run.run_id] = run
+
+            if changed:
+                self._save_run(run)
+        self._prune_runs()
+
+    def _snapshot_jobs(self, run: ActivityRun, records: list[JobRecord]) -> None:
+        """Retains lightweight rows for jobs owned by one activity turn."""
+        if not run.job_ids:
+            return
+
+        owned = {record.job_id: record for record in records if record.job_id in run.job_ids}
+        retained = {str(job.get("job_id")): dict(job) for job in run.retained_jobs if job.get("job_id")}
+        for job_id, record in owned.items():
+            retained[job_id] = self._job_payload(record) | {"current_turn": True}
+        next_jobs = [retained[job_id] for job_id in run.job_ids if job_id in retained]
+        if next_jobs == run.retained_jobs:
+            return
+        run.retained_jobs = next_jobs
+        self._save_run(run)
+
+    def _save_run(self, run: ActivityRun) -> None:
+        """Persists one run when history retention is enabled."""
+        if self._history_store is None:
+            return
+        try:
+            self._history_store.save(run.storage_dict())
+        except (OSError, ValueError):
+            pass
 
     def start_run(self, session_id: str, project_name: str) -> dict[str, Any]:
         """Starts a new activity run for ``session_id`` and returns its initial snapshot.
@@ -331,6 +449,7 @@ class ActivityTracker:
                 continuing_calls = [
                     call for call in previous_run.calls if call.status == "running"
                 ]
+                self._save_run(previous_run)
 
             run = ActivityRun(
                 run_id=uuid.uuid4().hex,
@@ -341,6 +460,7 @@ class ActivityTracker:
             )
             self._runs[run.run_id] = run
             self._current_run_by_session[session_id] = run.run_id
+            self._save_run(run)
             self._prune_runs()
             run_id = run.run_id
 
@@ -353,6 +473,7 @@ class ActivityTracker:
             run = self._runs.get(run_id) if run_id is not None else None
             if run is not None:
                 run.project_name = project_name
+                self._save_run(run)
 
     def start_tool(
         self,
@@ -381,6 +502,7 @@ class ActivityTracker:
             run.calls.append(call)
             if len(run.calls) > _MAX_CALLS_PER_RUN:
                 del run.calls[: len(run.calls) - _MAX_CALLS_PER_RUN]
+            self._save_run(run)
             return call.call_id
 
     def finish_tool(
@@ -410,12 +532,13 @@ class ActivityTracker:
             serialized_result = (
                 self._serialize_value(result) if result is not None else None
             )
-            for _, call in owners:
+            for run, call in owners:
                 call.status = status
                 call.finished_at = finished_at
                 call.result = serialized_result
                 if project_name is not None:
                     call.project_name = project_name
+                self._save_run(run)
 
             # associate a newly submitted durable job with every panel that retained the call
             first_call = owners[0][1]
@@ -433,6 +556,7 @@ class ActivityTracker:
                     call.detail = label
                 if job_id not in run.job_ids:
                     run.job_ids.append(job_id)
+                self._save_run(run)
             self._job_cache_at = 0.0
 
     def get_run(self, session_id: str, run_id: str) -> dict[str, Any]:
@@ -442,22 +566,34 @@ class ActivityTracker:
             if run is None or run.session_id != session_id:
                 raise ValueError("Activity run is not available in this session")
             payload = run.as_dict()
-            current_job_ids = set(run.job_ids)
+            current_job_ids = list(run.job_ids)
             superseded = run.superseded
+            retained_jobs = {str(job.get("job_id")): dict(job) for job in run.retained_jobs if job.get("job_id")}
 
         records = self._list_jobs_safely()
-        visible_records = [
-            record
-            for record in records
-            if record.job_id in current_job_ids
-            or (not superseded and record.status is JobStatus.RUNNING)
-        ]
-        visible_records.sort(key=lambda record: record.created_at, reverse=True)
-        payload["jobs"] = [
-            self._job_payload(record)
-            | {"current_turn": record.job_id in current_job_ids}
-            for record in visible_records
-        ]
+        records_by_id = {record.job_id: record for record in records}
+        visible_jobs: list[dict[str, Any]] = []
+        for job_id in current_job_ids:
+            record = records_by_id.get(job_id)
+            if record is not None:
+                visible_jobs.append(self._job_payload(record) | {"current_turn": True})
+            elif job_id in retained_jobs:
+                visible_jobs.append(retained_jobs[job_id] | {"current_turn": True})
+
+        if not superseded:
+            visible_jobs.extend(
+                self._job_payload(record) | {"current_turn": False}
+                for record in records
+                if record.job_id not in current_job_ids and record.status is JobStatus.RUNNING
+            )
+
+        visible_jobs.sort(key=lambda job: float(job.get("started_at") or 0.0), reverse=True)
+        payload["jobs"] = visible_jobs
+
+        with self._lock:
+            current = self._runs.get(run_id)
+            if current is run:
+                self._snapshot_jobs(run, records)
         return payload
 
     def get_call_detail(
@@ -744,9 +880,10 @@ def activity_widget_html() -> str:
   .header-status.failed { color: #dc2626; opacity: 1; font-weight: 650; }
   .activity.collapsed .header-overview, .activity.collapsed .header-status { display: none; }
   .activity:not(.collapsed) .header-tool, .activity:not(.collapsed) .header-times { display: none; }
-  .activity.collapsed.empty-state .header-tool, .activity.collapsed.empty-state .header-times { display: none; }
-  .activity.collapsed.empty-state .header-overview { display: grid; }
-  .activity.collapsed.empty-state .header-status { display: inline; }
+  .activity.collapsed.empty-state .header-tool, .activity.collapsed.empty-state .header-times,
+  .activity.collapsed.summary-collapsed .header-tool, .activity.collapsed.summary-collapsed .header-times { display: none; }
+  .activity.collapsed.empty-state .header-overview, .activity.collapsed.summary-collapsed .header-overview { display: grid; }
+  .activity.collapsed.empty-state .header-status, .activity.collapsed.summary-collapsed .header-status { display: inline; }
   .chevron, .other-jobs-chevron { width: 14px; text-align: center; transition: transform .14s ease; opacity: .58; }
   .activity.collapsed .chevron, .other-jobs[aria-expanded="false"] .other-jobs-chevron { transform: rotate(-90deg); }
   .body { max-height: var(--activity-body-height, 202px); overflow: hidden; border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent); }
@@ -829,6 +966,7 @@ def activity_widget_html() -> str:
   const expandedRows = new Set();
   let state = window.openai?.toolOutput ?? null;
   let initialViewResolved = false;
+  let preferSummaryCollapsedHeader = false;
   let otherJobsExpanded = false;
   let timer = null;
   let clockTimer = null;
@@ -898,8 +1036,9 @@ def activity_widget_html() -> str:
     setBodyHeight(current + (event.key === "ArrowDown" ? 20 : -20));
   });
 
-  function setCollapsed(collapsed) {
+  function setCollapsed(collapsed, summaryHeader = false) {
     root.classList.toggle("collapsed", collapsed);
+    root.classList.toggle("summary-collapsed", collapsed && summaryHeader);
     header.setAttribute("aria-expanded", String(!collapsed));
     body.hidden = collapsed;
     syncJobDetailTimer();
@@ -908,7 +1047,7 @@ def activity_widget_html() -> str:
 
   header.addEventListener("click", () => {
     initialViewResolved = true;
-    setCollapsed(!root.classList.contains("collapsed"));
+    setCollapsed(!root.classList.contains("collapsed"), preferSummaryCollapsedHeader);
   });
   otherJobsButton.addEventListener("click", event => {
     event.stopPropagation();
@@ -1404,7 +1543,8 @@ def activity_widget_html() -> str:
     const latestActivity = latestPanelActivityTimestamp(next);
     const recentlyActive = hasRunningPanelActivity(next)
       || (latestActivity !== null && Date.now() / 1000 - latestActivity <= initialActivityWindowSeconds);
-    setCollapsed(!recentlyActive);
+    preferSummaryCollapsedHeader = !recentlyActive;
+    setCollapsed(!recentlyActive, preferSummaryCollapsedHeader);
     initialViewResolved = true;
   }
 
