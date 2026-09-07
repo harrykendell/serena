@@ -72,6 +72,26 @@ def test_fetch_media_file_returns_native_mcp_image(project: Project, tmp_path: P
     assert len(result.content) == 3
 
 
+def test_fetch_media_file_versions_resource_name_when_content_changes(project: Project, tmp_path: Path) -> None:
+    source = tmp_path / "pixel.png"
+    tool = _make_tool(FetchMediaFileTool, project)
+
+    source.write_bytes(_ONE_PIXEL_PNG)
+    first_link = get_result_file_link(tool.apply("pixel.png"))
+    source.write_bytes(_ONE_PIXEL_PNG + b"changed-version")
+    changed_link = get_result_file_link(tool.apply("pixel.png"))
+    source.write_bytes(_ONE_PIXEL_PNG)
+    repeated_link = get_result_file_link(tool.apply("pixel.png"))
+
+    assert first_link is not None
+    assert changed_link is not None
+    assert repeated_link is not None
+    assert first_link.name != changed_link.name
+    assert repeated_link.name == first_link.name
+    assert first_link.name.startswith("pixel-")
+    assert first_link.name.endswith(".png")
+
+
 def test_fetch_media_file_preserves_svg_mime_type(project: Project, tmp_path: Path) -> None:
     svg = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><circle cx=".5" cy=".5" r=".5"/></svg>'
     (tmp_path / "icon.svg").write_bytes(svg)
@@ -269,6 +289,31 @@ def test_render_pdf_page_returns_native_mcp_image(project: Project, tmp_path: Pa
     assert file_link is not None
     assert read_result_file_link(file_link).startswith(b"\x89PNG\r\n\x1a\n")
     assert not (tmp_path / ".serena" / "chat_renders").exists()
+
+
+def test_render_pdf_page_versions_resource_name_when_render_changes(
+    project: Project, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_minimal_pdf(tmp_path / "one-page.pdf")
+    monkeypatch.setattr("serena.tools.media_tools.shutil.which", lambda executable: "/usr/bin/pdftoppm")
+    rendered_versions = iter((_ONE_PIXEL_PNG, _ONE_PIXEL_PNG + b"changed-version"))
+
+    def render(args, **kwargs):
+        del kwargs
+        Path(args[-1]).with_suffix(".png").write_bytes(next(rendered_versions))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("serena.tools.media_tools.subprocess.run", render)
+    tool = _make_tool(RenderPdfPageTool, project)
+
+    first_link = get_result_file_link(tool.apply("one-page.pdf", page=1, dpi=72))
+    changed_link = get_result_file_link(tool.apply("one-page.pdf", page=1, dpi=72))
+
+    assert first_link is not None
+    assert changed_link is not None
+    assert first_link.name != changed_link.name
+    assert first_link.name.startswith("one-page-p1-72dpi-")
+    assert first_link.name.endswith(".png")
 
 
 def test_render_pdf_page_enforces_wall_clock_timeout(project: Project, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

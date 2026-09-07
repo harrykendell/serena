@@ -123,6 +123,7 @@ def test_custom_dashboard_serves_fork_specific_frontend_and_session_api(tmp_path
 
     redirect = client.get("/dashboard", base_url="https://serena.kendell.uk")
     response = client.get("/dashboard/")
+    dashboard_script = client.get("/dashboard/dashboard.js")
     session = client.get("/dashboard/api/session").get_json()
     serena = client.get("/dashboard/api/serena").get_json()
     serena_with_state = client.get("/dashboard/api/serena?include_state=1").get_json()
@@ -133,6 +134,9 @@ def test_custom_dashboard_serves_fork_specific_frontend_and_session_api(tmp_path
     assert redirect.status_code == 302
     assert redirect.headers["Location"] == "/dashboard/"
     assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "private, no-store"
+    assert dashboard_script.status_code == 200
+    assert dashboard_script.headers["Cache-Control"] == "private, no-store"
     assert b"Serena + Orchestrator" in response.data
     assert b"MCP dashboard" in response.data
     assert b"orchestrator-logo.svg" in response.data
@@ -294,6 +298,13 @@ def test_retained_serena_panel_serves_rendered_media_instead_of_result_repr(tmp_
         f"uri=AnyUrl('serena-file://export/{token}'), mimeType='image/png', size={len(image_bytes)}))"
     )
 
+    restored_dashboard = SerenaDashboardAPI(
+        memory_log_handler=_DummyMemoryLogHandler(),
+        tool_names=[],
+        agent=_DashboardAgent(),
+        tool_usage_stats=None,
+    )
+    client = restored_dashboard._app.test_client()
     overview = client.get("/dashboard/api/serena").get_json()
     panel_id = overview["panels"][0]["panel_id"]
     panel = client.get(f"/dashboard/api/serena/panels/{panel_id}").get_json()
@@ -531,11 +542,15 @@ def test_execution_history_exposes_wrapped_media_result(tmp_path) -> None:
     execution = history.get_executions()["executions"][0]
     media = history.get_media(8)
 
-    assert execution["media"] == {"type": "image", "name": "preview.png", "mime_type": "image/png"}
+    assert execution["media"] == {
+        "type": "image",
+        "name": wrapped_result.file_link.name,
+        "mime_type": "image/png",
+    }
     assert execution["result"] is None
     assert media.media_type == "image"
     assert media.mime_type == "image/png"
-    assert media.file_name == "preview.png"
+    assert media.file_name == wrapped_result.file_link.name
     assert media.data == image_bytes
 
 

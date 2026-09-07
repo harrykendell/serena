@@ -14,6 +14,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from serena.activity import ActivityMedia
+
 _FILE_RESOURCE_RE = re.compile(r"serena-file://export/([0-9a-f]{48})")
 _JOB_ID_RE = re.compile(r"['\"]job_id['\"]\s*:\s*['\"]([^'\"]+)['\"]")
 _MAX_SESSIONS = 128
@@ -83,6 +85,7 @@ class DashboardActivityArchive:
                     "parameters": parameters,
                     "result": None,
                     "error": None,
+                    "media": None,
                     "project_name": project_name or "",
                     "job_id": None,
                 }
@@ -112,6 +115,8 @@ class DashboardActivityArchive:
             call["finished_at"] = time.time()
             call["result"] = result
             call["error"] = error
+            media = ActivityMedia.from_serialized_result(result)
+            call["media"] = media.storage_dict() if media is not None else None
             if result and str(call.get("tool_name")) == "start_job":
                 match = _JOB_ID_RE.search(result)
                 if match is not None:
@@ -318,6 +323,9 @@ class DashboardActivityArchive:
                 value = call.get(key)
                 if value:
                     tokens.update(_FILE_RESOURCE_RE.findall(str(value)))
+            media = ActivityMedia.from_storage_dict(call.get("media"))
+            if media is not None:
+                tokens.update(_FILE_RESOURCE_RE.findall(media.uri))
         return tokens
 
     @staticmethod

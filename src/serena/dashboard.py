@@ -268,11 +268,15 @@ class SerenaDashboardAPI:
         # Static files
         @self._app.route("/dashboard/<path:filename>")
         def serve_dashboard(filename: str) -> Response:
-            return send_from_directory(self._custom_dashboard.static_dir, filename)
+            response = send_from_directory(self._custom_dashboard.static_dir, filename)
+            response.headers["Cache-Control"] = "private, no-store"
+            return response
 
         @self._app.route("/dashboard/")
         def serve_dashboard_index() -> Response:
-            return send_from_directory(self._custom_dashboard.static_dir, "index.html")
+            response = send_from_directory(self._custom_dashboard.static_dir, "index.html")
+            response.headers["Cache-Control"] = "private, no-store"
+            return response
 
         # API routes
 

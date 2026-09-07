@@ -121,6 +121,14 @@ class _FileSnapshotStore:
         except ValueError as exc:
             raise ValueError("Invalid Serena file resource") from exc
 
+    @staticmethod
+    def _content_versioned_display_name(name: str, digest: str) -> str:
+        """Returns a cache-safe display name versioned by immutable file content."""
+        path = Path(name)
+        suffix = "".join(path.suffixes)
+        stem = path.name[: -len(suffix)] if suffix else path.name
+        return f"{stem}-{digest[:16]}{suffix}"
+
     @classmethod
     def snapshot(
         cls,
@@ -129,6 +137,7 @@ class _FileSnapshotStore:
         display_name: str | None = None,
         description: str = "Immutable file snapshot exported by Serena",
         max_size: int = _FILE_EXPORT_MAX_SIZE,
+        version_display_name_by_content: bool = False,
     ) -> _FileSnapshot:
         """Copies one file into persistent private storage and returns its immutable resource link."""
         if not source_path.is_file():
@@ -141,6 +150,7 @@ class _FileSnapshotStore:
         name = display_name or source_path.name
         mime_type, _ = mimetypes.guess_type(name)
         token = secrets.token_hex(cls._TOKEN_BYTES)
+        content_digest = hashlib.sha256() if version_display_name_by_content else None
 
         with cls._LOCK:
             root = cls._root()
@@ -157,10 +167,15 @@ class _FileSnapshotStore:
                             bytes_written += len(chunk)
                             if bytes_written > max_size:
                                 raise ValueError(f"File exceeds the {max_size // (1024 * 1024)} MiB export limit")
+                            if content_digest is not None:
+                                content_digest.update(chunk)
                             output.write(chunk)
                 os.replace(temporary_path, snapshot_path)
             finally:
                 temporary_path.unlink(missing_ok=True)
+
+        if content_digest is not None:
+            name = cls._content_versioned_display_name(name, content_digest.hexdigest())
 
         return _FileSnapshot(
             path=snapshot_path,
@@ -519,6 +534,7 @@ class FetchMediaFileTool(_McpMediaTool):
                     display_name=path.name,
                     description=f"Media exported from Serena project {self.project.project_name}",
                     max_size=self._MAX_FILE_SIZE,
+                    version_display_name_by_content=True,
                 )
                 if media_type == "image":
                     return _NativeMediaResult(media=Image(path=snapshot.path, format=media_format), file_link=snapshot.link)
@@ -602,6 +618,7 @@ class RenderPdfPageTool(_McpMediaTool):
                 display_name=display_name,
                 description=f"PDF page rendered from Serena project {self.project.project_name}",
                 max_size=self._MAX_RENDERED_FILE_SIZE,
+                version_display_name_by_content=True,
             )
 
         return _NativeMediaResult(media=Image(path=snapshot.path, format="png"), file_link=snapshot.link)

@@ -957,8 +957,14 @@ function sessionWidgetBootstrap(panel, kind) {
 
 function renderSessionWidgets(containerId, countId, panels, kind) {
   const container = byId(containerId);
-  setText(countId, panels.length, "0");
-  if (!panels.length) {
+  const orderedPanels = [...panels].sort((left, right) => {
+    const leftStarted = Number(left.started_at) || 0;
+    const rightStarted = Number(right.started_at) || 0;
+    if (leftStarted !== rightStarted) return leftStarted - rightStarted;
+    return String(left.panel_id || "").localeCompare(String(right.panel_id || ""));
+  });
+  setText(countId, orderedPanels.length, "0");
+  if (!orderedPanels.length) {
     const label = kind === "serena" ? "No Serena session activity recorded yet." : "No orchestration activity recorded yet.";
     if (!container.querySelector(".empty-card")) clearAndAppend(container, [makeElement("div", "empty-card", label)]);
     return;
@@ -966,7 +972,7 @@ function renderSessionWidgets(containerId, countId, panels, kind) {
 
   reconcileKeyed(
     container,
-    panels,
+    orderedPanels,
     panel => panel.panel_id,
     panel => {
       const entry = makeElement("div", "activity-widget-entry");

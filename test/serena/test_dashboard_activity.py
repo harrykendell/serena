@@ -18,7 +18,13 @@ def test_dashboard_activity_archive_survives_restart_and_pins_file_snapshots(tmp
         project_name="project-a",
         timestamp=100.0,
     )
-    archive.record_result("Task-1:FetchMediaFileTool", result=f"serena-file://export/{token}")
+    archive.record_result(
+        "Task-1:FetchMediaFileTool",
+        result=(
+            "_NativeMediaResult(media=<Image>, file_link=ResourceLink(name='figure.png', "
+            f"uri=AnyUrl('serena-file://export/{token}'), mimeType='image/png', size=123))"
+        ),
+    )
 
     restored = DashboardActivityArchive()
     sessions = restored.list_sessions()
@@ -27,6 +33,12 @@ def test_dashboard_activity_archive_survives_restart_and_pins_file_snapshots(tmp
     assert sessions[0]["panel_id"] == DashboardActivityArchive.panel_id_for_session("chat-a")
     assert sessions[0]["calls"][0]["call_id"] == call_id
     assert sessions[0]["calls"][0]["status"] == "completed"
+    assert sessions[0]["calls"][0]["media"] == {
+        "type": "image",
+        "name": "figure.png",
+        "mime_type": "image/png",
+        "uri": f"serena-file://export/{token}",
+    }
     assert restored.retained_file_tokens() == {token}
     assert DashboardActivityArchive.retained_file_tokens_from_disk() == {token}
 
