@@ -13,11 +13,13 @@ from typing import TYPE_CHECKING, Any
 
 from flask import Flask, Response, abort, request
 from mcp.server.fastmcp import Audio, Image
+from mcp.types import ResourceLink
+from pydantic import AnyUrl
 
 from orchestrator.config import OrchestratorConfig
 from orchestrator.dashboard_sessions import OrchestratorDashboardSessionArchive
 from orchestrator.delegates import DelegateError, DelegateStore
-from serena.activity import ActivityDetailFormatter
+from serena.activity import ActivityDetailFormatter, ActivityMedia
 from serena.dashboard_activity import DashboardActivityArchive
 from serena.dashboard_widgets import orchestrator_dashboard_widget_html, serena_dashboard_widget_html
 from serena.jobs import JobManager, JobStatus
@@ -542,13 +544,34 @@ class DashboardSerenaActivityOverview:
     def get_call_detail(self, panel_id: str, call_id: str) -> dict[str, Any]:
         """Returns one retained tool call's bounded detail."""
         call = self._archive.get_call(panel_id, call_id)
+        media = ActivityMedia.from_serialized_result(str(call.get("result") or ""))
         return {
             "call_id": call_id,
             "tool_name": call.get("tool_name") or "",
             "status": call.get("status") or "completed",
             "arguments": call.get("parameters") or "{}",
-            "result": call.get("error") or call.get("result"),
+            "result": None if media is not None else call.get("error") or call.get("result"),
+            "media": media.public_dict() if media is not None else None,
         }
+
+    def get_call_media(self, panel_id: str, call_id: str) -> DashboardMediaContent:
+        """Returns retained media bytes for one dashboard activity call."""
+        call = self._archive.get_call(panel_id, call_id)
+        media = ActivityMedia.from_serialized_result(str(call.get("result") or ""))
+        if media is None:
+            raise ValueError("Activity call has no retained media")
+        link = ResourceLink(
+            type="resource_link",
+            name=media.name,
+            uri=AnyUrl(media.uri),
+            mimeType=media.mime_type,
+        )
+        return DashboardMediaContent(
+            data=read_result_file_link(link),
+            mime_type=media.mime_type,
+            media_type=media.media_type,
+            file_name=media.name,
+        )
 
     def get_job_detail(self, job_id: str) -> dict[str, Any]:
         """Returns one retained durable job in the inline-widget detail shape."""
@@ -788,9 +811,23 @@ class CustomDashboard:
         @app.route("/dashboard/api/serena/panels/<panel_id>/calls/<call_id>", methods=["GET"])
         def get_serena_call_detail(panel_id: str, call_id: str) -> dict[str, Any]:
             try:
-                return self._serena_activity_overview.get_call_detail(panel_id, call_id)
+                detail = self._serena_activity_overview.get_call_detail(panel_id, call_id)
             except KeyError:
                 abort(404)
+            media = detail.get("media")
+            if isinstance(media, dict):
+                media["url"] = f"/dashboard/api/serena/panels/{panel_id}/calls/{call_id}/media"
+            return detail
+
+        @app.route("/dashboard/api/serena/panels/<panel_id>/calls/<call_id>/media", methods=["GET"])
+        def get_serena_call_media(panel_id: str, call_id: str) -> Response:
+            try:
+                media = self._serena_activity_overview.get_call_media(panel_id, call_id)
+            except (KeyError, ValueError, FileNotFoundError):
+                abort(404)
+            response = Response(media.data, mimetype=media.mime_type)
+            response.headers["Cache-Control"] = "private, max-age=3600"
+            return response
 
         @app.route("/dashboard/api/serena/jobs/<job_id>", methods=["GET"])
         def get_serena_job_detail(job_id: str) -> dict[str, Any]:

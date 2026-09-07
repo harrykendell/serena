@@ -7,7 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 from mcp.server.fastmcp import FastMCP
-from mcp.types import RequestParams
+from mcp.types import RequestParams, ResourceLink
+from pydantic import AnyUrl
 
 from serena.activity import ACTIVITY_RESOURCE_URI, ActivityTracker, get_mcp_session_id, register_activity_resource
 from serena.activity_history import ActivityHistoryStore
@@ -272,6 +273,28 @@ def test_activity_tracker_exposes_tool_detail_on_demand() -> None:
     assert "... detail omitted ..." in detail["result"]
 
 
+def test_activity_tracker_exposes_media_without_serialized_payload_text() -> None:
+    tracker = ActivityTracker(_FakeJobSource())
+    run = tracker.start_run("conversation-a", "serena")
+    call_id = tracker.start_tool("conversation-a", "render_pdf_page", {"relative_path": "figure.pdf", "page": 1})
+    link = ResourceLink(
+        type="resource_link",
+        name="figure-p1.png",
+        uri=AnyUrl("serena-file://export/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        mimeType="image/png",
+        size=123,
+    )
+
+    tracker.finish_tool(call_id, succeeded=True, result=link)
+
+    assert call_id is not None
+    detail = tracker.get_call_detail("conversation-a", run["run_id"], call_id)
+    assert detail["result"] is None
+    assert detail["media"] == {"type": "image", "name": "figure-p1.png", "mime_type": "image/png"}
+    media = tracker.get_call_media("conversation-a", run["run_id"], call_id)
+    assert media.uri == "serena-file://export/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+
 def test_activity_tracker_marks_current_turn_job_and_exposes_other_running_jobs() -> None:
     source = _FakeJobSource([_job_record("other-job", "other optimisation")])
     tracker = ActivityTracker(source)
@@ -454,6 +477,7 @@ def test_activity_resource_uses_mcp_app_contract() -> None:
     assert content.mime_type == "text/html;profile=mcp-app"
     assert 'window.openai.callTool("get_activity"' in content.content
     assert 'window.openai.callTool("get_activity_detail"' in content.content
+    assert 'window.openai.callTool("get_activity_media"' in content.content
     assert 'window.openai.callTool("get_activity_job_detail"' in content.content
     assert 'id="activity-logo" class="logo"' in content.content
     assert 'id="activity-header-tool">Waiting for activity</strong>' in content.content
@@ -484,6 +508,7 @@ def test_activity_tools_expose_widget_and_private_polling_contract() -> None:
     show_meta = tools["show_activity"].meta
     poll_meta = tools["get_activity"].meta
     detail_meta = tools["get_activity_detail"].meta
+    media_meta = tools["get_activity_media"].meta
     job_detail_meta = tools["get_activity_job_detail"].meta
 
     assert show_meta is not None
@@ -495,6 +520,9 @@ def test_activity_tools_expose_widget_and_private_polling_contract() -> None:
     assert detail_meta is not None
     assert detail_meta["ui"] == {"visibility": ["app"]}
     assert detail_meta["openai/visibility"] == "private"
+    assert media_meta is not None
+    assert media_meta["ui"] == {"visibility": ["app"]}
+    assert media_meta["openai/visibility"] == "private"
     assert job_detail_meta is not None
     assert job_detail_meta["ui"] == {"visibility": ["app"]}
     assert job_detail_meta["openai/visibility"] == "private"

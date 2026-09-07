@@ -226,6 +226,54 @@ def test_retained_serena_panel_preserves_semantic_detail_and_scope(tmp_path: Pat
     assert calls["replace_in_files"]["scope"] == "src/serena"
 
 
+def test_retained_serena_panel_serves_rendered_media_instead_of_result_repr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
+    serena_home = tmp_path / "serena-home"
+    monkeypatch.setenv("SERENA_HOME", str(serena_home))
+    snapshot_root = serena_home / "chat_file_snapshots"
+    snapshot_root.mkdir(parents=True, mode=0o700)
+    snapshot_root.chmod(0o700)
+    token = "a" * 48
+    image_bytes = b"\x89PNG\r\n\x1a\nretained-preview"
+    (snapshot_root / token).write_bytes(image_bytes)
+
+    log_handler = _DummyMemoryLogHandler()
+    dashboard = SerenaDashboardAPI(
+        memory_log_handler=log_handler,
+        tool_names=[],
+        agent=_DashboardAgent(),
+        tool_usage_stats=None,
+    )
+    client = dashboard._app.test_client()
+    log_handler.emit_message(
+        "INFO [Task-3:RenderPdfPageTool] serena.tools.tools_base:_log_tool_application:291 - "
+        "render_pdf_page: relative_path='figure.pdf', page=1, dpi=150; project: serena; session_id: session-a"
+    )
+    log_handler.emit_message(
+        "INFO [Task-3:RenderPdfPageTool] serena.tools.tools_base:apply_ex:410 - Result: "
+        f"_NativeMediaResult(media=<Image>, file_link=ResourceLink(name='figure-p1.png', "
+        f"uri=AnyUrl('serena-file://export/{token}'), mimeType='image/png', size={len(image_bytes)}))"
+    )
+
+    overview = client.get("/dashboard/api/serena").get_json()
+    panel_id = overview["panels"][0]["panel_id"]
+    panel = client.get(f"/dashboard/api/serena/panels/{panel_id}").get_json()
+    call_id = panel["calls"][0]["call_id"]
+    detail = client.get(f"/dashboard/api/serena/panels/{panel_id}/calls/{call_id}").get_json()
+
+    assert detail["result"] is None
+    assert detail["media"] == {
+        "type": "image",
+        "name": "figure-p1.png",
+        "mime_type": "image/png",
+        "url": f"/dashboard/api/serena/panels/{panel_id}/calls/{call_id}/media",
+    }
+    response = client.get(detail["media"]["url"])
+    assert response.status_code == 200
+    assert response.content_type == "image/png"
+    assert response.data == image_bytes
+
+
 def test_custom_dashboard_uses_default_project_and_dynamic_languages() -> None:
     memory_manager = SimpleNamespace(list_memories=lambda: SimpleNamespace(get_full_list=list))
     project = SimpleNamespace(

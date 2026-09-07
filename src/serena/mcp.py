@@ -20,7 +20,8 @@ from mcp.server.fastmcp.tools.base import Tool as FastMCPTool
 from mcp.server.session import ServerSessionT
 from mcp.shared.context import LifespanContextT, RequestT
 from mcp.shared.exceptions import UrlElicitationRequiredError
-from mcp.types import Icon, ToolAnnotations
+from mcp.types import AudioContent, CallToolResult, Icon, ImageContent, ResourceLink, ToolAnnotations
+from pydantic import AnyUrl
 from pydantic_settings import SettingsConfigDict
 from sensai.util import logging
 
@@ -33,7 +34,7 @@ from serena.config.serena_config import LanguageBackend, ModeSelectionDefinition
 from serena.constants import DEFAULT_CONTEXT, SERENA_LOG_FORMAT
 from serena.session import get_mcp_session_id
 from serena.tools import Tool, ToolCallError
-from serena.tools.media_tools import register_file_export_resource
+from serena.tools.media_tools import read_result_file_link, register_file_export_resource
 from serena.util.exception import show_fatal_exception_safe
 from serena.util.logging import MemoryLogHandler
 
@@ -471,6 +472,36 @@ class SerenaMCPFactory:
         )
         def get_activity_detail(run_id: str, call_id: str, mcp_ctx: Context) -> dict[str, Any]:
             return self._activity_tracker.get_call_detail(get_mcp_session_id(mcp_ctx), run_id, call_id)
+
+        @mcp.tool(
+            name="get_activity_media",
+            title="Get Serena Activity Media",
+            description="Returns retained image, audio, or file content for one Serena tool call. Intended for the activity app only.",
+            annotations=ToolAnnotations(title="Get Serena Activity Media", readOnlyHint=True, destructiveHint=False),
+            meta={
+                "ui": {"visibility": ["app"]},
+                "openai/widgetAccessible": True,
+                "openai/visibility": "private",
+            },
+            structured_output=False,
+        )
+        def get_activity_media(run_id: str, call_id: str, mcp_ctx: Context) -> CallToolResult:
+            media = self._activity_tracker.get_call_media(get_mcp_session_id(mcp_ctx), run_id, call_id)
+            link = ResourceLink(
+                type="resource_link",
+                name=media.name,
+                uri=AnyUrl(media.uri),
+                mimeType=media.mime_type,
+            )
+            if media.media_type == "file":
+                return CallToolResult(content=[link])
+
+            data = base64.b64encode(read_result_file_link(link)).decode("ascii")
+            if media.media_type == "image":
+                content = ImageContent(type="image", data=data, mimeType=media.mime_type)
+            else:
+                content = AudioContent(type="audio", data=data, mimeType=media.mime_type)
+            return CallToolResult(content=[content, link])
 
         @mcp.tool(
             name="get_activity_job_detail",

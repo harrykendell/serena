@@ -1,12 +1,13 @@
 import ast
 import json
+import re
 import threading
 import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 from mcp.server.fastmcp import FastMCP
 
@@ -14,10 +15,95 @@ from serena.activity_history import ActivityHistoryStore
 from serena.jobs import JobManager, JobRecord, JobSnapshot, JobStatus
 from serena.session import get_mcp_session_id  # noqa: F401 - compatibility re-export
 
-ACTIVITY_RESOURCE_URI = "ui://serena/activity-v17.html"
+ACTIVITY_RESOURCE_URI = "ui://serena/activity-v18.html"
 _ACTIVITY_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
 _MAX_RUNS = 128
 _MAX_CALLS_PER_RUN = 100
+
+
+@dataclass(frozen=True)
+class ActivityMedia:
+    """Retrievable media or file metadata associated with one tool result."""
+
+    media_type: Literal["image", "audio", "file"]
+    name: str
+    mime_type: str
+    uri: str
+
+    @classmethod
+    def from_result(cls, result: object) -> "ActivityMedia | None":
+        """Extracts a persistent Serena file resource carried by a tool result."""
+        link = getattr(result, "file_link", None)
+        if link is None and getattr(result, "type", None) == "resource_link":
+            link = result
+        if link is None:
+            return None
+
+        uri = str(getattr(link, "uri", ""))
+        if not uri.startswith("serena-file://export/"):
+            return None
+        mime_type = str(getattr(link, "mimeType", None) or "application/octet-stream")
+        if mime_type.startswith("image/"):
+            media_type: Literal["image", "audio", "file"] = "image"
+        elif mime_type.startswith("audio/"):
+            media_type = "audio"
+        else:
+            media_type = "file"
+        return cls(
+            media_type=media_type,
+            name=str(getattr(link, "name", None) or "Serena file"),
+            mime_type=mime_type,
+            uri=uri,
+        )
+
+    @classmethod
+    def from_serialized_result(cls, result: str | None) -> "ActivityMedia | None":
+        """Recovers media metadata from activity history written before structured media storage."""
+        if not result:
+            return None
+        token_match = re.search(r"serena-file://export/([0-9a-f]{48})", result)
+        if token_match is None:
+            return None
+        name_match = re.search(r"ResourceLink\(name=(['\"])(.*?)\1", result, re.DOTALL)
+        mime_match = re.search(r"mimeType=(['\"])(.*?)\1", result, re.DOTALL)
+        mime_type = mime_match.group(2) if mime_match is not None else "application/octet-stream"
+        if mime_type.startswith("image/"):
+            media_type: Literal["image", "audio", "file"] = "image"
+        elif mime_type.startswith("audio/"):
+            media_type = "audio"
+        else:
+            media_type = "file"
+        return cls(
+            media_type=media_type,
+            name=name_match.group(2) if name_match is not None else "Serena file",
+            mime_type=mime_type,
+            uri=f"serena-file://export/{token_match.group(1)}",
+        )
+
+    @classmethod
+    def from_storage_dict(cls, payload: object) -> "ActivityMedia | None":
+        """Reconstructs media metadata from persisted activity state."""
+        if not isinstance(payload, dict):
+            return None
+        mapping = cast(dict[str, Any], payload)
+        media_type = mapping.get("type")
+        uri = mapping.get("uri")
+        if media_type not in {"image", "audio", "file"} or not isinstance(uri, str):
+            return None
+        return cls(
+            media_type=cast(Literal["image", "audio", "file"], media_type),
+            name=str(mapping.get("name") or "Serena file"),
+            mime_type=str(mapping.get("mime_type") or "application/octet-stream"),
+            uri=uri,
+        )
+
+    def public_dict(self) -> dict[str, str]:
+        """Returns media metadata safe to expose to the activity widget."""
+        return {"type": self.media_type, "name": self.name, "mime_type": self.mime_type}
+
+    def storage_dict(self) -> dict[str, str]:
+        """Returns complete metadata required to reopen the retained file resource."""
+        return {**self.public_dict(), "uri": self.uri}
 
 
 @dataclass
@@ -34,6 +120,7 @@ class ActivityCall:
     finished_at: float | None = None
     status: str = "running"
     result: str | None = field(default=None, repr=False)
+    media: ActivityMedia | None = field(default=None, repr=False)
     job_id: str | None = None
     job_label: str | None = None
 
@@ -63,6 +150,7 @@ class ActivityCall:
             "scope": self.scope,
             "arguments": self.arguments,
             "result": self.result,
+            "media": self.media.storage_dict() if self.media is not None else None,
             "job_id": self.job_id,
             "job_label": self.job_label,
         }
@@ -71,6 +159,8 @@ class ActivityCall:
     def from_storage_dict(cls, payload: dict[str, Any]) -> "ActivityCall":
         """Reconstructs one retained call from its persisted representation."""
         finished_at = payload.get("finished_at")
+        stored_result = str(payload["result"]) if payload.get("result") is not None else None
+        media = ActivityMedia.from_storage_dict(payload.get("media")) or ActivityMedia.from_serialized_result(stored_result)
         return cls(
             call_id=str(payload["call_id"]),
             tool_name=str(payload.get("tool_name") or ""),
@@ -81,7 +171,8 @@ class ActivityCall:
             started_at=float(payload.get("started_at") or 0.0),
             finished_at=float(finished_at) if isinstance(finished_at, int | float) else None,
             status=str(payload.get("status") or "completed"),
-            result=str(payload["result"]) if payload.get("result") is not None else None,
+            result=None if media is not None else stored_result,
+            media=media,
             job_id=str(payload["job_id"]) if payload.get("job_id") is not None else None,
             job_label=str(payload["job_label"]) if payload.get("job_label") is not None else None,
         )
@@ -529,13 +620,13 @@ class ActivityTracker:
             # update the call lifecycle consistently across old and continuing panels
             status = "completed" if succeeded else "failed"
             finished_at = time.time()
-            serialized_result = (
-                self._serialize_value(result) if result is not None else None
-            )
+            media = ActivityMedia.from_result(result) if result is not None else None
+            serialized_result = self._serialize_value(result) if result is not None and media is None else None
             for run, call in owners:
                 call.status = status
                 call.finished_at = finished_at
                 call.result = serialized_result
+                call.media = media
                 if project_name is not None:
                     call.project_name = project_name
                 self._save_run(run)
@@ -612,7 +703,21 @@ class ActivityTracker:
                         "status": call.status,
                         "arguments": call.arguments,
                         "result": call.result,
+                        "media": call.media.public_dict() if call.media is not None else None,
                     }
+        raise ValueError("Activity call is not available in this run")
+
+    def get_call_media(self, session_id: str, run_id: str, call_id: str) -> ActivityMedia:
+        """Returns retrievable media metadata for one session-owned activity call."""
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None or run.session_id != session_id:
+                raise ValueError("Activity run is not available in this session")
+            for call in run.calls:
+                if call.call_id == call_id:
+                    if call.media is None:
+                        raise ValueError("Activity call has no retained media")
+                    return call.media
         raise ValueError("Activity call is not available in this run")
 
     def get_job_detail(
@@ -917,6 +1022,11 @@ def activity_widget_html() -> str:
   .detail-block + .detail-block { margin-top: 5px; }
   .detail-label { display: block; margin-bottom: 2px; color: color-mix(in srgb, #00491e 82%, CanvasText); font-size: 10px; font-weight: 700; letter-spacing: .035em; text-transform: uppercase; }
   .detail-value { margin: 0; max-height: 9em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 10.5px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .78; }
+  .detail-media { margin-top: 5px; }
+  .detail-media-preview { display: block; max-width: 100%; max-height: 420px; border-radius: 5px; object-fit: contain; }
+  .detail-media-audio { width: min(100%, 420px); height: 32px; }
+  .detail-media-file { display: inline-flex; align-items: center; min-height: 28px; padding: 4px 7px; border: 1px solid color-mix(in srgb, CanvasText 12%, transparent); border-radius: 5px; color: inherit; font-size: 10.5px; text-decoration: none; }
+  .detail-media-note { margin-top: 3px; font-size: 10px; opacity: .58; }
   .job-meta { font-size: 10.5px; opacity: .68; font-variant-numeric: tabular-nums; }
   .job-output-note { margin-bottom: 3px; font-size: 10px; opacity: .56; }
   .job-output-scroll { max-height: 180px; overflow: auto; overscroll-behavior: contain; border: 1px solid color-mix(in srgb, CanvasText 10%, transparent); border-radius: 5px; background: color-mix(in srgb, CanvasText 3%, transparent); }
@@ -1134,6 +1244,81 @@ def activity_widget_html() -> str:
     return otherRunningJobs(next).map(jobEntry).sort((a, b) => b.started_at - a.started_at);
   }
 
+  function resetToolMedia(refs) {
+    if (!refs.mediaBlock) return;
+    refs.mediaBlock.hidden = true;
+    refs.mediaImage.hidden = true;
+    refs.mediaImage.removeAttribute("src");
+    refs.mediaAudio.pause();
+    refs.mediaAudio.hidden = true;
+    refs.mediaAudio.removeAttribute("src");
+    refs.mediaFile.hidden = true;
+    refs.mediaFile.removeAttribute("href");
+    refs.mediaFile.textContent = "";
+    refs.mediaNote.textContent = "";
+  }
+
+  function mediaContentBlocks(result) {
+    if (Array.isArray(result?.content)) return result.content;
+    if (Array.isArray(result?.structuredContent?.content)) return result.structuredContent.content;
+    if (Array.isArray(result?.structured_content?.content)) return result.structured_content.content;
+    return [];
+  }
+
+  async function loadToolMedia(row, media) {
+    const refs = row._activityRefs;
+    if (!media || !refs.mediaBlock) {
+      resetToolMedia(refs);
+      return;
+    }
+
+    resetToolMedia(refs);
+    refs.mediaBlock.hidden = false;
+    refs.mediaNote.textContent = "Loading media...";
+    const directUrl = typeof media.url === "string" ? media.url : "";
+    if (directUrl) {
+      if (media.type === "image") {
+        refs.mediaImage.hidden = false;
+        refs.mediaImage.src = directUrl;
+      } else if (media.type === "audio") {
+        refs.mediaAudio.hidden = false;
+        refs.mediaAudio.src = directUrl;
+      } else {
+        refs.mediaFile.hidden = false;
+        refs.mediaFile.href = directUrl;
+        refs.mediaFile.textContent = media.name || "Open file";
+      }
+      refs.mediaNote.textContent = media.mime_type || "";
+      return;
+    }
+
+    try {
+      const result = await window.openai.callTool("get_activity_media", { run_id: state.run_id, call_id: row.dataset.callId });
+      const blocks = mediaContentBlocks(result);
+      const image = blocks.find(block => block?.type === "image" && block.data);
+      const audio = blocks.find(block => block?.type === "audio" && block.data);
+      const file = blocks.find(block => block?.type === "resource_link");
+      if (image) {
+        refs.mediaImage.hidden = false;
+        refs.mediaImage.src = `data:${image.mimeType || media.mime_type || "image/png"};base64,${image.data}`;
+      } else if (audio) {
+        refs.mediaAudio.hidden = false;
+        refs.mediaAudio.src = `data:${audio.mimeType || media.mime_type || "audio/mpeg"};base64,${audio.data}`;
+      } else if (file) {
+        refs.mediaFile.hidden = false;
+        refs.mediaFile.textContent = file.name || media.name || "File result";
+        if (typeof file.uri === "string" && /^https?:/.test(file.uri)) refs.mediaFile.href = file.uri;
+      } else {
+        throw new Error("No media content returned");
+      }
+      refs.mediaNote.textContent = media.mime_type || "";
+    } catch (_) {
+      refs.mediaFile.hidden = false;
+      refs.mediaFile.textContent = media.name || "Media result";
+      refs.mediaNote.textContent = "Preview unavailable.";
+    }
+  }
+
   async function loadToolDetail(row) {
     const refs = row._activityRefs;
     const callId = row.dataset.callId;
@@ -1147,7 +1332,12 @@ def activity_widget_html() -> str:
       const detail = result?.structuredContent ?? result?.structured_content ?? result;
       if (!detail?.call_id || detail.call_id !== callId) throw new Error("Mismatched activity detail");
       refs.arguments.textContent = detail.arguments || "{}";
-      refs.result.textContent = detail.result ?? (detail.status === "running" ? "Tool is still running." : "No result returned.");
+      const hasMedia = Boolean(detail.media);
+      refs.result.parentElement.hidden = hasMedia;
+      refs.result.textContent = hasMedia
+        ? ""
+        : detail.result ?? (detail.status === "running" ? "Tool is still running." : "No result returned.");
+      await loadToolMedia(row, detail.media);
       refs.loading.hidden = true;
       refs.content.hidden = false;
       row.dataset.detailStatus = detail.status || "";
@@ -1299,6 +1489,11 @@ def activity_widget_html() -> str:
     content.hidden = true;
     let argumentsValue = null;
     let resultValue = null;
+    let mediaBlock = null;
+    let mediaImage = null;
+    let mediaAudio = null;
+    let mediaFile = null;
+    let mediaNote = null;
     let jobMetaValue = null;
     let jobOutputNote = null;
     let jobOutputScroll = null;
@@ -1345,7 +1540,32 @@ def activity_widget_html() -> str:
       resultValue = document.createElement("pre");
       resultValue.className = "detail-value";
       resultBlock.append(resultLabel, resultValue);
-      content.append(argumentsBlock, resultBlock);
+
+      mediaBlock = document.createElement("div");
+      mediaBlock.className = "detail-block detail-media";
+      mediaBlock.hidden = true;
+      const mediaLabel = document.createElement("span");
+      mediaLabel.className = "detail-label";
+      mediaLabel.textContent = "Media";
+      mediaImage = document.createElement("img");
+      mediaImage.className = "detail-media-preview";
+      mediaImage.alt = "Serena tool media result";
+      mediaImage.hidden = true;
+      mediaAudio = document.createElement("audio");
+      mediaAudio.className = "detail-media-audio";
+      mediaAudio.controls = true;
+      mediaAudio.preload = "metadata";
+      mediaAudio.hidden = true;
+      mediaFile = document.createElement("a");
+      mediaFile.className = "detail-media-file";
+      mediaFile.target = "_blank";
+      mediaFile.rel = "noopener";
+      mediaFile.hidden = true;
+      mediaNote = document.createElement("div");
+      mediaNote.className = "detail-media-note";
+      mediaBlock.append(mediaLabel, mediaImage, mediaAudio, mediaFile, mediaNote);
+
+      content.append(argumentsBlock, resultBlock, mediaBlock);
     }
 
     panel.append(loading, content);
@@ -1382,6 +1602,11 @@ def activity_widget_html() -> str:
       content,
       arguments: argumentsValue,
       result: resultValue,
+      mediaBlock,
+      mediaImage,
+      mediaAudio,
+      mediaFile,
+      mediaNote,
       jobMeta: jobMetaValue,
       jobOutputNote,
       jobOutputScroll,
