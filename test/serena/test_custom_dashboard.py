@@ -147,7 +147,7 @@ def test_custom_dashboard_serves_fork_specific_frontend_and_session_api(tmp_path
     assert b"get_activity" in serena_widget.data
     assert b"get_activity_job_detail" in serena_widget.data
     assert serena_widget.headers["Cache-Control"] == "private, max-age=3600"
-    assert b'"tool_name": "get_current_config"' in serena_panel_widget.data
+    assert b"get_activity" in serena_panel_widget.data
     assert serena_panel_widget.headers["Cache-Control"] == "private, no-store"
     assert len(serena["panels"]) == 1
     assert serena_with_state["panels"][0]["initial_state"]["run_id"] == serena["panels"][0]["panel_id"]
@@ -175,7 +175,7 @@ def test_custom_dashboard_can_name_retained_serena_conversation_before_first_too
     assert overview["panels"][0]["display_name"] == "Dashboard naming"
 
 
-def test_dashboard_orders_serena_panels_by_first_creation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dashboard_orders_serena_panels_newest_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
     monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
     dashboard = SerenaDashboardAPI(
@@ -189,10 +189,10 @@ def test_dashboard_orders_serena_panels_by_first_creation(tmp_path: Path, monkey
     dashboard.set_serena_session_name("session-b", "Second session")
     panels = dashboard._app.test_client().get("/dashboard/api/serena").get_json()["panels"]
 
-    assert [panel["display_name"] for panel in panels] == ["First session", "Second session"]
+    assert [panel["display_name"] for panel in panels] == ["Second session", "First session"]
 
 
-def test_dashboard_orders_orchestrator_panels_by_first_creation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dashboard_orders_orchestrator_panels_newest_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     orchestrator_root = tmp_path / "orchestrator-home"
     monkeypatch.setenv("ORCHESTRATOR_HOME", str(orchestrator_root))
     monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
@@ -208,7 +208,7 @@ def test_dashboard_orders_orchestrator_panels_by_first_creation(tmp_path: Path, 
 
     panels = dashboard._app.test_client().get("/dashboard/api/orchestrator").get_json()["panels"]
 
-    assert [panel["display_name"] for panel in panels] == ["First session", "Second session"]
+    assert [panel["display_name"] for panel in panels] == ["Second session", "First session"]
 
 
 def test_custom_dashboard_shows_named_orchestrator_conversation_before_first_delegate(

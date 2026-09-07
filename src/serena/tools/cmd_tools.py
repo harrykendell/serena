@@ -27,6 +27,8 @@ class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit):
         IMPORTANT: Do not use this tool to start
           * long-running processes (e.g. servers) that are not intended to terminate quickly,
           * processes that require user interaction.
+        For Serena-managed jobs, prefer ``job_status(wait_seconds=...)`` when no other useful work remains instead of
+        spending repeated shell calls sleeping and tailing job output.
 
         :param command: the shell command to execute
         :param cwd: the working directory to execute the command in. If None, the project root will be used.

@@ -301,14 +301,10 @@ class ActivityDetailFormatter:
         if subject_key in self._SCOPE_KEYS:
             return self._bound_summary(ActivitySummary(scope=subject))
 
-        _, scope = self._first_scalar(
-            arguments, self._SCOPE_KEYS, excluded_key=subject_key
-        )
+        _, scope = self._first_scalar(arguments, self._SCOPE_KEYS, excluded_key=subject_key)
         return self._bound_summary(ActivitySummary(detail=subject, scope=scope))
 
-    def format_parameters(
-        self, tool_name: str, parameters: str | None
-    ) -> ActivitySummary:
+    def format_parameters(self, tool_name: str, parameters: str | None) -> ActivitySummary:
         """Returns a semantic summary from Serena's logged keyword-argument representation."""
         if not parameters:
             return ActivitySummary()
@@ -328,26 +324,16 @@ class ActivityDetailFormatter:
             # preserve a useful bounded fallback for malformed or non-literal historical log entries
             return ActivitySummary(detail=self._bound(" ".join(parameters.split())))
 
-    def _format_tool_specific(
-        self, tool_name: str, arguments: dict[str, Any]
-    ) -> ActivitySummary | None:
+    def _format_tool_specific(self, tool_name: str, arguments: dict[str, Any]) -> ActivitySummary | None:
         """Returns a composite summary for tools whose arguments have coupled meaning."""
         if tool_name in {"rename_symbol", "rename_memory"}:
             source_key = "name_path" if tool_name == "rename_symbol" else "old_name"
-            detail = self._join_scalars(
-                arguments, source_key, "new_name", separator=" → "
-            )
-            scope = (
-                self._scalar(arguments, "relative_path")
-                if tool_name == "rename_symbol"
-                else ""
-            )
+            detail = self._join_scalars(arguments, source_key, "new_name", separator=" → ")
+            scope = self._scalar(arguments, "relative_path") if tool_name == "rename_symbol" else ""
             return ActivitySummary(detail=detail, scope=scope)
 
         if tool_name == "git_branch":
-            return ActivitySummary(
-                detail=self._join_scalars(arguments, "action", "name")
-            )
+            return ActivitySummary(detail=self._join_scalars(arguments, "action", "name"))
         if tool_name == "git_pull":
             return ActivitySummary(
                 detail=self._scalar(arguments, "branch"),
@@ -442,9 +428,7 @@ class ActivityDetailFormatter:
 
     def _bound_summary(self, summary: ActivitySummary) -> ActivitySummary:
         """Truncates each summary component to the activity panel's established display bound."""
-        return ActivitySummary(
-            detail=self._bound(summary.detail), scope=self._bound(summary.scope)
-        )
+        return ActivitySummary(detail=self._bound(summary.detail), scope=self._bound(summary.scope))
 
     def _bound(self, text: str) -> str:
         """Truncates one summary component to the activity panel's established display bound."""
@@ -531,15 +515,11 @@ class ActivityTracker:
         """
         with self._lock:
             previous_run_id = self._current_run_by_session.get(session_id)
-            previous_run = (
-                self._runs.get(previous_run_id) if previous_run_id is not None else None
-            )
+            previous_run = self._runs.get(previous_run_id) if previous_run_id is not None else None
             continuing_calls: list[ActivityCall] = []
             if previous_run is not None:
                 previous_run.superseded = True
-                continuing_calls = [
-                    call for call in previous_run.calls if call.status == "running"
-                ]
+                continuing_calls = [call for call in previous_run.calls if call.status == "running"]
                 self._save_run(previous_run)
 
             run = ActivityRun(
@@ -581,6 +561,12 @@ class ActivityTracker:
                 return None
 
             summary = self._summarize_arguments(tool_name, arguments)
+            if tool_name == "job_status":
+                job_id = arguments.get("job_id")
+                if isinstance(job_id, str) and job_id:
+                    label = self._known_job_label(job_id)
+                    if label:
+                        summary = self._summarize_arguments(tool_name, {**arguments, "label": label})
             call = ActivityCall(
                 call_id=uuid.uuid4().hex,
                 tool_name=tool_name,
@@ -611,9 +597,7 @@ class ActivityTracker:
             # collect every panel that retains the carried call
             owners: list[tuple[ActivityRun, ActivityCall]] = []
             for run in self._runs.values():
-                owners.extend(
-                    (run, call) for call in run.calls if call.call_id == call_id
-                )
+                owners.extend((run, call) for call in run.calls if call.call_id == call_id)
             if not owners:
                 return
 
@@ -631,9 +615,9 @@ class ActivityTracker:
                     call.project_name = project_name
                 self._save_run(run)
 
-            # associate a newly submitted durable job with every panel that retained the call
+            # enrich job-related calls with the durable job identity returned by the tool
             first_call = owners[0][1]
-            if not succeeded or first_call.tool_name != "start_job":
+            if not succeeded or first_call.tool_name not in {"start_job", "job_status"}:
                 return
 
             job_id, label = self._extract_job_identity(result)
@@ -645,10 +629,11 @@ class ActivityTracker:
                 call.job_label = label
                 if label is not None:
                     call.detail = label
-                if job_id not in run.job_ids:
+                if first_call.tool_name == "start_job" and job_id not in run.job_ids:
                     run.job_ids.append(job_id)
                 self._save_run(run)
-            self._job_cache_at = 0.0
+            if first_call.tool_name == "start_job":
+                self._job_cache_at = 0.0
 
     def get_run(self, session_id: str, run_id: str) -> dict[str, Any]:
         """Returns one session-owned run enriched with the jobs relevant to that panel."""
@@ -687,9 +672,7 @@ class ActivityTracker:
                 self._snapshot_jobs(run, records)
         return payload
 
-    def get_call_detail(
-        self, session_id: str, run_id: str, call_id: str
-    ) -> dict[str, Any]:
+    def get_call_detail(self, session_id: str, run_id: str, call_id: str) -> dict[str, Any]:
         """Returns bounded parameters and result detail for one call in a session-owned run."""
         with self._lock:
             run = self._runs.get(run_id)
@@ -720,9 +703,7 @@ class ActivityTracker:
                     return call.media
         raise ValueError("Activity call is not available in this run")
 
-    def get_job_detail(
-        self, session_id: str, run_id: str, job_id: str
-    ) -> dict[str, Any]:
+    def get_job_detail(self, session_id: str, run_id: str, job_id: str) -> dict[str, Any]:
         """Returns runtime metadata and bounded output for one job visible in a session-owned run."""
         # validate panel ownership and retained current-turn jobs
         with self._lock:
@@ -735,8 +716,7 @@ class ActivityTracker:
         # admit globally running jobs only while this is the current panel
         if not current_turn:
             visible_background_job = any(
-                record.job_id == job_id and record.status is JobStatus.RUNNING
-                for record in self._list_jobs_safely()
+                record.job_id == job_id and record.status is JobStatus.RUNNING for record in self._list_jobs_safely()
             )
             if superseded or not visible_background_job:
                 raise ValueError("Activity job is not available in this run")
@@ -761,17 +741,23 @@ class ActivityTracker:
             "cpu_seconds": runtime.cpu_seconds,
             "process_count": runtime.process_count,
             "output": output.output if output is not None else "",
-            "output_truncated": output.output_truncated
-            if output is not None
-            else False,
-            "earlier_output_omitted": output.earlier_output_omitted
-            if output is not None
-            else False,
-            "has_earlier_output": output.has_earlier_output
-            if output is not None
-            else False,
+            "output_truncated": output.output_truncated if output is not None else False,
+            "earlier_output_omitted": output.earlier_output_omitted if output is not None else False,
+            "has_earlier_output": output.has_earlier_output if output is not None else False,
             "cursor_reset": output.cursor_reset if output is not None else False,
         }
+
+    def _known_job_label(self, job_id: str) -> str:
+        """Returns a retained job label without triggering additional backend work."""
+        for run in reversed(self._runs.values()):
+            for call in reversed(run.calls):
+                if call.job_id == job_id and call.job_label:
+                    return call.job_label
+
+        for record in self._job_cache:
+            if record.job_id == job_id and record.label:
+                return record.label
+        return ""
 
     def _list_jobs_safely(self) -> list[JobRecord]:
         """Returns cached durable-job metadata without allowing job-backend failures to break activity polling."""
@@ -806,9 +792,7 @@ class ActivityTracker:
             "project": record.project_name or "",
             "status": record.status.value,
             "started_at": datetime.fromisoformat(record.created_at).timestamp(),
-            "finished_at": datetime.fromisoformat(record.finished_at).timestamp()
-            if record.finished_at is not None
-            else None,
+            "finished_at": datetime.fromisoformat(record.finished_at).timestamp() if record.finished_at is not None else None,
         }
 
     @staticmethod
@@ -820,11 +804,7 @@ class ActivityTracker:
                 payload = json.loads(payload)
             except json.JSONDecodeError:
                 return None, None
-        elif (
-            isinstance(payload, tuple)
-            and len(payload) == 2
-            and isinstance(payload[1], dict)
-        ):
+        elif isinstance(payload, tuple) and len(payload) == 2 and isinstance(payload[1], dict):
             payload = payload[1]
         elif not isinstance(payload, dict):
             structured = getattr(payload, "structuredContent", None)
@@ -877,9 +857,7 @@ class ActivityTracker:
         return f"{text[:3900]}\n... detail omitted ...\n{text[-3900:]}"
 
     @staticmethod
-    def _summarize_arguments(
-        tool_name: str, arguments: dict[str, Any]
-    ) -> ActivitySummary:
+    def _summarize_arguments(tool_name: str, arguments: dict[str, Any]) -> ActivitySummary:
         """Builds bounded, low-noise semantic summary fields from safe display arguments."""
         return ActivityDetailFormatter().format(tool_name, arguments)
 
@@ -907,7 +885,7 @@ def activity_widget_html() -> str:
   <button id="activity-header" class="header" type="button" aria-expanded="true">
     <span class="title">
       <span id="activity-logo" class="logo" aria-hidden="true">
-        <svg viewBox="0 0 256 256" focusable="false">
+        <svg viewBox="0 0 256 256" width="21" height="21" focusable="false">
           <rect x="24" y="24" width="208" height="208" rx="48" fill="#ffffff" stroke="#00491e" stroke-width="12"/>
           <path d="M104 76 64 128l40 52M152 76l40 52-40 52" fill="none" stroke="#00491e" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
           <path d="M116 128h24" fill="none" stroke="#00491e" stroke-width="18" stroke-linecap="round"/>

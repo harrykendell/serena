@@ -231,6 +231,44 @@ def test_activity_tracker_uses_semantic_tool_detail_lines() -> None:
     ]
 
 
+def test_job_status_detail_prefers_known_job_label() -> None:
+    tracker = ActivityTracker(_FakeJobSource())
+    run = tracker.start_run("conversation-a", "serena")
+
+    start_call_id = tracker.start_tool("conversation-a", "start_job", {"label": "Optimise chapter"})
+    tracker.finish_tool(
+        start_call_id,
+        succeeded=True,
+        result={"job_id": "job-a", "label": "Optimise chapter"},
+    )
+
+    status_call_id = tracker.start_tool(
+        "conversation-a",
+        "job_status",
+        {"job_id": "job-a", "cursor": "cursor-a"},
+    )
+
+    snapshot = tracker.get_run("conversation-a", run["run_id"])
+    status_call = next(call for call in snapshot["calls"] if call["call_id"] == status_call_id)
+    assert status_call["detail"] == "Optimise chapter"
+
+
+def test_job_status_detail_uses_returned_label_when_not_known_at_start() -> None:
+    tracker = ActivityTracker(_FakeJobSource())
+    run = tracker.start_run("conversation-a", "serena")
+
+    status_call_id = tracker.start_tool("conversation-a", "job_status", {"job_id": "job-a"})
+    tracker.finish_tool(
+        status_call_id,
+        succeeded=True,
+        result={"job_id": "job-a", "label": "Recovered optimisation"},
+    )
+
+    snapshot = tracker.get_run("conversation-a", run["run_id"])
+    status_call = next(call for call in snapshot["calls"] if call["call_id"] == status_call_id)
+    assert status_call["detail"] == "Recovered optimisation"
+
+
 def test_activity_tracker_detail_lines_skip_empty_values_and_remain_bounded() -> None:
     tracker = ActivityTracker(_FakeJobSource())
     run = tracker.start_run("conversation-a", "serena")

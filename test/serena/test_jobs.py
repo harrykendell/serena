@@ -395,10 +395,54 @@ def test_job_tools_return_chat_friendly_telemetry_and_persistence(tmp_path: Path
     assert status["next_cursor"] == "1"
     assert status["runtime"]["memory_bytes"] == 1024
     assert status["runtime"]["process_count"] == 3
-    assert "poll later" in status["next_step"]
+    assert "wait_seconds" in status["next_step"]
     assert listed["jobs"][0]["label"] == "demo test"
     assert listed["jobs"][0]["runtime"]["cpu_seconds"] == 2.25
     assert cancelled["status"] == "cancelled"
+
+
+def test_job_status_waits_until_new_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = FakeJobBackend()
+    manager = _manager(tmp_path, backend)
+    project = MagicMock(project_root=str(tmp_path), project_name="demo")
+    agent = MagicMock()
+    agent.get_active_project_or_raise.return_value = project
+    status_tool = JobStatusTool(agent)
+    status_tool._job_manager = manager
+
+    record, _ = manager.start_job(
+        command="echo hello",
+        project_root=tmp_path,
+        label="wait test",
+        project_name="demo",
+    )
+    times = iter([0.0, 0.0, 0.1, 0.1])
+    monkeypatch.setattr("serena.tools.job_tools.time.monotonic", lambda: next(times))
+
+    def fake_sleep(_: float) -> None:
+        backend.output[record.job_id].append("ready")
+
+    monkeypatch.setattr("serena.tools.job_tools.time.sleep", fake_sleep)
+
+    status = json.loads(status_tool.apply(record.job_id, cursor="0", wait_seconds=1))
+
+    assert status["output"] == "ready"
+    assert status["next_cursor"] == "1"
+
+
+def test_job_status_wait_validation(tmp_path: Path) -> None:
+    backend = FakeJobBackend()
+    manager = _manager(tmp_path, backend)
+    project = MagicMock(project_root=str(tmp_path), project_name="demo")
+    agent = MagicMock()
+    agent.get_active_project_or_raise.return_value = project
+    status_tool = JobStatusTool(agent)
+    status_tool._job_manager = manager
+
+    with pytest.raises(ValueError, match="between 0 and 60"):
+        status_tool.apply("missing", wait_seconds=61)
+    with pytest.raises(ValueError, match="requires job_id"):
+        status_tool.apply(wait_seconds=1)
 
 
 def test_runner_records_terminal_exit_status_and_consumes_command(tmp_path: Path) -> None:

@@ -17,6 +17,7 @@ from typing import Any
 from serena.activity import ActivityMedia
 
 _FILE_RESOURCE_RE = re.compile(r"serena-file://export/([0-9a-f]{48})")
+_PANEL_ID_RE = re.compile(r"[0-9a-f]{16}")
 _JOB_ID_RE = re.compile(r"['\"]job_id['\"]\s*:\s*['\"]([^'\"]+)['\"]")
 _MAX_SESSIONS = 128
 _MAX_CALLS_PER_SESSION = 500
@@ -169,10 +170,12 @@ class DashboardActivityArchive:
 
     def get_session(self, panel_id: str) -> dict[str, Any]:
         """Returns one retained session by its opaque dashboard identifier."""
-        for session in self.list_sessions():
-            if session.get("panel_id") == panel_id:
-                return session
-        raise KeyError(panel_id)
+        if _PANEL_ID_RE.fullmatch(panel_id) is None:
+            raise KeyError(panel_id)
+        path = self._root / f"{panel_id}.json"
+        if not path.is_file():
+            raise KeyError(panel_id)
+        return self._read_path(path)
 
     def set_display_name(self, session_id: str, display_name: str) -> str:
         """Sets the operator-facing name for one retained ChatGPT conversation."""

@@ -952,7 +952,7 @@ function sessionWidgetBootstrap(panel, kind) {
         superseded: false,
         delegates: panel.delegates || [],
       };
-  return JSON.stringify({ panel_id: panel.panel_id, tool_output: toolOutput });
+  return JSON.stringify({ panel_id: panel.panel_id, active: Boolean(panel.active), tool_output: toolOutput || null });
 }
 
 function renderSessionWidgets(containerId, countId, panels, kind) {
@@ -960,8 +960,8 @@ function renderSessionWidgets(containerId, countId, panels, kind) {
   const orderedPanels = [...panels].sort((left, right) => {
     const leftStarted = Number(left.started_at) || 0;
     const rightStarted = Number(right.started_at) || 0;
-    if (leftStarted !== rightStarted) return leftStarted - rightStarted;
-    return String(left.panel_id || "").localeCompare(String(right.panel_id || ""));
+    if (leftStarted !== rightStarted) return rightStarted - leftStarted;
+    return String(right.panel_id || "").localeCompare(String(left.panel_id || ""));
   });
   setText(countId, orderedPanels.length, "0");
   if (!orderedPanels.length) {
@@ -982,9 +982,12 @@ function renderSessionWidgets(containerId, countId, panels, kind) {
       const frame = document.createElement("iframe");
       frame.className = "activity-widget-frame";
       frame.name = sessionWidgetBootstrap(panel, kind);
-      frame.loading = panel.active ? "eager" : "lazy";
-      frame.addEventListener("load", () => frame.removeAttribute("name"), { once: true });
-      frame.src = `/dashboard/widget/${kind}/${encodeURIComponent(panel.panel_id)}`;
+      frame.loading = "eager";
+      frame.addEventListener("load", () => {
+        frame.removeAttribute("name");
+        frame.classList.add("ready");
+      }, { once: true });
+      frame.src = `/dashboard/widget/${kind}`;
       frame.title = kind === "serena" ? "Serena session activity" : "Orchestrator activity";
       shell.append(frame);
       entry.append(shell);
@@ -995,6 +998,13 @@ function renderSessionWidgets(containerId, countId, panels, kind) {
       if (shell) {
         shell.classList.toggle("active-session", Boolean(panel.active));
         shell.classList.toggle("retained-session", !panel.active);
+      }
+      const frame = entry.querySelector(".activity-widget-frame");
+      if (frame?.contentWindow) {
+        frame.contentWindow.postMessage(
+          { type: "serena-dashboard-live", panel_id: panel.panel_id, active: Boolean(panel.active) },
+          location.origin,
+        );
       }
 
       updateSessionWidgetHeading(entry, panel);

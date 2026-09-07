@@ -662,7 +662,9 @@ button { font: inherit; }
   height: 48px;
   border: 0;
   background: transparent;
+  visibility: hidden;
 }
+.activity-widget-frame.ready { visibility: visible; }
 
 .activity-workspace {
   container-name: activity-workspace;

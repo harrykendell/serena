@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Literal
 
 from serena.jobs import (
@@ -103,8 +104,8 @@ class StartJobTool(_JobTool, ToolMarkerCanEdit):
                 "max_concurrent_jobs": self._job_manager.max_concurrent_jobs,
                 "persistence": self._persistence_payload(self._job_manager.persistence_info()),
                 "next_step": (
-                    "Continue other useful work. Call job_status with this job_id when progress or the final result is needed; "
-                    "preserve the returned next_cursor between polls to avoid repeating output."
+                    "Continue other useful work. If none remains, call job_status with this job_id and wait_seconds (up to 60) "
+                    "to wait efficiently for progress or completion; preserve next_cursor between polls to avoid repeating output."
                 ),
             }
         )
@@ -119,22 +120,30 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
         job_id: str | None = None,
         cursor: str | None = None,
         output: Literal["latest", "start"] = "latest",
+        wait_seconds: float = 0.0,
     ) -> str:
         """Return job state, telemetry, and bounded output.
 
         With a ``job_id``, the first call defaults to the latest bounded output tail. Set ``output="start"`` to read from the
         beginning instead. Pass ``next_cursor`` back on later calls to receive only new output. A stale journal cursor is recovered
-        automatically by returning the latest tail with ``cursor_reset=true``. Without a ``job_id``, lists all running jobs first
-        followed by recent terminal jobs so work can be recovered after Serena restarts or in another chat.
+        automatically by returning the latest tail with ``cursor_reset=true``. Set ``wait_seconds`` when no useful independent work
+        remains: Serena waits up to that many seconds for the job to finish or for new output to appear, then returns the same bounded
+        status payload. Without a ``job_id``, lists all running jobs first followed by recent terminal jobs so work can be recovered
+        after Serena restarts or in another chat.
 
         :param job_id: opaque job ID returned by ``start_job``; omit to list recent jobs
         :param cursor: opaque cursor returned by the preceding status call for this job
         :param output: initial output position when no cursor is supplied: ``latest`` (default) or ``start``
+        :param wait_seconds: optional long-poll duration from 0 through 60 seconds; returns early if the job finishes or new output appears
         :return: JSON describing current state, telemetry, bounded output, persistence guarantees, and the appropriate next action
         """
+        if wait_seconds < 0 or wait_seconds > 60:
+            raise ValueError("wait_seconds must be between 0 and 60")
         if job_id is None:
             if cursor is not None:
                 raise ValueError("cursor requires job_id")
+            if wait_seconds:
+                raise ValueError("wait_seconds requires job_id")
             snapshots = self._job_manager.list_job_snapshots()
             running_jobs = sum(snapshot.record.status is JobStatus.RUNNING for snapshot in snapshots)
             jobs: list[dict[str, object]] = []
@@ -153,6 +162,27 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
             )
 
         snapshot = self._job_manager.get_job(job_id, cursor, output_mode=output)
+        initial_output = snapshot.output
+        assert initial_output is not None
+        if (
+            wait_seconds
+            and snapshot.record.status is JobStatus.RUNNING
+            and not initial_output.output
+            and not initial_output.has_more_output
+        ):
+            baseline_cursor = initial_output.next_cursor
+            deadline = time.monotonic() + wait_seconds
+            while time.monotonic() < deadline:
+                time.sleep(min(0.25, deadline - time.monotonic()))
+                waited = self._job_manager.get_job(job_id, baseline_cursor, output_mode=output)
+                waited_output = waited.output
+                assert waited_output is not None
+                if waited.record.status is not JobStatus.RUNNING or waited_output.output or waited_output.has_more_output:
+                    snapshot = waited
+                    break
+            else:
+                snapshot = self._job_manager.get_job(job_id, baseline_cursor, output_mode=output)
+
         return self._json(self._snapshot_payload(snapshot))
 
     def _snapshot_payload(self, snapshot: JobSnapshot) -> dict[str, object]:
@@ -184,7 +214,8 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
         elif record.status is JobStatus.RUNNING:
             prefix = "The latest bounded output tail is shown; earlier output was omitted. " if output.earlier_output_omitted else ""
             payload["next_step"] = (
-                prefix + "The job is still running. Continue other useful work and poll later with next_cursor when progress is needed."
+                prefix + "The job is still running. Continue other useful work; if none remains, call job_status with next_cursor and "
+                "wait_seconds (up to 60) instead of manually sleeping between polls."
             )
         elif output.earlier_output_omitted:
             payload["next_step"] = (

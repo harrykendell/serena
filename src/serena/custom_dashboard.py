@@ -495,9 +495,12 @@ class DashboardSerenaActivityOverview:
         self._execution_history = execution_history
         self._job_overview = job_overview
         self._activity_formatter = ActivityDetailFormatter()
+        self._jobs_cache_lock = threading.Lock()
+        self._jobs_cache_at = 0.0
+        self._jobs_cache: dict[str, dict[str, Any]] = {}
 
     def get_panels(self, include_state: bool = False) -> dict[str, Any]:
-        """Returns retained Serena session panels in stable first-created order."""
+        """Returns retained Serena session panels newest first by creation time."""
         executions = self._execution_history.get_executions()
         self._archive.reconcile_executions(executions.get("executions", []))
         jobs = self._jobs_by_id()
@@ -518,13 +521,11 @@ class DashboardSerenaActivityOverview:
             if include_state:
                 panel["initial_state"] = self._panel_state(session, jobs)
             panels.append(panel)
-        panels.sort(key=lambda item: (float(item.get("started_at") or 0.0), str(item["panel_id"])))
+        panels.sort(key=lambda item: (float(item.get("started_at") or 0.0), str(item["panel_id"])), reverse=True)
         return {"status": "success", "panels": panels}
 
     def get_panel(self, panel_id: str) -> dict[str, Any]:
         """Returns one retained Serena session in the inline-widget activity shape."""
-        executions = self._execution_history.get_executions()
-        self._archive.reconcile_executions(executions.get("executions", []))
         session = self._archive.get_session(panel_id)
         return self._panel_state(session, self._jobs_by_id())
 
@@ -600,9 +601,16 @@ class DashboardSerenaActivityOverview:
         }
 
     def _jobs_by_id(self) -> dict[str, dict[str, Any]]:
-        """Returns retained durable jobs indexed by job identifier."""
-        payload = self._job_overview.get_jobs()
-        return {str(item["job_id"]): item for item in payload.get("jobs", [])}
+        """Returns briefly cached durable jobs indexed by job identifier."""
+        now = time.monotonic()
+        with self._jobs_cache_lock:
+            if self._jobs_cache and now - self._jobs_cache_at < 0.5:
+                return self._jobs_cache
+
+            payload = self._job_overview.get_jobs()
+            self._jobs_cache = {str(item["job_id"]): item for item in payload.get("jobs", [])}
+            self._jobs_cache_at = time.monotonic()
+            return self._jobs_cache
 
     @staticmethod
     def _session_job_ids(session: dict[str, Any]) -> list[str]:
@@ -694,7 +702,7 @@ class DashboardOrchestratorOverview:
             panel["updated_at"] = max(float(panel.get("updated_at") or 0.0), float(session.get("updated_at") or 0.0))
 
         panels = list(by_id.values())
-        panels.sort(key=lambda panel: (float(panel.get("started_at") or 0.0), str(panel["panel_id"])))
+        panels.sort(key=lambda panel: (float(panel.get("started_at") or 0.0), str(panel["panel_id"])), reverse=True)
         return panels
 
     def get_panels(self) -> dict[str, Any]:
@@ -857,13 +865,12 @@ class CustomDashboard:
         @app.route("/dashboard/widget/serena", defaults={"panel_id": ""}, methods=["GET"])
         @app.route("/dashboard/widget/serena/<panel_id>", methods=["GET"])
         def get_serena_activity_widget(panel_id: str) -> Response:
-            initial_state = None
             if panel_id:
                 try:
-                    initial_state = self._serena_activity_overview.get_panel(panel_id)
+                    self._activity_archive.get_session(panel_id)
                 except KeyError:
                     abort(404)
-            response = Response(serena_dashboard_widget_html(panel_id or None, initial_state), mimetype="text/html")
+            response = Response(serena_dashboard_widget_html(panel_id or None), mimetype="text/html")
             response.headers["Cache-Control"] = "private, no-store" if panel_id else "private, max-age=3600"
             return response
 
