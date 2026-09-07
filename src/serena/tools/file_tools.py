@@ -32,6 +32,10 @@ class ReadFileTool(Tool):
         """
         Reads the given file or a chunk of it.
 
+        For analyzable source code, use ``get_symbols_overview``/``find_symbol`` by default. Use this tool for non-code files,
+        module-level material not represented well as symbols, or an exact source-line range whose surrounding context is needed.
+        Do not use raw file reads as a substitute for locating or reading a named symbol.
+
         :param relative_path: the relative path to the file to read
         :param start_line: the 0-based index of the first line to be retrieved, negative values count from the end of the file.
         :param end_line: the 0-based index of the last line to be retrieved (inclusive). If None, read until the end of the file.
@@ -186,12 +190,10 @@ class ReplaceContentTool(EditingToolWithDiagnostics):
         r"""
         Replaces one or more occurrences of a given pattern in a file with new content.
 
-        VERY IMPORTANT: The "regex" mode allows very large sections of code to be replaced WITHOUT
-        quoting them fully: use a needle of the form "beginning.*?end-of-text-to-be-replaced" with
-        wildcards instead of pasting the exact original text — shorter, cheaper, and you cannot make
-        mistakes, because an ambiguous match returns an error you can refine, so wildcards are safe.
-        Prefer regex mode with suitable wildcards for long multi-line replacements; use the
-        symbol-level editors when replacing a whole method/class.
+        Regex mode uses DOTALL and MULTILINE semantics and can match spans with bounded wildcards such as
+        "beginning.*?end-of-text-to-be-replaced". Ambiguous single-match replacements fail without modifying the file.
+        Use this for small edits inside a symbol or file-level text that is not itself a complete named symbol. Do not replace
+        an entire named function, method, class, or other symbol with this tool; retrieve it and use ``replace_symbol_body``.
 
         :param relative_path: the relative path to the file
         :param needle: the string or regex pattern to search for.
@@ -571,7 +573,10 @@ class SearchForPatternTool(Tool):
     ) -> str:
         """
         Searches for a regex pattern across project files, returning whole matched lines (plus optional context).
-        Prefer symbolic operations if you know which symbols you are looking for!
+        Use this for arbitrary text/non-symbol structure or discovery when a target code symbol cannot yet be identified
+        semantically. Do not use it to read the body of a named class, function, method, constructor, or other analyzable code
+        symbol; use ``find_symbol`` (or ``get_symbols_overview`` first when the file structure is unfamiliar). If a pattern search
+        discovers a candidate symbol, continue with symbolic retrieval rather than expanding regex context to read its implementation.
 
         :param substring_pattern: regular expression to search for.
         :param context_lines_before: number of context lines to include before each match.
@@ -579,8 +584,8 @@ class SearchForPatternTool(Tool):
         :param paths_include_glob: optional glob (relative to project root, e.g. ``"src/**/*.ts"``) restricting which files are searched.
         :param paths_exclude_glob: optional glob to exclude files; takes precedence over `paths_include_glob`.
         :param relative_path: restricts the search to this file or subdirectory of the project root
-        :param restrict_search_to_code_files: whether to search only (non-ignored) files containing analyzable code symbols
-            (useful when looking for class/method definitions); otherwise also search non-code files.
+        :param restrict_search_to_code_files: whether to search only (non-ignored) files containing analyzable code symbols;
+            otherwise also search non-code files.
         :param skip_ignored_files: whether to skip ignored sub-paths (default: True)
         :param multiline: whether to apply multi-line matching (default: True), enabling the flags re.DOTALL and re.MULTILINE
         :param max_answer_chars: if the output exceeds this many characters, a progressively shortened summary is returned instead.
@@ -633,11 +638,14 @@ class SearchForPatternTool(Tool):
             }
             if truncate:
                 header = (
-                    f"Matched lines (text over {_TEXT_TRUNCATE} chars is truncated, marked with a trailing '...'); "
-                    "use read_file with the line numbers for full content:"
+                    f"Matched lines (text over {_TEXT_TRUNCATE} chars is truncated, marked with a trailing '...'). "
+                    "For matched code symbols, continue with semantic retrieval; use read_file only when exact raw line context is needed:"
                 )
             else:
-                header = "Matched lines per file; use read_file with the line numbers for surrounding context:"
+                header = (
+                    "Matched lines per file. For matched code symbols, continue with semantic retrieval; "
+                    "use read_file only when exact raw line context is needed:"
+                )
             return f"{header}\n{self._to_json(compact)}"
 
         def make_first_lines_full() -> str:

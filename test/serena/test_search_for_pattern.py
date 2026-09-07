@@ -43,6 +43,8 @@ def test_search_for_pattern_snippet_stage(tmp_path):
     snippet = run(7000)
     assert "The answer is too long" in snippet
     assert '"text":' in snippet and "MATCHME item number 0000" in snippet
+    assert "continue with semantic retrieval" in snippet
+    assert "use read_file only when exact raw line context is needed" in snippet
     assert "Match lines per file" not in snippet  # not the bare-line-numbers stage
 
     # tighter cap: the chain degrades past the snippet stage to bare line numbers

@@ -4,7 +4,7 @@
 
 # NOTE: This module is auto-generated from interprompt.autogenerate_prompt_factory_module, do not edit manually!
 
-from interprompt.prompt_factory import PromptFactoryBase
+from interprompt.prompt_factory import *
 from typing import Any
 
 

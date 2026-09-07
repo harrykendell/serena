@@ -30,6 +30,40 @@ class BaseMockTool(Tool):
         super().__init__(MockAgent())
 
 
+def test_chatgpt_replace_content_description_is_descriptive_not_instructive() -> None:
+    """Test that ChatGPT receives the context-specific replacement-tool documentation."""
+
+    class ChatGPTMockAgent(MockAgent):
+        @staticmethod
+        def get_context() -> SerenaAgentContext:
+            return SerenaAgentContext.from_name("chatgpt")
+
+    class ReplaceContentTool(Tool):
+        def __init__(self):
+            super().__init__(ChatGPTMockAgent())
+
+        def apply(self, relative_path: str, needle: str, repl: str, mode: str) -> str:
+            """VERY IMPORTANT: Use regex mode and follow these instructions.
+
+            :param relative_path: file to edit
+            :param needle: pattern to replace
+            :param repl: replacement text
+            :param mode: replacement mode
+            """
+            return "OK"
+
+    description = make_tool(ReplaceContentTool()).description
+
+    assert description == (
+        "Replaces small spans inside symbols or file-level text using literal or regular-expression patterns. "
+        "Do not use it to replace an entire named function, method, class, or other symbol; use replace_symbol_body.\n"
+        "Regex matching uses DOTALL and MULTILINE semantics and supports bounded wildcard spans such as "
+        '"beginning.*?end"; ambiguous single-match replacements fail without modifying the file.'
+    )
+    assert "VERY IMPORTANT" not in description
+    assert "Use mode" not in description
+
+
 def test_mcp_server_advertises_embedded_png_icon(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that Serena advertises its plugin icon in MCP initialization metadata."""
     factory = SerenaMCPFactory(transport="stdio", context="chatgpt")
