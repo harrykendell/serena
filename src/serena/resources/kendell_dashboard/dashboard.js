@@ -978,7 +978,7 @@ function renderSessionWidgets(containerId, countId, panels, kind) {
       frame.name = sessionWidgetBootstrap(panel, kind);
       frame.loading = panel.active ? "eager" : "lazy";
       frame.addEventListener("load", () => frame.removeAttribute("name"), { once: true });
-      frame.src = `/dashboard/widget/${kind}`;
+      frame.src = `/dashboard/widget/${kind}/${encodeURIComponent(panel.panel_id)}`;
       frame.title = kind === "serena" ? "Serena session activity" : "Orchestrator activity";
       shell.append(frame);
       entry.append(shell);
