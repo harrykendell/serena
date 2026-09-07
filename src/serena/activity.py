@@ -1136,6 +1136,7 @@ def activity_widget_html() -> str:
   header.addEventListener("click", () => {
     initialViewResolved = true;
     setCollapsed(!root.classList.contains("collapsed"), preferSummaryCollapsedHeader);
+    if (state?.run_id) render(state);
   });
   otherJobsButton.addEventListener("click", event => {
     event.stopPropagation();
@@ -1714,7 +1715,11 @@ def activity_widget_html() -> str:
 
     const primary = primaryEntries(next);
     empty.hidden = primary.length > 0 || backgroundJobs.length > 0;
-    reconcileRows(displayedEntries(next), displayedBackgroundJobs(next), now);
+    if (root.classList.contains("collapsed")) {
+      reconcileRows([], [], now);
+    } else {
+      reconcileRows(displayedEntries(next), displayedBackgroundJobs(next), now);
+    }
     syncClockTimer();
     syncJobDetailTimer();
     window.openai?.notifyIntrinsicHeight?.();

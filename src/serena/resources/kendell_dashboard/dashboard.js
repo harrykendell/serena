@@ -1,6 +1,7 @@
 const API_PREFIX = "/dashboard/api";
 const POLL_INTERVAL_MS = 1500;
 const SCROLL_IDLE_MS = 350;
+const DASHBOARD_LOAD_ID = Date.now().toString(36);
 
 const outputCache = new Map();
 const outputRequests = new Set();
@@ -955,6 +956,12 @@ function sessionWidgetBootstrap(panel, kind) {
   return JSON.stringify({ panel_id: panel.panel_id, active: Boolean(panel.active), tool_output: toolOutput || null });
 }
 
+function revealSessionFramesWhenReady(container) {
+  const frames = Array.from(container.querySelectorAll(".activity-widget-frame"));
+  if (!frames.length || frames.some(frame => frame.dataset.loaded !== "true")) return;
+  requestAnimationFrame(() => frames.forEach(frame => frame.classList.add("ready")));
+}
+
 function renderSessionWidgets(containerId, countId, panels, kind) {
   const container = byId(containerId);
   const orderedPanels = [...panels].sort((left, right) => {
@@ -985,9 +992,14 @@ function renderSessionWidgets(containerId, countId, panels, kind) {
       frame.loading = "eager";
       frame.addEventListener("load", () => {
         frame.removeAttribute("name");
-        frame.classList.add("ready");
+        frame.dataset.loaded = "true";
+        revealSessionFramesWhenReady(container);
       }, { once: true });
-      frame.src = `/dashboard/widget/${kind}`;
+      frame.addEventListener("error", () => {
+        frame.dataset.loaded = "true";
+        revealSessionFramesWhenReady(container);
+      }, { once: true });
+      frame.src = `/dashboard/widget/${kind}?load=${DASHBOARD_LOAD_ID}`;
       frame.title = kind === "serena" ? "Serena session activity" : "Orchestrator activity";
       shell.append(frame);
       entry.append(shell);
