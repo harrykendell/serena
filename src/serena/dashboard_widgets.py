@@ -6,17 +6,19 @@ from orchestrator.activity import activity_widget_html as orchestrator_activity_
 from serena.activity import activity_widget_html as serena_activity_widget_html
 
 
-def serena_dashboard_widget_html(panel_id: str | None = None) -> str:
+def serena_dashboard_widget_html(panel_id: str | None = None, initial_state: dict[str, object] | None = None) -> str:
     """Returns one retained Serena session widget connected to dashboard data."""
     panel_json = json.dumps(panel_id or "")
+    initial_state_json = json.dumps(initial_state).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
     adapter = f"""<script>
 (() => {{
   const fallbackPanelId = {panel_json};
+  const serverInitialOutput = {initial_state_json};
   let bootstrap = {{}};
   try {{ bootstrap = JSON.parse(window.name || "{{}}"); window.name = ""; }} catch (_) {{ bootstrap = {{}}; }}
   const panelId = bootstrap.panel_id || fallbackPanelId;
-  const initialOutput = bootstrap.tool_output || {{ run_id: panelId, project_name: "", superseded: false, calls: [], jobs: [] }};
-  let initialReadPending = Boolean(bootstrap.tool_output);
+  const initialOutput = bootstrap.tool_output || serverInitialOutput || {{ run_id: panelId, project_name: "", superseded: false, calls: [], jobs: [] }};
+  let initialReadPending = Boolean(bootstrap.tool_output || serverInitialOutput);
 
   async function getJson(path) {{
     const response = await fetch(`/dashboard/api${{path}}`, {{ cache: "no-store", headers: {{ Accept: "application/json" }} }});
@@ -55,17 +57,19 @@ def serena_dashboard_widget_html(panel_id: str | None = None) -> str:
     return adapter + serena_activity_widget_html()
 
 
-def orchestrator_dashboard_widget_html(panel_id: str | None = None) -> str:
+def orchestrator_dashboard_widget_html(panel_id: str | None = None, initial_state: dict[str, object] | None = None) -> str:
     """Returns one Orchestrator activity widget connected to an operator panel."""
     panel_json = json.dumps(panel_id or "")
+    initial_state_json = json.dumps(initial_state).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
     adapter = f"""<script>
 (() => {{
   const fallbackPanelId = {panel_json};
+  const serverInitialOutput = {initial_state_json};
   let bootstrap = {{}};
   try {{ bootstrap = JSON.parse(window.name || "{{}}"); window.name = ""; }} catch (_) {{ bootstrap = {{}}; }}
   const panelId = bootstrap.panel_id || fallbackPanelId;
-  const initialOutput = bootstrap.tool_output || {{ run_id: panelId, started_at: 0, superseded: false, delegates: [] }};
-  let initialReadPending = Boolean(bootstrap.tool_output);
+  const initialOutput = bootstrap.tool_output || serverInitialOutput || {{ run_id: panelId, started_at: 0, superseded: false, delegates: [] }};
+  let initialReadPending = Boolean(bootstrap.tool_output || serverInitialOutput);
 
   async function getJson(path) {{
     const response = await fetch(`/dashboard/api${{path}}`, {{ cache: "no-store", headers: {{ Accept: "application/json" }} }});
