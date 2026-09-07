@@ -22,13 +22,9 @@ class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit):
         max_answer_chars: int = -1,
     ) -> str:
         """
-        Execute a shell command and return its output. If there is a memory about suggested commands, read that first.
-        Never execute unsafe shell commands!
-        IMPORTANT: Do not use this tool to start
-          * long-running processes (e.g. servers) that are not intended to terminate quickly,
-          * processes that require user interaction.
-        For Serena-managed jobs, prefer ``job_status(wait_seconds=...)`` when no other useful work remains instead of
-        spending repeated shell calls sleeping and tailing job output.
+        Execute a short, non-interactive shell command and return its output.
+        This tool is intended for commands that terminate promptly. Long-running commands are supported by
+        ``start_job``, and Serena-managed job progress is available through ``job_status(wait_seconds=...)``.
 
         :param command: the shell command to execute
         :param cwd: the working directory to execute the command in. If None, the project root will be used.
