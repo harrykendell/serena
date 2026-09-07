@@ -24,7 +24,7 @@ class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit):
         """
         Execute a short, non-interactive shell command and return its output.
         This tool is intended for commands that terminate promptly. Long-running commands are supported by
-        ``start_job``, and Serena-managed job progress is available through ``job_status(wait_seconds=...)``.
+        ``start_job``, and Serena-managed jobs can be awaited through ``job_status(wait_for='completed')``.
 
         :param command: the shell command to execute
         :param cwd: the working directory to execute the command in. If None, the project root will be used.

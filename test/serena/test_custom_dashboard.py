@@ -124,6 +124,7 @@ def test_custom_dashboard_serves_fork_specific_frontend_and_session_api(tmp_path
     redirect = client.get("/dashboard", base_url="https://serena.kendell.uk")
     response = client.get("/dashboard/")
     dashboard_script = client.get("/dashboard/dashboard.js")
+    state = client.get("/dashboard/api/state?include_state=1").get_json()
     session = client.get("/dashboard/api/session").get_json()
     serena = client.get("/dashboard/api/serena").get_json()
     serena_with_state = client.get("/dashboard/api/serena?include_state=1").get_json()
@@ -151,6 +152,8 @@ def test_custom_dashboard_serves_fork_specific_frontend_and_session_api(tmp_path
     assert serena_panel_widget.headers["Cache-Control"] == "private, no-store"
     assert len(serena["panels"]) == 1
     assert serena_with_state["panels"][0]["initial_state"]["run_id"] == serena["panels"][0]["panel_id"]
+    assert state["serena"]["panels"][0]["panel_id"] == serena["panels"][0]["panel_id"]
+    assert state["orchestrator"] == {"status": "success", "panels": []}
     assert orchestrator == {"status": "success", "panels": []}
     assert session["status"] == "success"
     assert session["context"] == "chatgpt"
@@ -173,6 +176,54 @@ def test_custom_dashboard_can_name_retained_serena_conversation_before_first_too
 
     assert len(overview["panels"]) == 1
     assert overview["panels"][0]["display_name"] == "Dashboard naming"
+
+
+def test_dashboard_revalidates_unchanged_panel_overview_without_response_body(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
+    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
+    dashboard = SerenaDashboardAPI(
+        memory_log_handler=_DummyMemoryLogHandler(),
+        tool_names=[],
+        agent=_DashboardAgent(),
+        tool_usage_stats=None,
+    )
+    dashboard.set_serena_session_name("session-a", "Cached session")
+    client = dashboard._app.test_client()
+
+    first = client.get("/dashboard/api/serena")
+    second = client.get("/dashboard/api/serena", headers={"If-None-Match": first.headers["ETag"]})
+
+    assert first.status_code == 200
+    assert first.headers["Cache-Control"] == "private, no-cache"
+    assert second.status_code == 304
+    assert second.data == b""
+
+
+def test_dashboard_bootstraps_inactive_serena_panels_with_compact_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
+    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
+    log_handler = _DummyMemoryLogHandler()
+    dashboard = SerenaDashboardAPI(
+        memory_log_handler=log_handler,
+        tool_names=[],
+        agent=_DashboardAgent(),
+        tool_usage_stats=None,
+    )
+    client = dashboard._app.test_client()
+    for task in (1, 2):
+        log_handler.emit_message(
+            f"INFO [Task-{task}:ReadFileTool] serena.tools.tools_base:_log_tool_application:291 - "
+            f"read_file: relative_path='file-{task}.txt'; project: serena; session_id: session-a"
+        )
+        log_handler.emit_message(f"INFO [Task-{task}:ReadFileTool] serena.tools.tools_base:apply_ex:410 - Result: file {task}")
+
+    panel = client.get("/dashboard/api/serena?include_state=1").get_json()["panels"][0]
+    state = panel["initial_state"]
+
+    assert panel["active"] is False
+    assert state["summary_only"] is True
+    assert state["tool_count"] == 2
+    assert len(state["calls"]) == 1
 
 
 def test_dashboard_orders_serena_panels_newest_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

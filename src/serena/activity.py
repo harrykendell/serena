@@ -1133,9 +1133,20 @@ def activity_widget_html() -> str:
     window.openai?.notifyIntrinsicHeight?.();
   }
 
-  header.addEventListener("click", () => {
+  header.addEventListener("click", async () => {
     initialViewResolved = true;
+    const expanding = root.classList.contains("collapsed");
     setCollapsed(!root.classList.contains("collapsed"), preferSummaryCollapsedHeader);
+    if (expanding && state?.summary_only && state?.run_id && window.openai?.callTool) {
+      try {
+        const result = await window.openai.callTool("get_activity", { run_id: state.run_id, full: true });
+        const next = result?.structuredContent ?? result?.structured_content ?? result;
+        if (next?.run_id) render(next);
+      } catch (_) {
+        // Keep the compact retained state if historical expansion cannot be refreshed.
+      }
+      return;
+    }
     if (state?.run_id) render(state);
   });
   otherJobsButton.addEventListener("click", event => {
@@ -1691,8 +1702,8 @@ def activity_widget_html() -> str:
     headerSubmitted.textContent = activeHeaderEntry ? submittedClock(activeHeaderEntry.submitted_at ?? activeHeaderEntry.started_at) : "";
     headerElapsed.textContent = activeHeaderEntry ? elapsed(activeHeaderEntry, now) : "";
 
-    const toolCount = (next.calls || []).length;
-    const jobCount = (next.jobs || []).length;
+    const toolCount = Number.isFinite(next.tool_count) ? next.tool_count : (next.calls || []).length;
+    const jobCount = Number.isFinite(next.job_count) ? next.job_count : (next.jobs || []).length;
     root.classList.toggle("empty-state", toolCount + jobCount === 0);
     const projectName = next.project_name || "no project";
     headerStats.textContent = `${countLabel(toolCount, "tool")} · ${countLabel(jobCount, "job")} · ${projectName}`;

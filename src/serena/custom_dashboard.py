@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import re
 import threading
 import time
@@ -516,31 +517,87 @@ class DashboardSerenaActivityOverview:
                 "display_name": session.get("display_name") or "",
                 "started_at": session.get("started_at"),
                 "updated_at": session.get("updated_at"),
+                "revision": self._panel_revision(session, jobs, job_ids),
                 "active": active,
             }
             if include_state:
-                panel["initial_state"] = self._panel_state(session, jobs)
+                panel["initial_state"] = self._panel_state(session, jobs, summary=not active)
             panels.append(panel)
         panels.sort(key=lambda item: (float(item.get("started_at") or 0.0), str(item["panel_id"])), reverse=True)
         return {"status": "success", "panels": panels}
 
-    def get_panel(self, panel_id: str) -> dict[str, Any]:
-        """Returns one retained Serena session in the inline-widget activity shape."""
+    def get_panel(self, panel_id: str, changed_since: float | None = None) -> dict[str, Any]:
+        """Returns one retained Serena session, optionally restricted to changes after ``changed_since``."""
         session = self._archive.get_session(panel_id)
-        return self._panel_state(session, self._jobs_by_id())
+        return self._panel_state(session, self._jobs_by_id(), changed_since=changed_since)
 
-    def _panel_state(self, session: dict[str, Any], jobs: dict[str, dict[str, Any]]) -> dict[str, Any]:
-        """Returns one retained session snapshot ready for immediate widget rendering."""
+    def _panel_state(
+        self,
+        session: dict[str, Any],
+        jobs: dict[str, dict[str, Any]],
+        *,
+        summary: bool = False,
+        changed_since: float | None = None,
+    ) -> dict[str, Any]:
+        """Returns one retained session snapshot, optionally compact or incremental."""
+        calls = list(session.get("calls", []))
         job_ids = self._session_job_ids(session)
         visible_jobs = [self._job_payload(jobs[job_id]) for job_id in job_ids if job_id in jobs]
+
+        # keep inactive bootstrap state tiny; the full history remains available on expansion
+        if summary:
+            payload_calls = calls[-1:]
+            payload_jobs = visible_jobs[-1:]
+        elif changed_since is not None:
+            payload_calls = [call for call in calls if self._call_changed_after(call, changed_since)]
+            payload_jobs = visible_jobs
+        else:
+            payload_calls = calls
+            payload_jobs = visible_jobs
+
         return {
             "run_id": session["panel_id"],
             "project_name": session.get("project_name") or "",
             "started_at": session.get("started_at"),
+            "updated_at": float(session.get("updated_at") or 0.0),
+            "revision": self._panel_revision(session, jobs, job_ids),
             "superseded": False,
-            "calls": [self._call_payload(call) for call in session.get("calls", [])],
-            "jobs": visible_jobs,
+            "summary_only": summary,
+            "partial": changed_since is not None and not summary,
+            "tool_count": len(calls),
+            "job_count": len(visible_jobs),
+            "calls": [self._call_payload(call) for call in payload_calls],
+            "jobs": payload_jobs,
         }
+
+    @staticmethod
+    def _call_changed_after(call: dict[str, Any], timestamp: float) -> bool:
+        """Returns whether one call may have changed after ``timestamp``."""
+        if call.get("status") in {"running", "queued"}:
+            return True
+        for key in ("submitted_at", "started_at", "finished_at"):
+            value = call.get(key)
+            if isinstance(value, int | float) and float(value) > timestamp:
+                return True
+        return False
+
+    @staticmethod
+    def _panel_revision(session: dict[str, Any], jobs: dict[str, dict[str, Any]], job_ids: list[str]) -> str:
+        """Returns a compact revision that changes with visible tool or job state."""
+        parts = [str(session.get("updated_at") or 0.0)]
+        for job_id in job_ids:
+            item = jobs.get(job_id)
+            if item is None:
+                continue
+            parts.extend(
+                (
+                    job_id,
+                    str(item.get("status") or ""),
+                    str(item.get("finished_at") or ""),
+                    str(item.get("return_code") if item.get("return_code") is not None else ""),
+                )
+            )
+        return hashlib.blake2s("\x1f".join(parts).encode("utf-8"), digest_size=8).hexdigest()
 
     def get_call_detail(self, panel_id: str, call_id: str) -> dict[str, Any]:
         """Returns one retained tool call's bounded detail."""
@@ -702,6 +759,8 @@ class DashboardOrchestratorOverview:
             panel["updated_at"] = max(float(panel.get("updated_at") or 0.0), float(session.get("updated_at") or 0.0))
 
         panels = list(by_id.values())
+        for panel in panels:
+            panel["revision"] = str(panel.get("updated_at") or panel.get("started_at") or 0.0)
         panels.sort(key=lambda panel: (float(panel.get("started_at") or 0.0), str(panel["panel_id"])), reverse=True)
         return panels
 
@@ -755,12 +814,33 @@ class CustomDashboard:
         """Returns the directory containing the custom dashboard frontend."""
         return CUSTOM_DASHBOARD_DIR
 
+    @staticmethod
+    def _conditional_json_response(app: Flask, payload: dict[str, Any]) -> Response:
+        """Returns cache-revalidated JSON so unchanged dashboard polls carry no response body."""
+        body = app.json.dumps(payload)
+        response = Response(body, mimetype="application/json")
+        response.headers["Cache-Control"] = "private, no-cache"
+        response.set_etag(hashlib.blake2s(body.encode("utf-8"), digest_size=16).hexdigest())
+        response.make_conditional(request)
+        return response
+
     def _register_routes(self, app: Flask) -> None:
         """Registers all fork-specific APIs under the dashboard URL namespace."""
 
+        @app.route("/dashboard/api/state", methods=["GET"])
+        def get_dashboard_state() -> Response:
+            include_state = request.args.get("include_state") == "1"
+            payload = {
+                "status": "success",
+                "session": self._session_overview.get_session(),
+                "serena": self._serena_activity_overview.get_panels(include_state=include_state),
+                "orchestrator": self._orchestrator_overview.get_panels(),
+            }
+            return self._conditional_json_response(app, payload)
+
         @app.route("/dashboard/api/session", methods=["GET"])
-        def get_session() -> dict[str, Any]:
-            return self._session_overview.get_session()
+        def get_session() -> Response:
+            return self._conditional_json_response(app, self._session_overview.get_session())
 
         @app.route("/dashboard/api/memory", methods=["GET"])
         def get_custom_memory() -> dict[str, Any]:
@@ -805,16 +885,22 @@ class CustomDashboard:
             return self._job_overview.get_output(job_id, mode, cursor)
 
         @app.route("/dashboard/api/serena", methods=["GET"])
-        def get_serena_panels() -> dict[str, Any]:
+        def get_serena_panels() -> Response:
             include_state = request.args.get("include_state") == "1"
-            return self._serena_activity_overview.get_panels(include_state=include_state)
+            payload = self._serena_activity_overview.get_panels(include_state=include_state)
+            return self._conditional_json_response(app, payload)
 
         @app.route("/dashboard/api/serena/panels/<panel_id>", methods=["GET"])
-        def get_serena_panel(panel_id: str) -> dict[str, Any]:
+        def get_serena_panel(panel_id: str) -> Response:
+            changed_since_raw = request.args.get("changed_since")
             try:
-                return self._serena_activity_overview.get_panel(panel_id)
+                changed_since = float(changed_since_raw) if changed_since_raw is not None else None
+                payload = self._serena_activity_overview.get_panel(panel_id, changed_since=changed_since)
+            except ValueError:
+                abort(400)
             except KeyError:
                 abort(404)
+            return self._conditional_json_response(app, payload)
 
         @app.route("/dashboard/api/serena/panels/<panel_id>/calls/<call_id>", methods=["GET"])
         def get_serena_call_detail(panel_id: str, call_id: str) -> dict[str, Any]:
@@ -845,15 +931,16 @@ class CustomDashboard:
                 abort(404)
 
         @app.route("/dashboard/api/orchestrator", methods=["GET"])
-        def get_orchestrator_panels() -> dict[str, Any]:
-            return self._orchestrator_overview.get_panels()
+        def get_orchestrator_panels() -> Response:
+            return self._conditional_json_response(app, self._orchestrator_overview.get_panels())
 
         @app.route("/dashboard/api/orchestrator/panels/<panel_id>", methods=["GET"])
-        def get_orchestrator_panel(panel_id: str) -> dict[str, Any]:
+        def get_orchestrator_panel(panel_id: str) -> Response:
             try:
-                return self._orchestrator_overview.get_panel(panel_id)
+                payload = self._orchestrator_overview.get_panel(panel_id)
             except KeyError:
                 abort(404)
+            return self._conditional_json_response(app, payload)
 
         @app.route("/dashboard/api/orchestrator/delegates/<delegate_id>", methods=["GET"])
         def get_orchestrator_delegate_detail(delegate_id: str) -> dict[str, Any]:

@@ -1,5 +1,7 @@
 const API_PREFIX = "/dashboard/api";
-const POLL_INTERVAL_MS = 1500;
+const ACTIVE_POLL_INTERVAL_MS = 500;
+const IDLE_POLL_INTERVAL_MS = 5000;
+const HIDDEN_POLL_INTERVAL_MS = 60000;
 const SCROLL_IDLE_MS = 350;
 const DASHBOARD_LOAD_ID = Date.now().toString(36);
 
@@ -17,8 +19,10 @@ const executionRenderState = {
   snapshot: null,
 };
 let refreshInFlight = false;
+let refreshTimer = null;
 let initialActivityStateLoaded = false;
 let initialActivityViewSelected = false;
+let latestPanelActivity = false;
 
 function byId(id) {
   return document.getElementById(id);
@@ -322,7 +326,7 @@ function setupActivityViewTabs() {
 
 async function getJson(path) {
   const response = await fetch(`${API_PREFIX}${path}`, {
-    cache: "no-store",
+    cache: "no-cache",
     headers: { Accept: "application/json" },
   });
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
@@ -953,7 +957,12 @@ function sessionWidgetBootstrap(panel, kind) {
         superseded: false,
         delegates: panel.delegates || [],
       };
-  return JSON.stringify({ panel_id: panel.panel_id, active: Boolean(panel.active), tool_output: toolOutput || null });
+  return JSON.stringify({
+    panel_id: panel.panel_id,
+    active: Boolean(panel.active),
+    revision: panel.revision || "",
+    tool_output: toolOutput || null,
+  });
 }
 
 function revealSessionFramesWhenReady(container) {
@@ -1014,7 +1023,12 @@ function renderSessionWidgets(containerId, countId, panels, kind) {
       const frame = entry.querySelector(".activity-widget-frame");
       if (frame?.contentWindow) {
         frame.contentWindow.postMessage(
-          { type: "serena-dashboard-live", panel_id: panel.panel_id, active: Boolean(panel.active) },
+          {
+            type: "serena-dashboard-panel",
+            panel_id: panel.panel_id,
+            active: Boolean(panel.active),
+            revision: panel.revision || "",
+          },
           location.origin,
         );
       }
@@ -1032,6 +1046,16 @@ window.addEventListener("message", event => {
   frame.style.height = `${height}px`;
 });
 
+function nextRefreshDelay() {
+  if (document.hidden) return HIDDEN_POLL_INTERVAL_MS;
+  return latestPanelActivity ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS;
+}
+
+function scheduleRefresh(delay = nextRefreshDelay()) {
+  window.clearTimeout(refreshTimer);
+  refreshTimer = window.setTimeout(refresh, delay);
+}
+
 async function refresh() {
   if (refreshInFlight) return;
   refreshInFlight = true;
@@ -1040,15 +1064,15 @@ async function refresh() {
   let serena;
   let orchestrator;
   try {
-    [session, serena, orchestrator] = await Promise.all([
-      getJson("/session"),
-      getJson(initialActivityStateLoaded ? "/serena" : "/serena?include_state=1"),
-      getJson("/orchestrator"),
-    ]);
+    const state = await getJson(initialActivityStateLoaded ? "/state" : "/state?include_state=1");
+    session = state.session;
+    serena = state.serena;
+    orchestrator = state.orchestrator;
   } catch (error) {
     console.error("Dashboard data refresh failed", error);
     setConnection("error", "Disconnected");
     refreshInFlight = false;
+    scheduleRefresh();
     return;
   }
 
@@ -1058,6 +1082,7 @@ async function refresh() {
     renderOverview(session);
     renderSessionWidgets("serena-widgets", "serena-panel-count", serena.panels || [], "serena");
     renderSessionWidgets("orchestrator-widgets", "orchestrator-panel-count", orchestrator.panels || [], "orchestrator");
+    latestPanelActivity = [...(serena.panels || []), ...(orchestrator.panels || [])].some(panel => panel.active);
     initialActivityStateLoaded = true;
 
     if (!initialActivityViewSelected) {
@@ -1070,11 +1095,20 @@ async function refresh() {
     setConnection("error", "UI error");
   } finally {
     refreshInFlight = false;
+    scheduleRefresh();
   }
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    refresh();
+  } else {
+    scheduleRefresh();
+  }
+});
+window.addEventListener("focus", () => refresh(), { passive: true });
 
 setupResourceDialog();
 setupMemoryDialog();
 setupActivityViewTabs();
 refresh();
-setInterval(refresh, POLL_INTERVAL_MS);
