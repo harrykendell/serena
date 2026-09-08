@@ -10,7 +10,7 @@ def serena_dashboard_widget_html(panel_id: str | None = None, initial_state: dic
     """Returns one retained Serena session widget connected to dashboard data."""
     panel_json = json.dumps(panel_id or "")
     initial_state_json = json.dumps(initial_state).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
-    adapter = f"""<script>
+    adapter = f"""<script data-cfasync="false">
 (() => {{
   const fallbackPanelId = {panel_json};
   const serverInitialOutput = {initial_state_json};
@@ -110,14 +110,15 @@ def serena_dashboard_widget_html(panel_id: str | None = None, initial_state: dic
 </script>
 <style>html, body {{ overflow: hidden; }}</style>
 """
-    return adapter + serena_activity_widget_html()
+    widget = serena_activity_widget_html().replace("<script>", '<script data-cfasync="false">')
+    return adapter + widget
 
 
 def orchestrator_dashboard_widget_html(panel_id: str | None = None, initial_state: dict[str, object] | None = None) -> str:
     """Returns one Orchestrator activity widget connected to an operator panel."""
     panel_json = json.dumps(panel_id or "")
     initial_state_json = json.dumps(initial_state).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
-    adapter = f"""<script>
+    adapter = f"""<script data-cfasync="false">
 (() => {{
   const fallbackPanelId = {panel_json};
   const serverInitialOutput = {initial_state_json};
@@ -182,4 +183,5 @@ def orchestrator_dashboard_widget_html(panel_id: str | None = None, initial_stat
 </script>
 <style>html, body {{ overflow: hidden; }} .fallback-action {{ display: none !important; }}</style>
 """
-    return adapter + orchestrator_activity_widget_html()
+    widget = orchestrator_activity_widget_html().replace("<script>", '<script data-cfasync="false">')
+    return adapter + widget

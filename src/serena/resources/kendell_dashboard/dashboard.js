@@ -11,6 +11,7 @@ const executionOutputCache = new Map();
 const executionOutputRequests = new Set();
 const jobCpuSamples = new Map();
 const scrollerStates = new WeakMap();
+const sessionWidgetTemplates = new Map();
 const expandedExecutionKeys = new Set();
 const executionRenderState = {
   lastScrollAt: 0,
@@ -948,6 +949,19 @@ function updateSessionWidgetHeading(entry, panel) {
   date.hidden = dateText === "—";
 }
 
+async function sessionWidgetTemplate(kind) {
+  let request = sessionWidgetTemplates.get(kind);
+  if (!request) {
+    request = fetch(`/dashboard/widget/${kind}?load=${DASHBOARD_LOAD_ID}`, { cache: "force-cache" })
+      .then(response => {
+        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+        return response.text();
+      });
+    sessionWidgetTemplates.set(kind, request);
+  }
+  return request;
+}
+
 function sessionWidgetBootstrap(panel, kind) {
   const toolOutput = kind === "serena"
     ? panel.initial_state
@@ -963,12 +977,6 @@ function sessionWidgetBootstrap(panel, kind) {
     revision: panel.revision || "",
     tool_output: toolOutput || null,
   });
-}
-
-function revealSessionFramesWhenReady(container) {
-  const frames = Array.from(container.querySelectorAll(".activity-widget-frame"));
-  if (!frames.length || frames.some(frame => frame.dataset.loaded !== "true")) return;
-  requestAnimationFrame(() => frames.forEach(frame => frame.classList.add("ready")));
 }
 
 function renderSessionWidgets(containerId, countId, panels, kind) {
@@ -999,19 +1007,29 @@ function renderSessionWidgets(containerId, countId, panels, kind) {
       frame.className = "activity-widget-frame";
       frame.name = sessionWidgetBootstrap(panel, kind);
       frame.loading = "eager";
+      frame.title = kind === "serena" ? "Serena session activity" : "Orchestrator activity";
       frame.addEventListener("load", () => {
+        if (frame.dataset.widgetReady !== "true") return;
         frame.removeAttribute("name");
         frame.dataset.loaded = "true";
-        revealSessionFramesWhenReady(container);
-      }, { once: true });
+        requestAnimationFrame(() => frame.classList.add("ready"));
+      });
       frame.addEventListener("error", () => {
         frame.dataset.loaded = "true";
-        revealSessionFramesWhenReady(container);
-      }, { once: true });
-      frame.src = `/dashboard/widget/${kind}?load=${DASHBOARD_LOAD_ID}`;
-      frame.title = kind === "serena" ? "Serena session activity" : "Orchestrator activity";
+        frame.classList.add("ready");
+      });
       shell.append(frame);
       entry.append(shell);
+
+      sessionWidgetTemplate(kind)
+        .then(html => {
+          frame.dataset.widgetReady = "true";
+          frame.srcdoc = html;
+        })
+        .catch(() => {
+          frame.dataset.widgetReady = "true";
+          frame.src = `/dashboard/widget/${kind}?load=${DASHBOARD_LOAD_ID}`;
+        });
       return entry;
     },
     (entry, panel) => {

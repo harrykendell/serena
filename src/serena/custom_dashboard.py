@@ -21,7 +21,7 @@ from orchestrator.config import OrchestratorConfig
 from orchestrator.dashboard_sessions import OrchestratorDashboardSessionArchive
 from orchestrator.delegates import DelegateError, DelegateStore
 from serena.activity import ActivityDetailFormatter, ActivityMedia
-from serena.dashboard_activity import DashboardActivityArchive
+from serena.dashboard_activity import DashboardActivityArchive, DashboardActivitySessionSummary
 from serena.dashboard_widgets import orchestrator_dashboard_widget_html, serena_dashboard_widget_html
 from serena.jobs import JobManager, JobStatus
 from serena.task_executor import TaskExecutor
@@ -506,22 +506,24 @@ class DashboardSerenaActivityOverview:
         self._archive.reconcile_executions(executions.get("executions", []))
         jobs = self._jobs_by_id()
         panels: list[dict[str, Any]] = []
-        for session in self._archive.list_sessions():
-            job_ids = self._session_job_ids(session)
-            active = any(call.get("status") in {"running", "queued"} for call in session.get("calls", [])) or any(
-                jobs.get(job_id, {}).get("status") == "running" for job_id in job_ids
-            )
+        for summary in self._archive.list_session_summaries():
+            job_ids = list(summary.job_ids)
+            active = summary.has_active_calls or any(jobs.get(job_id, {}).get("status") == "running" for job_id in job_ids)
             panel = {
-                "panel_id": session["panel_id"],
-                "project_name": session.get("project_name") or "",
-                "display_name": session.get("display_name") or "",
-                "started_at": session.get("started_at"),
-                "updated_at": session.get("updated_at"),
-                "revision": self._panel_revision(session, jobs, job_ids),
+                "panel_id": summary.panel_id,
+                "project_name": summary.project_name,
+                "display_name": summary.display_name,
+                "started_at": summary.started_at,
+                "updated_at": summary.updated_at,
+                "revision": self._summary_revision(summary, jobs),
                 "active": active,
             }
             if include_state:
-                panel["initial_state"] = self._panel_state(session, jobs, summary=not active)
+                if active:
+                    session = self._archive.get_session(summary.panel_id)
+                    panel["initial_state"] = self._panel_state(session, jobs)
+                else:
+                    panel["initial_state"] = self._summary_panel_state(summary, jobs)
             panels.append(panel)
         panels.sort(key=lambda item: (float(item.get("started_at") or 0.0), str(item["panel_id"])), reverse=True)
         return {"status": "success", "panels": panels}
@@ -530,6 +532,29 @@ class DashboardSerenaActivityOverview:
         """Returns one retained Serena session, optionally restricted to changes after ``changed_since``."""
         session = self._archive.get_session(panel_id)
         return self._panel_state(session, self._jobs_by_id(), changed_since=changed_since)
+
+    def _summary_panel_state(
+        self,
+        summary: DashboardActivitySessionSummary,
+        jobs: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Returns the compact bootstrap state for one inactive retained session."""
+        visible_jobs = [self._job_payload(jobs[job_id]) for job_id in summary.job_ids if job_id in jobs]
+        calls = [self._call_payload(summary.latest_call)] if summary.latest_call is not None else []
+        return {
+            "run_id": summary.panel_id,
+            "project_name": summary.project_name,
+            "started_at": summary.started_at,
+            "updated_at": summary.updated_at,
+            "revision": self._summary_revision(summary, jobs),
+            "superseded": False,
+            "summary_only": True,
+            "partial": False,
+            "tool_count": summary.tool_count,
+            "job_count": len(visible_jobs),
+            "calls": calls,
+            "jobs": visible_jobs[-1:],
+        }
 
     def _panel_state(
         self,
@@ -580,6 +605,27 @@ class DashboardSerenaActivityOverview:
             if isinstance(value, int | float) and float(value) > timestamp:
                 return True
         return False
+
+    @staticmethod
+    def _summary_revision(
+        summary: DashboardActivitySessionSummary,
+        jobs: dict[str, dict[str, Any]],
+    ) -> str:
+        """Returns a compact revision from retained-session metadata and visible jobs."""
+        parts = [str(summary.updated_at)]
+        for job_id in summary.job_ids:
+            item = jobs.get(job_id)
+            if item is None:
+                continue
+            parts.extend(
+                (
+                    job_id,
+                    str(item.get("status") or ""),
+                    str(item.get("finished_at") or ""),
+                    str(item.get("return_code") if item.get("return_code") is not None else ""),
+                )
+            )
+        return hashlib.blake2s("\x1f".join(parts).encode("utf-8"), digest_size=8).hexdigest()
 
     @staticmethod
     def _panel_revision(session: dict[str, Any], jobs: dict[str, dict[str, Any]], job_ids: list[str]) -> str:

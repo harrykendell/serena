@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,48 @@ _PANEL_ID_RE = re.compile(r"[0-9a-f]{16}")
 _JOB_ID_RE = re.compile(r"['\"]job_id['\"]\s*:\s*['\"]([^'\"]+)['\"]")
 _MAX_SESSIONS = 128
 _MAX_CALLS_PER_SESSION = 500
+
+
+@dataclass(frozen=True)
+class DashboardActivitySessionSummary:
+    """Compact retained-session state used for dashboard discovery and polling."""
+
+    panel_id: str
+    project_name: str
+    display_name: str
+    started_at: float
+    updated_at: float
+    tool_count: int
+    job_ids: tuple[str, ...]
+    has_active_calls: bool
+    latest_call: dict[str, Any] | None
+
+    @classmethod
+    def from_session(cls, session: dict[str, Any]) -> "DashboardActivitySessionSummary":
+        """Builds a compact summary without retaining the full call history."""
+        calls = list(session.get("calls", []))
+        job_ids = tuple(dict.fromkeys(str(call["job_id"]) for call in calls if call.get("job_id")))
+        latest_call = dict(calls[-1]) if calls else None
+        return cls(
+            panel_id=str(session["panel_id"]),
+            project_name=str(session.get("project_name") or ""),
+            display_name=str(session.get("display_name") or ""),
+            started_at=float(session.get("started_at") or 0.0),
+            updated_at=float(session.get("updated_at") or 0.0),
+            tool_count=len(calls),
+            job_ids=job_ids,
+            has_active_calls=any(call.get("status") in {"running", "queued"} for call in calls),
+            latest_call=latest_call,
+        )
+
+
+@dataclass(frozen=True)
+class _SessionSummaryCacheEntry:
+    """Cached summary tied to one durable session file revision."""
+
+    mtime_ns: int
+    size: int
+    summary: DashboardActivitySessionSummary
 
 
 class DashboardActivityArchive:
@@ -36,6 +79,7 @@ class DashboardActivityArchive:
         self._lock = threading.RLock()
         self._instance_id = uuid.uuid4().hex
         self._call_by_task: dict[str, tuple[str, str]] = {}
+        self._summary_cache: dict[Path, _SessionSummaryCacheEntry] = {}
         self._interrupt_stale_calls()
 
     @staticmethod
@@ -130,15 +174,23 @@ class DashboardActivityArchive:
         """Reconciles current-process task timing and cancellation state into the persistent archive."""
         by_task = {str(item.get("name")): item for item in executions if item.get("name")}
         with self._lock:
-            for path in self._session_paths():
-                session = self._read_path(path)
+            owners_by_session: dict[str, list[tuple[str, str]]] = {}
+            for task_name in by_task:
+                owner = self._call_by_task.get(task_name)
+                if owner is None:
+                    continue
+                session_id, call_id = owner
+                owners_by_session.setdefault(session_id, []).append((task_name, call_id))
+
+            for session_id, owners in owners_by_session.items():
+                session = self._read_session(session_id)
+                calls_by_id = {str(call.get("call_id")): call for call in session.get("calls", []) if call.get("call_id")}
                 session_changed = False
-                for call in session.get("calls", []):
-                    if call.get("instance_id") != self._instance_id:
+                for task_name, call_id in owners:
+                    call = calls_by_id.get(call_id)
+                    if call is None or call.get("instance_id") != self._instance_id:
                         continue
-                    item = by_task.get(str(call.get("task_name")))
-                    if item is None:
-                        continue
+                    item = by_task[task_name]
 
                     call_changed = False
                     for key, source in (
@@ -159,7 +211,7 @@ class DashboardActivityArchive:
                         session_changed = True
                 if session_changed:
                     session["updated_at"] = time.time()
-                    self._write_path(path, session)
+                    self._write_session(session)
 
     def list_sessions(self) -> list[dict[str, Any]]:
         """Returns retained session records newest first."""
@@ -167,6 +219,18 @@ class DashboardActivityArchive:
             sessions = [self._read_path(path) for path in self._session_paths()]
         sessions.sort(key=lambda item: float(item.get("updated_at", 0.0)), reverse=True)
         return sessions
+
+    def list_session_summaries(self) -> list[DashboardActivitySessionSummary]:
+        """Returns compact retained-session summaries without reparsing unchanged histories."""
+        with self._lock:
+            paths = self._session_paths()
+            summaries = [self._summary_for_path(path) for path in paths]
+            retained_paths = set(paths)
+            for path in tuple(self._summary_cache):
+                if path not in retained_paths:
+                    self._summary_cache.pop(path, None)
+        summaries.sort(key=lambda item: item.updated_at, reverse=True)
+        return summaries
 
     def get_session(self, panel_id: str) -> dict[str, Any]:
         """Returns one retained session by its opaque dashboard identifier."""
@@ -225,6 +289,16 @@ class DashboardActivityArchive:
         for session in self.list_sessions():
             tokens.update(str(token) for token in session.get("file_tokens", []))
         return tokens
+
+    def _summary_for_path(self, path: Path) -> DashboardActivitySessionSummary:
+        """Returns one compact summary, reusing it while the backing file is unchanged."""
+        stat = path.stat()
+        cached = self._summary_cache.get(path)
+        if cached is not None and cached.mtime_ns == stat.st_mtime_ns and cached.size == stat.st_size:
+            return cached.summary
+        summary = DashboardActivitySessionSummary.from_session(self._read_path(path))
+        self._summary_cache[path] = _SessionSummaryCacheEntry(stat.st_mtime_ns, stat.st_size, summary)
+        return summary
 
     def _read_session(self, session_id: str) -> dict[str, Any]:
         panel_id = self._panel_id(session_id)
