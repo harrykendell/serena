@@ -264,19 +264,25 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
         relative_path: str,
         include_kinds: list[int] = [],  # noqa: B006
         exclude_kinds: list[int] = [],  # noqa: B006
+        context_lines: int = 0,
         max_answer_chars: int = -1,
     ) -> str:
         """
-        Finds references to the symbol at the given `name_path`. The result will contain metadata about the referencing symbols
-        as well as a short code snippet around the reference.
+        Finds references to the symbol at the given `name_path`. The result contains metadata about the referencing symbols
+        and the referenced source line, with optional surrounding context.
 
         :param name_path: name path of the symbol
         :param relative_path: the relative path to the file containing the symbol for which to find references.
         :param include_kinds: (optional) limits results to the given LSP symbol kinds (integers)
         :param exclude_kinds: optional list of LSP symbol kinds (integers) to exclude.
+        :param context_lines: surrounding source lines to include on each side of the reference, from 0 through 5.
+            The default of 0 returns only the referenced line.
         :param max_answer_chars: max result length; -1 for default
         :return: a list of JSON objects with the symbols referencing the requested symbol
         """
+        if not 0 <= context_lines <= 5:
+            raise ValueError("context_lines must be between 0 and 5")
+
         # file system sync needed for case where symbol finder does not perform a global search, updating everything
         if relative_path:
             self.project.ls_sync_file_system_changes()
@@ -302,7 +308,10 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
                 ref_relative_path = ref.symbol.location.relative_path
                 assert ref_relative_path is not None, f"Referencing symbol {ref.symbol.name} has no relative path, this is likely a bug."
                 content_around_ref = self.project.retrieve_content_around_line(
-                    relative_file_path=ref_relative_path, line=ref.line, context_lines_before=1, context_lines_after=1
+                    relative_file_path=ref_relative_path,
+                    line=ref.line,
+                    context_lines_before=context_lines,
+                    context_lines_after=context_lines,
                 )
                 ref_dict["content_around_reference"] = content_around_ref.to_display_string()
             reference_dicts.append(ref_dict)
@@ -409,6 +418,7 @@ class FindDeclarationTool(Tool, ToolMarkerSymbolicRead):
         containing_symbol_name_path: str | None = None,
         include_body: bool = False,
         include_info: bool = False,
+        max_answer_chars: int = -1,
     ) -> str:
         r"""
         Finds the declaration of a symbol.
@@ -422,6 +432,7 @@ class FindDeclarationTool(Tool, ToolMarkerSymbolicRead):
         :param containing_symbol_name_path: optional name path of a containing symbol whose body shall be searched instead of the full file.
         :param include_body: whether to include the symbol's body in the result. Default False.
         :param include_info: whether to include additional info (hover-like). Default False.
+        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget.
         """
         self.project.ls_sync_file_system_changes()
 
@@ -463,7 +474,7 @@ class FindDeclarationTool(Tool, ToolMarkerSymbolicRead):
             include_info,
         )
         result = self._to_json(symbol_dict)
-        return result
+        return self._limit_length(result, max_answer_chars)
 
     @staticmethod
     def _defining_symbol_to_result_dict(
@@ -493,18 +504,23 @@ class GetDiagnosticsForFileTool(Tool, ToolMarkerSymbolicRead):
         start_line: int = 0,
         end_line: int = -1,
         min_severity: int = 4,
+        include_range: bool = False,
         max_answer_chars: int = -1,
     ) -> str:
         """
         Gets diagnostics for a file. Diagnostics are grouped as `relative_path -> severity -> name_path -> diagnostics_results`.
         If a diagnostic cannot be mapped to a symbol, it is grouped under the special name path `<file>`.
 
+        By default each diagnostic includes only its start ``line`` and ``column`` alongside the message and optional code/source.
+        Set ``include_range=True`` when the exact LSP start/end range is required.
+
         :param relative_path: the relative path to the file to inspect.
         :param start_line: the first 0-based line to include. Defaults to 0.
         :param end_line: the last 0-based line to include. Defaults to -1, which means until the end of the file.
         :param min_severity: minimum LSP severity to include, where 1=Error, 2=Warning, 3=Information, 4=Hint.
             Diagnostics with lower-or-equal numeric severity are returned.
-        :param max_answer_chars: max result length; -1 for default
+        :param include_range: whether to include the complete LSP start/end range instead of compact line/column fields.
+        :param max_answer_chars: max result length; -1 for default.
         :return: grouped diagnostics for the requested file.
         """
         self.project.ls_sync_file_system_changes()
@@ -530,7 +546,18 @@ class GetDiagnosticsForFileTool(Tool, ToolMarkerSymbolicRead):
                 name_path = owner_symbol.get_name_path()
             grouped_diagnostics.add(relative_path, name_path, diagnostic)
 
-        result = self._to_json(grouped_diagnostics.get_dict())
+        result_dict = grouped_diagnostics.get_dict()
+        if not include_range:
+            for severity_groups in result_dict.values():
+                for name_path_groups in severity_groups.values():
+                    for diagnostics_for_symbol in name_path_groups.values():
+                        for diagnostic in diagnostics_for_symbol:
+                            diagnostic_range = diagnostic.pop("range")
+                            start = diagnostic_range["start"]
+                            diagnostic["line"] = start["line"]
+                            diagnostic["column"] = start["character"]
+
+        result = self._to_json(result_dict)
         return self._limit_length(result, max_answer_chars)
 
 

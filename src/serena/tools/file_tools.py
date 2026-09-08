@@ -141,21 +141,21 @@ class FindFileTool(Tool):
     Finds files in the given relative paths
     """
 
-    def apply(self, file_mask: str, relative_path: str) -> str:
+    def apply(self, file_mask: str, relative_path: str, max_answer_chars: int = -1) -> str:
         """
-        Finds files matching the given file mask within the given relative path
+        Finds files matching the given file mask within the given relative path.
 
         :param file_mask: the filename or file mask (using the wildcards * or ?) to search for
         :param relative_path: the relative path to the directory to search in; pass "." to scan the project root
-        :param skip_ignored_files: whether to skip ignored files/directories
-        :return: a JSON object with the list of matching files
+        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget
+        :return: a JSON object with the list of matching files, using retained-output paging when needed
         """
         self.project.validate_relative_path(relative_path)
 
+        # find the files by ignoring everything that doesn't match
         is_ignored_path_fn = self.project.get_is_ignored_path_fn(relative_path, skip_ignored_paths=False)
         dir_to_scan = os.path.join(self.get_project_root(), relative_path)
 
-        # find the files by ignoring everything that doesn't match
         def is_ignored_file(abs_path: str) -> bool:
             if is_ignored_path_fn(abs_path):
                 return True
@@ -171,7 +171,7 @@ class FindFileTool(Tool):
         )
 
         result = self._to_json({"files": files})
-        return result
+        return self._limit_length(result, max_answer_chars)
 
 
 class ReplaceContentTool(EditingToolWithDiagnostics):
@@ -608,18 +608,23 @@ class SearchForPatternTool(Tool):
             skip_ignored_files=skip_ignored_files,
         )
 
-        # group matches by file
+        # group unique displayed matches by file so repeated regex hits do not duplicate the same source context
         file_to_matches: dict[str, list[str]] = defaultdict(list)
-        for match in matches:
-            assert match.source_file_path is not None
-            file_to_matches[match.source_file_path].append(match.to_display_string())
-
-        # capture lightweight match data for shortening before serialization
+        seen_displays_by_file: dict[str, set[str]] = defaultdict(set)
         match_lines_by_file: dict[str, list[dict[str, int | str]]] = defaultdict(list)
+        seen_lines_by_file: dict[str, set[int]] = defaultdict(set)
         for match in matches:
             assert match.source_file_path is not None
+            path = match.source_file_path
+            display = match.to_display_string()
+            if display not in seen_displays_by_file[path]:
+                file_to_matches[path].append(display)
+                seen_displays_by_file[path].add(display)
+
             first = match.matched_lines[0]
-            match_lines_by_file[match.source_file_path].append({"line": first.line_number, "text": first.line_content.strip()})
+            if first.line_number not in seen_lines_by_file[path]:
+                match_lines_by_file[path].append({"line": first.line_number, "text": first.line_content.strip()})
+                seen_lines_by_file[path].add(first.line_number)
 
         # shortened result closures, from least to most aggressive shortening
         _TEXT_TRUNCATE = 60
@@ -666,7 +671,8 @@ class SearchForPatternTool(Tool):
             return f"Match counts per file:\n{self._to_json(counts)}"
 
         def make_summary() -> str:
-            return f"Found {len(matches)} matches in {len(match_lines_by_file)} files."
+            unique_lines = sum(len(lines) for lines in match_lines_by_file.values())
+            return f"Found {unique_lines} matching lines in {len(match_lines_by_file)} files."
 
         result = self._to_json(file_to_matches)
         return self._limit_length(

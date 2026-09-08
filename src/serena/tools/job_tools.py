@@ -121,11 +121,13 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
         cursor: str | None = None,
         output: Literal["latest", "start"] = "latest",
         wait_for: float | Literal["completed"] | None = None,
+        max_answer_chars: int = -1,
     ) -> str:
         """Return job state, telemetry, and bounded output.
 
         With a ``job_id``, the first call defaults to the latest bounded output tail. Set ``output="start"`` to read from the
-        beginning instead. Pass ``next_cursor`` back on later calls to receive only new output. A stale journal cursor is recovered
+        beginning instead. Pass ``next_cursor`` back on later calls to receive only new output; those cursor-based calls return a
+        compact delta payload rather than repeating immutable job and persistence metadata. A stale journal cursor is recovered
         automatically by returning the latest tail with ``cursor_reset=true``. ``wait_for`` accepts either a numeric duration from
         0 through 60 seconds or ``"completed"``. A duration waits until that time has elapsed or the job reaches a terminal state;
         ``"completed"`` waits until the job reaches a terminal state. Newly available output does not end either kind of wait.
@@ -136,7 +138,8 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
         :param cursor: opaque cursor returned by the preceding status call for this job
         :param output: initial output position when no cursor is supplied: ``latest`` (default) or ``start``
         :param wait_for: optional wait duration in seconds, or ``"completed"`` to wait until the job finishes
-        :return: JSON describing current state, telemetry, bounded output, persistence guarantees, and the appropriate next action
+        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget
+        :return: JSON describing current state, telemetry, bounded output, and the appropriate next action
         """
         deadline: float | None = None
         if wait_for is not None and wait_for != "completed":
@@ -153,18 +156,31 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
             running_jobs = sum(snapshot.record.status is JobStatus.RUNNING for snapshot in snapshots)
             jobs: list[dict[str, object]] = []
             for snapshot in snapshots:
-                item = self._record_payload(snapshot.record)
-                item["runtime"] = self._runtime_payload(snapshot.runtime)
+                record = snapshot.record
+                item: dict[str, object] = {
+                    "job_id": record.job_id,
+                    "label": record.label,
+                    "project": record.project_name,
+                    "status": record.status.value,
+                    "created_at": record.created_at,
+                    "finished_at": record.finished_at,
+                    "return_code": record.return_code,
+                    "status_message": record.status_message,
+                    "runtime": self._runtime_payload(snapshot.runtime),
+                }
+                if record.timeout_seconds is not None:
+                    item["timeout_seconds"] = record.timeout_seconds
                 jobs.append(item)
-            return self._json(
+            result = self._json(
                 {
                     "jobs": jobs,
                     "running_jobs": running_jobs,
                     "max_concurrent_jobs": self._job_manager.max_concurrent_jobs,
                     "persistence": self._persistence_payload(self._job_manager.persistence_info()),
-                    "next_step": "Call job_status with a job_id to retrieve that job's bounded output.",
+                    "next_step": "Call job_status with a job_id to retrieve bounded output.",
                 }
             )
+            return self._limit_length(result, max_answer_chars)
 
         snapshot = self._job_manager.get_job(job_id, cursor, output_mode=output)
         if wait_for is not None and snapshot.record.status is JobStatus.RUNNING:
@@ -180,18 +196,35 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
                 time.sleep(sleep_seconds)
                 snapshot = self._job_manager.get_job(job_id, cursor, output_mode=output)
 
-        return self._json(self._snapshot_payload(snapshot))
+        result = self._json(self._snapshot_payload(snapshot, delta=cursor is not None))
+        return self._limit_length(result, max_answer_chars)
 
-    def _snapshot_payload(self, snapshot: JobSnapshot) -> dict[str, object]:
+    def _snapshot_payload(self, snapshot: JobSnapshot, *, delta: bool) -> dict[str, object]:
         record = snapshot.record
         output = snapshot.output
         assert output is not None
 
-        payload = self._record_payload(record)
+        if delta:
+            payload: dict[str, object] = {
+                "job_id": record.job_id,
+                "status": record.status.value,
+            }
+            if record.status_message is not None:
+                payload["status_message"] = record.status_message
+            if record.status.is_terminal:
+                payload.update(
+                    {
+                        "finished_at": record.finished_at,
+                        "return_code": record.return_code,
+                    }
+                )
+        else:
+            payload = self._record_payload(record)
+            payload["persistence"] = self._persistence_payload(self._job_manager.persistence_info())
+
         payload.update(
             {
                 "runtime": self._runtime_payload(snapshot.runtime),
-                "persistence": self._persistence_payload(self._job_manager.persistence_info()),
                 "output": output.output,
                 "next_cursor": output.next_cursor,
                 "has_more_output": output.has_more_output,
@@ -202,25 +235,16 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
         )
 
         if output.cursor_reset:
-            payload["next_step"] = (
-                "The previous journal cursor was no longer available, so Serena reset to the latest output tail. "
-                "Use next_cursor for subsequent incremental polls."
-            )
+            payload["next_step"] = "Cursor reset to the latest output tail; continue from next_cursor."
         elif output.has_more_output:
-            payload["next_step"] = "Call job_status again immediately with next_cursor to drain already-buffered output."
+            payload["next_step"] = "Buffered output remains; call job_status again with next_cursor."
         elif record.status is JobStatus.RUNNING:
-            prefix = "The latest bounded output tail is shown; earlier output was omitted. " if output.earlier_output_omitted else ""
-            payload["next_step"] = (
-                prefix + "The job is still running. Continue other useful work; if none remains, call job_status with next_cursor and "
-                'wait_for="completed" instead of manually polling.'
-            )
+            prefix = "Earlier output was omitted. " if output.earlier_output_omitted else ""
+            payload["next_step"] = prefix + 'Running; use next_cursor with wait_for="completed" if no other work remains.'
         elif output.earlier_output_omitted:
-            payload["next_step"] = (
-                "The job is finished; the latest bounded output tail is shown and earlier output was omitted. "
-                'Call job_status with output="start" and no cursor if earlier output needs inspection.'
-            )
+            payload["next_step"] = 'Finished; earlier output omitted. Use output="start" without a cursor to inspect it.'
         else:
-            payload["next_step"] = "The job is finished; no further polling is needed."
+            payload["next_step"] = "Finished; no further polling needed."
         return payload
 
 

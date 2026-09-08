@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from serena.tool_output import ToolOutputStore
+from serena.tools.memory_tools import ReadMemoryTool
 from serena.tools.output_tools import ReadToolOutputTool
 from serena.tools.tools_base import Tool
 
@@ -85,6 +86,27 @@ def test_implicit_budget_uses_approximate_tokens_only_when_retained_paging_is_av
 
         agent.tool_is_active.return_value = True
         assert overflow_tool.apply(content, max_answer_chars=500) == content
+    finally:
+        store.close()
+
+
+def test_read_memory_uses_retained_output_when_content_exceeds_budget() -> None:
+    store = ToolOutputStore()
+    agent = _agent_with_store(store)
+    project = MagicMock()
+    project.memory_manager.load_memory.return_value = "memory-start-" + "x" * 1_000 + "-memory-end"
+    agent.get_active_project_or_raise.return_value = project
+    tool = ReadMemoryTool(agent)
+
+    try:
+        response = tool.apply("large-memory")
+        output_id = _output_id(response)
+        retained = store.read(output_id, offset=0, max_chars=2_000)
+
+        assert "Full output retained as" in response
+        assert retained.complete is True
+        assert retained.content.startswith("memory-start-")
+        assert retained.content.endswith("-memory-end")
     finally:
         store.close()
 

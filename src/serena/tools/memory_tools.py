@@ -40,11 +40,16 @@ class ReadMemoryTool(Tool):
     Reads the content of a memory file.
     """
 
-    def apply(self, memory_name: str) -> str:
+    def apply(self, memory_name: str, max_answer_chars: int = -1) -> str:
         """
         Use to read a memory that is likely to be relevant to the current task, inferring relevance e.g. from the name.
+
+        :param memory_name: name of the memory to read
+        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget
+        :return: memory content, using retained-output paging when it exceeds the response budget
         """
-        return self.memory_manager.load_memory(memory_name)
+        content = self.memory_manager.load_memory(memory_name)
+        return self._limit_length(content, max_answer_chars)
 
 
 class ListMemoriesTool(Tool):
@@ -52,11 +57,16 @@ class ListMemoriesTool(Tool):
     Lists available memories.
     """
 
-    def apply(self, topic: str = "") -> str:
+    def apply(self, topic: str = "", max_answer_chars: int = -1) -> str:
         """
         Lists available memories, optionally filtered by topic.
+
+        :param topic: optional memory topic to list
+        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget
+        :return: available memories, using retained-output paging when the listing exceeds the response budget
         """
-        return self._to_json(self.memory_manager.list_memories(topic).to_dict())
+        result = self._to_json(self.memory_manager.list_memories(topic).to_dict())
+        return self._limit_length(result, max_answer_chars)
 
 
 class DeleteMemoryTool(Tool, ToolMarkerCanEdit):

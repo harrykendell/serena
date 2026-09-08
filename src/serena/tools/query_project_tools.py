@@ -11,12 +11,13 @@ class ListQueryableProjectsTool(Tool, ToolMarkerOptional, ToolMarkerDoesNotRequi
     Tool for listing all projects that can be queried by the QueryProjectTool.
     """
 
-    def apply(self, symbol_access: bool = True) -> str:
+    def apply(self, symbol_access: bool = True, max_answer_chars: int = -1) -> str:
         """
         Lists available projects that can be queried with `query_project_tool`.
 
         :param symbol_access: whether to return only projects for which symbol access is available. Default: true
-        :return: project names and roots
+        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget
+        :return: project names and roots, using retained-output paging when the response exceeds the budget
         """
         # determine relevant projects
         registered_projects = self.agent.serena_config.projects
@@ -34,7 +35,7 @@ class ListQueryableProjectsTool(Tool, ToolMarkerOptional, ToolMarkerDoesNotRequi
 
         # return project names and roots
         result = {p.project_name: str(p.project_root) for p in relevant_projects}
-        return self._to_json(result)
+        return self._limit_length(self._to_json(result), max_answer_chars)
 
 
 class QueryProjectTool(Tool, ToolMarkerOptional, ToolMarkerDoesNotRequireActiveProject):

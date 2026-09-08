@@ -1031,6 +1031,15 @@ class TestSerenaAgent:
         )
         full_file_diagnostics = json.loads(result)
         diagnostic_case.assert_matches(full_file_diagnostics)
+        compact_diagnostic = next(
+            diagnostic
+            for severity_group in full_file_diagnostics.values()
+            for name_path_group in severity_group.values()
+            for diagnostics_for_name_path in name_path_group.values()
+            for diagnostic in diagnostics_for_name_path
+        )
+        assert "line" in compact_diagnostic and "column" in compact_diagnostic
+        assert "range" not in compact_diagnostic
 
         # testing diagnostics in range by removing second symbol
         project_root = get_repo_path(diagnostic_case.ls_id)
@@ -1043,9 +1052,19 @@ class TestSerenaAgent:
             min_severity=1,
             start_line=pos1[0],
             end_line=pos2[0] - 1,
+            include_range=True,
         )
         diagnostics_in_range = json.loads(result)
         diagnostic_case.without_second_symbol().assert_matches(diagnostics_in_range)
+        ranged_diagnostic = next(
+            diagnostic
+            for severity_group in diagnostics_in_range.values()
+            for name_path_group in severity_group.values()
+            for diagnostics_for_name_path in name_path_group.values()
+            for diagnostic in diagnostics_for_name_path
+        )
+        assert "range" in ranged_diagnostic
+        assert "line" not in ranged_diagnostic and "column" not in ranged_diagnostic
 
     @pytest.mark.parametrize("serena_agent,case", FIND_IMPLEMENTATION_CASES, indirect=["serena_agent"])
     def test_find_symbol_implementations(self, serena_agent: SerenaAgent, case: FindImplementationCase) -> None:

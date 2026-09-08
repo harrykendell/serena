@@ -59,8 +59,12 @@ class GetCurrentConfigTool(Tool):
     Prints the current configuration of the agent, including the active and available projects, tools, contexts, and modes.
     """
 
-    def apply(self) -> str:
+    def apply(self, max_answer_chars: int = -1) -> str:
         """
         Print the current configuration of the agent, including the active and available projects, tools, contexts, and modes.
+
+        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget
+        :return: current configuration, using retained-output paging when the response exceeds the budget
         """
-        return self.agent.get_current_config_overview()
+        result = self.agent.get_current_config_overview()
+        return self._limit_length(result, max_answer_chars)

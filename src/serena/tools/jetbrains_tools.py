@@ -153,6 +153,7 @@ class JetBrainsMoveTool(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional, ToolMa
         name_path: str | None = None,
         target_relative_path: str | None = None,
         target_parent_name_path: str | None = None,
+        max_answer_chars: int = -1,
     ) -> str:
         """
         Moves a symbol, file or directory to a different location and automatically update all references to affected symbols.
@@ -161,7 +162,6 @@ class JetBrainsMoveTool(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional, ToolMa
         and will result in no edits and a suitable error message.
         The target location is the new parent of the symbol,
         i.e. the moved entity is never renamed by the operation, only moved.
-
 
         Valid moves:
         - Symbol:
@@ -177,6 +177,8 @@ class JetBrainsMoveTool(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional, ToolMa
         :param name_path: the name path of the symbol to move (empty for moving file or dir).
         :param target_relative_path: the relative path of the target directory or file.
         :param target_parent_name_path: the name path of the target parent symbol.
+        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget.
+        :return: move result, using retained-output paging when needed.
         """
         name_path = name_path or None
         target_relative_path = target_relative_path or None
@@ -189,7 +191,7 @@ class JetBrainsMoveTool(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional, ToolMa
                 target_parent_name_path=target_parent_name_path,
                 target_relative_path=target_relative_path,
             )
-        return self._to_json(response_dict)
+        return self._limit_length(self._to_json(response_dict), max_answer_chars)
 
 
 class JetBrainsSafeDeleteTool(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional, ToolMarkerBeta):
@@ -203,6 +205,7 @@ class JetBrainsSafeDeleteTool(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional, 
         name_path: str | None = None,
         delete_even_if_used: bool = False,
         propagate: bool = False,
+        max_answer_chars: int = -1,
     ) -> str:
         """
         Safely deletes a symbol, file, or directory, checking for usages first and propagating deletion, if desired.
@@ -219,6 +222,8 @@ class JetBrainsSafeDeleteTool(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional, 
             Default is False (safe mode: will report usages instead of deleting).
         :param propagate: whether to propagate the deletion to usages of the symbol and also
             remove symbols that become unused after the deletion. Default is False.
+        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget.
+        :return: deletion result, using retained-output paging when needed.
         """
         relative_path = self._sanitize_input_param(relative_path)
         name_path = name_path or None
@@ -229,7 +234,7 @@ class JetBrainsSafeDeleteTool(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional, 
                 delete_even_if_used=delete_even_if_used,
                 propagate=propagate,
             )
-        return self._to_json(response_dict)
+        return self._limit_length(self._to_json(response_dict), max_answer_chars)
 
 
 class JetBrainsInlineSymbol(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional, ToolMarkerBeta):
@@ -242,11 +247,11 @@ class JetBrainsInlineSymbol(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional, To
         name_path: str,
         relative_path: str,
         keep_definition: bool = False,
+        max_answer_chars: int = -1,
     ) -> str:
         """
         Inlines a symbol (usually a method/function, but also classes may be amenable to inlining,
-        which turns invocation into anonymous class creation),
-        replacing all call sites with the symbol's body.
+        which turns invocation into anonymous class creation), replacing all call sites with the symbol's body.
         **Important**: this tool should always be preferred to naive inlining (e.g. via searching for references and
         editing them).
 
@@ -254,6 +259,8 @@ class JetBrainsInlineSymbol(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional, To
         :param relative_path: the relative path to the file containing the symbol to inline.
         :param keep_definition: whether to keep the original method definition after inlining all call sites.
             May be ignored in some cases (e.g. when inlining a class).
+        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget.
+        :return: inline result, using retained-output paging when needed.
         """
         relative_path = self._sanitize_input_param(relative_path)
         with JetBrainsPluginClient.from_project(self.project) as client:
@@ -262,7 +269,7 @@ class JetBrainsInlineSymbol(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional, To
                 relative_path=relative_path,
                 keep_definition=keep_definition,
             )
-        return self._to_json(response_dict)
+        return self._limit_length(self._to_json(response_dict), max_answer_chars)
 
 
 class JetBrainsFindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional):
@@ -507,7 +514,13 @@ class JetBrainsFindDeclarationTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptio
     Finds the declaration of a symbol using the JetBrains backend
     """
 
-    def apply(self, relative_path: str, regex: str, include_body: bool = False) -> str:
+    def apply(
+        self,
+        relative_path: str,
+        regex: str,
+        include_body: bool = False,
+        max_answer_chars: int = -1,
+    ) -> str:
         r"""
         Finds the declaration of a symbol.
 
@@ -518,6 +531,8 @@ class JetBrainsFindDeclarationTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptio
             Prefer regexes with sufficiently large context around the group to render the match unambiguous.
             Uses Python syntax with MULTILINE and DOTALL flags enabled.
         :param include_body: whether to include the symbol's body in the result. Default False.
+        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget.
+        :return: declaration result, using retained-output paging when needed.
         """
         relative_path = self._sanitize_input_param(relative_path)
         regex = self._sanitize_input_param(regex)
@@ -531,7 +546,7 @@ class JetBrainsFindDeclarationTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptio
                 relative_path=relative_path, line=coords.line, col=coords.col, include_quick_info=False, include_body=include_body
             )
         result = self._to_json(symbol_collection)
-        return result
+        return self._limit_length(result, max_answer_chars)
 
 
 class JetBrainsFindImplementationsTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional):
@@ -539,12 +554,14 @@ class JetBrainsFindImplementationsTool(Tool, ToolMarkerSymbolicRead, ToolMarkerO
     Finds the implementations of a symbol using the JetBrains backend
     """
 
-    def apply(self, relative_path: str, name_path: str) -> str:
+    def apply(self, relative_path: str, name_path: str, max_answer_chars: int = -1) -> str:
         """
         Finds the implementations of a symbol.
 
         :param relative_path: the relative path to the source file containing the symbol for which to find implementations.
         :param name_path: name path of the symbol for which to find implementations
+        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget.
+        :return: implementation results, using retained-output paging when needed.
         """
         with JetBrainsPluginClient.from_project(self.project) as client:
             symbol_collection = client.find_implementations(
@@ -553,7 +570,7 @@ class JetBrainsFindImplementationsTool(Tool, ToolMarkerSymbolicRead, ToolMarkerO
                 include_quick_info=False,
             )
         result = self._to_json(symbol_collection)
-        return result
+        return self._limit_length(result, max_answer_chars)
 
 
 class JetBrainsRenameTool(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional):
@@ -568,6 +585,7 @@ class JetBrainsRenameTool(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional):
         name_path: str | None = None,
         rename_in_comments: bool = False,
         rename_in_text_occurrences: bool = False,
+        max_answer_chars: int = -1,
     ) -> str:
         """
         Renames a symbol, file or directory throughout the codebase.
@@ -580,7 +598,8 @@ class JetBrainsRenameTool(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional):
         :param name_path: the name path of the symbol to rename or None if renaming a file or directory.
         :param rename_in_comments: whether to also rename occurrences in comments. Default True.
         :param rename_in_text_occurrences: whether to also rename occurrences in text. Default True.
-        :return: a status message
+        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget.
+        :return: rename result, using retained-output paging when needed.
         """
         code_editor = JetBrainsCodeEditor(self.project)
         result = code_editor.rename_symbol(
@@ -590,7 +609,7 @@ class JetBrainsRenameTool(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional):
             rename_in_comments=rename_in_comments,
             rename_in_text_occurrences=rename_in_text_occurrences,
         )
-        return self._to_json(result)
+        return self._limit_length(self._to_json(result), max_answer_chars)
 
 
 class JetBrainsDebugTool(Tool, ToolMarkerOptional, ToolMarkerBeta):
@@ -603,6 +622,7 @@ class JetBrainsDebugTool(Tool, ToolMarkerOptional, ToolMarkerBeta):
         self,
         expression: str,
         repl_key: str = "default",
+        max_answer_chars: int = -1,
     ) -> str:
         """
         Debug code by evaluating Groovy/Java expressions in a persistent REPL attached to the IDE's
@@ -613,14 +633,16 @@ class JetBrainsDebugTool(Tool, ToolMarkerOptional, ToolMarkerBeta):
         :param expression: a Groovy/Java expression/statement to evaluate in the REPL.
             If empty/null, closes the REPL with the given key.
         :param repl_key: identifier for the REPL instance. State persists across calls with the same key.
-        :return: string representation of the result
+        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget.
+        :return: string representation of the result, using retained-output paging when needed.
         """
         with JetBrainsPluginClient.from_project(self.project) as client:
             if expression:
                 response = client.debug_eval(repl_key=repl_key, expression=expression)
             else:
                 response = client.debug_close(repl_key=repl_key)
-            return response.get("result", str(response))
+            result = response.get("result", str(response))
+        return self._limit_length(result, max_answer_chars)
 
 
 class JetBrainsRunInspectionsTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional):

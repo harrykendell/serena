@@ -147,6 +147,14 @@ def _manager(
     )
 
 
+def _job_tool_agent(project: MagicMock) -> MagicMock:
+    agent = MagicMock()
+    agent.get_active_project_or_raise.return_value = project
+    agent.tool_is_active.return_value = False
+    agent.serena_config.default_max_tool_answer_chars = 150_000
+    return agent
+
+
 def test_systemd_job_backend_inherits_user_shell_path(monkeypatch, tmp_path: Path) -> None:
     """Durable jobs receive the enriched user-shell PATH rather than the MCP service's stale PATH."""
     backend = SystemdJobBackend()
@@ -369,8 +377,7 @@ def test_job_tools_return_chat_friendly_telemetry_and_persistence(tmp_path: Path
     backend = FakeJobBackend()
     manager = _manager(tmp_path, backend)
     project = MagicMock(project_root=str(tmp_path), project_name="demo")
-    agent = MagicMock()
-    agent.get_active_project_or_raise.return_value = project
+    agent = _job_tool_agent(project)
 
     start_tool = StartJobTool(agent)
     status_tool = JobStatusTool(agent)
@@ -382,6 +389,8 @@ def test_job_tools_return_chat_friendly_telemetry_and_persistence(tmp_path: Path
     started = json.loads(start_tool.apply("echo hello", label="demo test", timeout_seconds=60))
     backend.output[started["job_id"]].append("hello")
     status = json.loads(status_tool.apply(started["job_id"]))
+    backend.output[started["job_id"]].append("later")
+    delta = json.loads(status_tool.apply(started["job_id"], cursor=status["next_cursor"]))
     listed = json.loads(status_tool.apply())
     cancelled = json.loads(cancel_tool.apply(started["job_id"]))
 
@@ -396,6 +405,13 @@ def test_job_tools_return_chat_friendly_telemetry_and_persistence(tmp_path: Path
     assert status["runtime"]["memory_bytes"] == 1024
     assert status["runtime"]["process_count"] == 3
     assert 'wait_for="completed"' in status["next_step"]
+    assert delta["output"] == "later"
+    assert delta["status"] == "running"
+    assert "runtime" in delta
+    assert "label" not in delta
+    assert "project_root" not in delta
+    assert "cwd" not in delta
+    assert "persistence" not in delta
     assert listed["jobs"][0]["label"] == "demo test"
     assert listed["jobs"][0]["runtime"]["cpu_seconds"] == 2.25
     assert cancelled["status"] == "cancelled"
@@ -405,8 +421,7 @@ def test_job_status_duration_wait_ignores_new_output_until_deadline(tmp_path: Pa
     backend = FakeJobBackend()
     manager = _manager(tmp_path, backend)
     project = MagicMock(project_root=str(tmp_path), project_name="demo")
-    agent = MagicMock()
-    agent.get_active_project_or_raise.return_value = project
+    agent = _job_tool_agent(project)
     status_tool = JobStatusTool(agent)
     status_tool._job_manager = manager
 
@@ -440,8 +455,7 @@ def test_job_status_wait_for_completed_ignores_output_until_terminal(tmp_path: P
     backend = FakeJobBackend()
     manager = _manager(tmp_path, backend)
     project = MagicMock(project_root=str(tmp_path), project_name="demo")
-    agent = MagicMock()
-    agent.get_active_project_or_raise.return_value = project
+    agent = _job_tool_agent(project)
     status_tool = JobStatusTool(agent)
     status_tool._job_manager = manager
 
@@ -482,8 +496,7 @@ def test_job_status_wait_validation(tmp_path: Path) -> None:
     backend = FakeJobBackend()
     manager = _manager(tmp_path, backend)
     project = MagicMock(project_root=str(tmp_path), project_name="demo")
-    agent = MagicMock()
-    agent.get_active_project_or_raise.return_value = project
+    agent = _job_tool_agent(project)
     status_tool = JobStatusTool(agent)
     status_tool._job_manager = manager
 
