@@ -66,6 +66,7 @@ def test_fetch_media_file_returns_native_mcp_image(project: Project, tmp_path: P
     assert base64.b64decode(result.content[0].data) == _ONE_PIXEL_PNG
     assert result.content[0].annotations is None
     assert result.content[1].type == "resource_link"
+    assert get_result_file_link(result) == result.content[1]
     assert result.content[2].type == "text"
     assert "scientific figures" in result.content[2].text
     assert "embed the materialized file" in result.content[2].text
@@ -105,6 +106,7 @@ def test_fetch_media_file_preserves_svg_mime_type(project: Project, tmp_path: Pa
     assert base64.b64decode(result.content[0].data) == svg
     assert result.content[0].annotations is None
     assert result.content[1].type == "resource_link"
+    assert get_result_file_link(result) == result.content[1]
     assert result.content[2].type == "text"
     assert "scientific figures" in result.content[2].text
     assert "embed the materialized file" in result.content[2].text
@@ -127,6 +129,7 @@ def test_download_file_returns_resource_link(project: Project, tmp_path: Path) -
     assert raw_result.mimeType == "text/plain"
     assert raw_result.size == len(data)
     assert get_result_file_link(raw_result) == raw_result
+    assert get_result_file_link(result) == raw_result
 
     output_schema = DownloadFileTool.get_apply_fn_metadata_from_cls().output_schema
     assert output_schema is None
@@ -281,6 +284,7 @@ def test_render_pdf_page_returns_native_mcp_image(project: Project, tmp_path: Pa
     assert base64.b64decode(result.content[0].data).startswith(b"\x89PNG\r\n\x1a\n")
     assert result.content[0].annotations is None
     assert result.content[1].type == "resource_link"
+    assert get_result_file_link(result) == result.content[1]
     assert result.content[2].type == "text"
     assert "scientific figures" in result.content[2].text
     assert "embed the materialized file" in result.content[2].text

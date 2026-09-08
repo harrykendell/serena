@@ -271,6 +271,8 @@ def get_result_file_link(result: object) -> ResourceLink | None:
         return result
     if isinstance(result, _NativeMediaResult):
         return result.file_link
+    if isinstance(result, CallToolResult):
+        return next((block for block in result.content if isinstance(block, ResourceLink)), None)
     return None
 
 
@@ -304,9 +306,10 @@ class _McpMediaTool(Tool, ToolMarkerOptional):
             display_hint = TextContent(
                 type="text",
                 text=(
-                    "Inspect the native image when it is relevant to the ongoing work. For scientific figures, plots, "
-                    "diagnostics, and other useful visual results, normally also embed the materialized file in the assistant "
-                    "response using normal Markdown image syntax so the user can inspect it too."
+                    "Inspect the native image when it is relevant to the ongoing work, especially for scientific figures, "
+                    "plots, diagnostics, and other useful visual results. If the user asked to view, render, show, or inspect "
+                    "the image inline, you MUST embed the materialized file in the assistant response using normal Markdown "
+                    "image syntax; do not rely on the MCP tool-result UI to display it."
                 ),
             )
         elif isinstance(media, Audio):

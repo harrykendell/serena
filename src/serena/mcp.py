@@ -178,6 +178,7 @@ class SerenaFastMCPTool(FastMCPTool):
                 arguments_parsed[self.context_kwarg] = context
 
             result = await asyncio.to_thread(self.fn, **arguments_parsed)
+            activity_result = result
             if convert_result:
                 result = self.fn_metadata.convert_result(result)
         except UrlElicitationRequiredError:
@@ -202,7 +203,7 @@ class SerenaFastMCPTool(FastMCPTool):
             self._activity_tracker.finish_tool(
                 call_id,
                 succeeded=True,
-                result=result,
+                result=activity_result,
                 project_name=call_project_name,
             )
         return result
@@ -281,30 +282,32 @@ class SerenaMCPFactory:
                     # keep them as ints; JSON 'number' covers ints
                     node.setdefault("multipleOf", 1)
 
-            # ---- simplify anyOf/oneOf if they only differ by integer/number ----
+            # ---- normalize anyOf/oneOf unions for OpenAI-compatible schemas ----
             for key in ("oneOf", "anyOf"):
                 if key in node and isinstance(node[key], list):
-                    # Special case: anyOf or oneOf with "type X" and "null"
-                    if len(node[key]) == 2:
-                        types = [sub.get("type") for sub in node[key]]
-                        if "null" in types:
-                            non_null_type = next(t for t in types if t != "null")
-                            if isinstance(non_null_type, str):
-                                node["type"] = non_null_type
-                                node.pop(key, None)
-                                continue
-                    simplified = []
+                    simplified = [walk(sub) for sub in node[key]]
+
+                    # optional parameters are omitted rather than sent as JSON null
+                    non_null = [sub for sub in simplified if sub.get("type") != "null"]
+                    if non_null:
+                        simplified = non_null
+
+                    # collapse a single remaining branch into the parent schema
+                    if len(simplified) == 1:
+                        only = simplified[0]
+                        node.pop(key, None)
+                        for k, v in only.items():
+                            if k not in node:
+                                node[k] = v
+                        continue
+
+                    # collapse branches that become identical after recursive normalization
                     changed = False
-                    for sub in node[key]:
-                        sub = walk(sub)  # recurse
-                        simplified.append(sub)
-                    # If all subs are the same after integer→number, collapse
                     try:
                         import json
 
                         canon = [json.dumps(x, sort_keys=True) for x in simplified]
                         if len(set(canon)) == 1:
-                            # copy the single schema up
                             only = simplified[0]
                             node.pop(key, None)
                             for k, v in only.items():
@@ -313,8 +316,17 @@ class SerenaMCPFactory:
                             changed = True
                     except Exception:
                         pass
-                    if not changed:
-                        node[key] = simplified
+                    if changed:
+                        continue
+
+                    node[key] = simplified
+
+                    # OpenAI-compatible tool parameters require a top-level type even when
+                    # branch-specific constraints remain in anyOf/oneOf.
+                    branch_types = [sub.get("type") for sub in simplified]
+                    if "type" not in node and branch_types and all(isinstance(item, str) for item in branch_types):
+                        unique_types = list(dict.fromkeys(cast(list[str], branch_types)))
+                        node["type"] = unique_types[0] if len(unique_types) == 1 else unique_types
 
             # ---- recurse into known schema containers ----
             for child_key in ("properties", "patternProperties", "definitions", "$defs"):

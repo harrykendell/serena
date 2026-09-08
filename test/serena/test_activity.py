@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from mcp.server.fastmcp import FastMCP
-from mcp.types import RequestParams, ResourceLink
+from mcp.types import CallToolResult, RequestParams, ResourceLink
 from pydantic import AnyUrl
 
 from serena.activity import ACTIVITY_RESOURCE_URI, ActivityTracker, get_mcp_session_id, register_activity_resource
@@ -333,6 +333,28 @@ def test_activity_tracker_exposes_media_without_serialized_payload_text() -> Non
     assert media.uri == "serena-file://export/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 
+def test_activity_tracker_exposes_media_from_prepared_mcp_result() -> None:
+    tracker = ActivityTracker(_FakeJobSource())
+    run = tracker.start_run("conversation-a", "serena")
+    call_id = tracker.start_tool("conversation-a", "fetch_media_file", {"relative_path": "figure.png"})
+    link = ResourceLink(
+        type="resource_link",
+        name="figure.png",
+        uri=AnyUrl("serena-file://export/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        mimeType="image/png",
+        size=123,
+    )
+
+    tracker.finish_tool(call_id, succeeded=True, result=CallToolResult(content=[link]))
+
+    assert call_id is not None
+    detail = tracker.get_call_detail("conversation-a", run["run_id"], call_id)
+    assert detail["result"] is None
+    assert detail["media"] == {"type": "image", "name": "figure.png", "mime_type": "image/png"}
+    media = tracker.get_call_media("conversation-a", run["run_id"], call_id)
+    assert media.uri == "serena-file://export/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+
 def test_activity_tracker_marks_current_turn_job_and_exposes_other_running_jobs() -> None:
     source = _FakeJobSource([_job_record("other-job", "other optimisation")])
     tracker = ActivityTracker(source)
@@ -462,6 +484,18 @@ def test_mcp_tool_wrapper_records_activity() -> None:
     assert [(call["tool_name"], call["detail"], call["status"]) for call in snapshot["calls"]] == [
         ("echo_command", "git status", "completed")
     ]
+
+
+def test_mcp_tool_wrapper_tracks_logical_result_when_transport_conversion_is_enabled() -> None:
+    tracker = ActivityTracker(_FakeJobSource())
+    run = tracker.start_run("global", "serena")
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(_EchoCommandTool(), activity_tracker=tracker)
+
+    asyncio.run(mcp_tool.run({"command": "git status"}, convert_result=True))
+
+    call_id = tracker.get_run("global", run["run_id"])["calls"][0]["call_id"]
+    detail = tracker.get_call_detail("global", run["run_id"], call_id)
+    assert json.loads(detail["result"]) == "git status"
 
 
 def test_mcp_tool_wrapper_keeps_activity_polling_responsive_during_blocking_tool() -> None:

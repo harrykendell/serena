@@ -1,5 +1,6 @@
 import json
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -313,6 +314,7 @@ def test_job_listing_always_keeps_running_jobs_visible(tmp_path: Path) -> None:
 
 def test_terminal_job_listing_is_ordered_by_finish_time(tmp_path: Path) -> None:
     store = JobStore(tmp_path / "jobs")
+    now = datetime.now(UTC)
     older_start = "0123456789abcdef0123456789abcdef"
     newer_start = "fedcba9876543210fedcba9876543210"
     store.create(
@@ -322,8 +324,8 @@ def test_terminal_job_listing_is_ordered_by_finish_time(tmp_path: Path) -> None:
             project_root=str(tmp_path),
             cwd=str(tmp_path),
             status=JobStatus.COMPLETED,
-            created_at="2026-08-28T17:00:00+00:00",
-            finished_at="2026-08-28T19:00:00+00:00",
+            created_at=(now - timedelta(hours=3)).isoformat(),
+            finished_at=(now - timedelta(hours=1)).isoformat(),
             return_code=0,
             label="finished later",
         )
@@ -335,8 +337,8 @@ def test_terminal_job_listing_is_ordered_by_finish_time(tmp_path: Path) -> None:
             project_root=str(tmp_path),
             cwd=str(tmp_path),
             status=JobStatus.COMPLETED,
-            created_at="2026-08-28T18:00:00+00:00",
-            finished_at="2026-08-28T18:30:00+00:00",
+            created_at=(now - timedelta(hours=2)).isoformat(),
+            finished_at=(now - timedelta(hours=1, minutes=30)).isoformat(),
             return_code=0,
             label="finished earlier",
         )

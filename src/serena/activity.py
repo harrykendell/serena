@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any, Literal, Protocol, cast
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, ResourceLink
 
 from serena.activity_history import ActivityHistoryStore
 from serena.jobs import JobManager, JobRecord, JobSnapshot, JobStatus
@@ -33,16 +34,21 @@ class ActivityMedia:
     @classmethod
     def from_result(cls, result: object) -> "ActivityMedia | None":
         """Extracts a persistent Serena file resource carried by a tool result."""
-        link = getattr(result, "file_link", None)
-        if link is None and getattr(result, "type", None) == "resource_link":
+        link: ResourceLink | None
+        if isinstance(result, ResourceLink):
             link = result
+        elif isinstance(result, CallToolResult):
+            link = next((block for block in result.content if isinstance(block, ResourceLink)), None)
+        else:
+            candidate = getattr(result, "file_link", None)
+            link = candidate if isinstance(candidate, ResourceLink) else None
         if link is None:
             return None
 
-        uri = str(getattr(link, "uri", ""))
+        uri = str(link.uri)
         if not uri.startswith("serena-file://export/"):
             return None
-        mime_type = str(getattr(link, "mimeType", None) or "application/octet-stream")
+        mime_type = str(link.mimeType or "application/octet-stream")
         if mime_type.startswith("image/"):
             media_type: Literal["image", "audio", "file"] = "image"
         elif mime_type.startswith("audio/"):
@@ -51,7 +57,7 @@ class ActivityMedia:
             media_type = "file"
         return cls(
             media_type=media_type,
-            name=str(getattr(link, "name", None) or "Serena file"),
+            name=str(link.name or "Serena file"),
             mime_type=mime_type,
             uri=uri,
         )
