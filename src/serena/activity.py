@@ -16,7 +16,7 @@ from serena.activity_history import ActivityHistoryStore
 from serena.jobs import JobManager, JobRecord, JobSnapshot, JobStatus
 from serena.session import get_mcp_session_id  # noqa: F401 - compatibility re-export
 
-ACTIVITY_RESOURCE_URI = "ui://serena/activity-v18.html"
+ACTIVITY_RESOURCE_URI = "ui://serena/activity-v25.html"
 _ACTIVITY_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
 _MAX_RUNS = 128
 _MAX_CALLS_PER_RUN = 100
@@ -312,23 +312,54 @@ class ActivityDetailFormatter:
 
     def format_parameters(self, tool_name: str, parameters: str | None) -> ActivitySummary:
         """Returns a semantic summary from Serena's logged keyword-argument representation."""
-        if not parameters:
-            return ActivitySummary()
+        arguments = self.parse_parameters(parameters)
+        if arguments is None:
+            if not parameters:
+                return ActivitySummary()
+            return ActivitySummary(detail=self._bound(" ".join(parameters.split())))
+        return self.format(tool_name, arguments)
 
-        # parse the logger's Python-like keyword argument representation without evaluating code
+    def parse_parameters(self, parameters: str | None) -> dict[str, Any] | None:
+        """Parses logged keyword arguments into JSON-safe values for rich detail rendering."""
+        if not parameters:
+            return {}
+
+        # parse Serena's Python-like keyword argument representation without evaluating code
         try:
             expression = ast.parse(f"_tool({parameters})", mode="eval").body
-            if not isinstance(expression, ast.Call):
-                raise ValueError("tool parameters did not parse as a call")
+            if not isinstance(expression, ast.Call) or expression.args:
+                raise ValueError("tool parameters were not keyword arguments")
             arguments: dict[str, Any] = {}
             for keyword in expression.keywords:
                 if keyword.arg is None:
                     continue
-                arguments[keyword.arg] = ast.literal_eval(keyword.value)
-            return self.format(tool_name, arguments)
+                arguments[keyword.arg] = self._json_safe_literal(ast.literal_eval(keyword.value))
+            return arguments
         except (SyntaxError, ValueError, TypeError):
-            # preserve a useful bounded fallback for malformed or non-literal historical log entries
-            return ActivitySummary(detail=self._bound(" ".join(parameters.split())))
+            pass
+
+        # accept older detail sources that stored a complete JSON or Python-literal mapping
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                value = parser(parameters)
+            except (json.JSONDecodeError, SyntaxError, ValueError, TypeError):
+                continue
+            if isinstance(value, dict):
+                return {str(key): self._json_safe_literal(item) for key, item in value.items()}
+        return None
+
+    @classmethod
+    def _json_safe_literal(cls, value: Any) -> Any:
+        """Normalizes literal values so Flask can serialize them without losing useful structure."""
+        if value is None or isinstance(value, str | int | float | bool):
+            return value
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        if isinstance(value, dict):
+            return {str(key): cls._json_safe_literal(item) for key, item in value.items()}
+        if isinstance(value, list | tuple | set | frozenset):
+            return [cls._json_safe_literal(item) for item in value]
+        return str(value)
 
     def _format_tool_specific(self, tool_name: str, arguments: dict[str, Any]) -> ActivitySummary | None:
         """Returns a composite summary for tools whose arguments have coupled meaning."""
@@ -942,7 +973,7 @@ def activity_widget_html() -> str:
   }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
-  body { margin: 0; font: 12px/1.35 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: CanvasText; background: transparent; }
+  body { margin: 0; font: 12px/1.35 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: CanvasText; background: transparent; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   button { font: inherit; }
   .activity { width: 100%; min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
   .resize-handle { height: 7px; cursor: ns-resize; position: relative; touch-action: none; user-select: none; }
@@ -1005,7 +1036,40 @@ def activity_widget_html() -> str:
   .detail-panel { margin: 1px 0 5px 21px; padding: 5px 7px 6px; border-left: 2px solid color-mix(in srgb, #00491e 28%, transparent); border-radius: 0 6px 6px 0; background: color-mix(in srgb, CanvasText 3%, transparent); }
   .detail-block + .detail-block { margin-top: 5px; }
   .detail-label { display: block; margin-bottom: 2px; color: color-mix(in srgb, #00491e 82%, CanvasText); font-size: 10px; font-weight: 700; letter-spacing: .035em; text-transform: uppercase; }
-  .detail-value { margin: 0; max-height: 9em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 10.5px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .78; }
+  .detail-value { margin: 0; min-width: 0; overflow: visible; }
+  .rich-value { font-size: 10.5px; line-height: 1.4; }
+  .rich-structure { display: grid; gap: 3px; min-width: 0; }
+  .rich-field { display: grid; grid-template-columns: minmax(44px, 20%) minmax(0, 1fr); gap: 6px; align-items: start; min-width: 0; padding: 2px 0; border-bottom: 1px solid color-mix(in srgb, CanvasText 5%, transparent); }
+  .rich-field:last-child { border-bottom: 0; }
+  .rich-field-name { min-width: 0; padding-top: 1px; color: color-mix(in srgb, #00491e 72%, CanvasText); font: 600 10px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+  .rich-field-value { min-width: 0; }
+  .rich-field-block { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .rich-field-block > .rich-field-value { grid-column: 1; }
+  .rich-array > .rich-field { grid-template-columns: 20px minmax(0, 1fr); gap: 4px; }
+  .rich-array > .rich-field > .rich-field-name { padding-right: 2px; color: color-mix(in srgb, CanvasText 45%, transparent); text-align: right; }
+  .rich-string, .rich-text { color: color-mix(in srgb, CanvasText 88%, transparent); }
+  .rich-string { overflow-wrap: anywhere; }
+  .rich-text { white-space: pre-wrap; overflow-wrap: anywhere; font: 10.5px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  .rich-inline-code { display: inline-block; max-width: 100%; padding: 1px 4px; border-radius: 4px; background: color-mix(in srgb, CanvasText 6%, transparent); font: 10.3px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .rich-scalar { font: 10.3px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .rich-boolean { color: #7c3aed; font-weight: 600; }
+  .rich-number { color: #b45309; }
+  .rich-null { opacity: .46; font-style: italic; }
+  .rich-nested { min-width: 0; }
+  .rich-nested > summary { width: max-content; max-width: 100%; cursor: pointer; color: color-mix(in srgb, CanvasText 64%, transparent); font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; user-select: none; }
+  .rich-nested[open] > summary { margin-bottom: 3px; }
+  .rich-nested > .rich-structure { margin-left: 2px; padding-left: 5px; border-left: 1px solid color-mix(in srgb, CanvasText 10%, transparent); }
+  .rich-nested > .rich-array { margin-left: 0; padding-left: 0; border-left: 0; }
+  .rich-code { min-width: 0; overflow: hidden; border: 1px solid color-mix(in srgb, CanvasText 11%, transparent); border-radius: 5px; background: color-mix(in srgb, CanvasText 3%, transparent); }
+  .rich-code-toolbar { display: flex; align-items: center; justify-content: space-between; min-height: 24px; padding: 3px 5px 3px 7px; border-bottom: 1px solid color-mix(in srgb, CanvasText 8%, transparent); color: color-mix(in srgb, CanvasText 50%, transparent); font: 9px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-transform: uppercase; letter-spacing: .045em; }
+  .rich-copy { border: 0; border-radius: 4px; padding: 2px 5px; background: transparent; color: inherit; font: inherit; text-transform: none; letter-spacing: 0; cursor: pointer; }
+  .rich-copy:hover { background: color-mix(in srgb, CanvasText 6%, transparent); color: CanvasText; }
+  .rich-code-scroll { display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: start; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10.5px; line-height: 1.45; tab-size: 2; }
+  .rich-code-numbers, .rich-code-content { margin: 0; padding-top: 6px; padding-bottom: 6px; font: inherit; line-height: inherit; white-space: pre; tab-size: inherit; }
+  .rich-code-numbers { min-width: 34px; padding-left: 4px; padding-right: 7px; border-right: 1px solid color-mix(in srgb, CanvasText 7%, transparent); background: color-mix(in srgb, Canvas 96%, CanvasText); color: color-mix(in srgb, CanvasText 34%, transparent); text-align: right; user-select: none; }
+  .rich-code-content-scroll { width: 100%; min-width: 0; overflow-x: auto; overflow-y: hidden; touch-action: pan-y pinch-zoom; }
+  .rich-code-content { display: block; width: max-content; min-width: 100%; padding-left: 8px; padding-right: 8px; color: color-mix(in srgb, CanvasText 90%, transparent); }
+  .rich-code-diff .rich-code-content { color: color-mix(in srgb, CanvasText 84%, transparent); }
   .detail-media { margin-top: 5px; }
   .detail-media-preview { display: block; max-width: 100%; max-height: 420px; border-radius: 5px; object-fit: contain; }
   .detail-media-audio { width: min(100%, 420px); height: 32px; }
@@ -1042,6 +1106,7 @@ def activity_widget_html() -> str:
 
   const header = document.getElementById("activity-header");
   const body = document.getElementById("activity-body");
+  const bodyScroll = body.querySelector(".body-scroll");
   const resizeHandle = document.getElementById("activity-resize-handle");
   const headerTool = document.getElementById("activity-header-tool");
   const headerScope = document.getElementById("activity-header-scope");
@@ -1066,6 +1131,10 @@ def activity_widget_html() -> str:
   let clockTimer = null;
   let clockDelay = null;
   let jobDetailTimer = null;
+  let lastBodyScrollAt = -Infinity;
+  let deferredRenderState = null;
+  let deferredRenderTimer = null;
+  const scrollIdleDelay = 140;
   const resizeMin = 72;
   const resizePanelMax = 720;
   const initialActivityWindowSeconds = 5 * 60;
@@ -1091,6 +1160,23 @@ def activity_widget_html() -> str:
     resizeHandle.removeAttribute("aria-valuenow");
     window.openai?.notifyIntrinsicHeight?.();
   }
+
+  function scheduleDeferredRender() {
+    if (!deferredRenderState) return;
+    if (deferredRenderTimer !== null) clearTimeout(deferredRenderTimer);
+    const delay = Math.max(0, scrollIdleDelay - (performance.now() - lastBodyScrollAt));
+    deferredRenderTimer = setTimeout(() => {
+      deferredRenderTimer = null;
+      const pending = deferredRenderState;
+      deferredRenderState = null;
+      if (pending) render(pending);
+    }, delay);
+  }
+
+  bodyScroll.addEventListener("scroll", () => {
+    lastBodyScrollAt = performance.now();
+    scheduleDeferredRender();
+  }, { passive: true });
 
   resizeHandle.addEventListener("pointerdown", event => {
     if (event.button !== 0) return;
@@ -1139,20 +1225,25 @@ def activity_widget_html() -> str:
     window.openai?.notifyIntrinsicHeight?.();
   }
 
+  async function hydrateFullActivity() {
+    if (!state?.summary_only || !state?.run_id || !window.openai?.callTool) return false;
+    try {
+      const result = await window.openai.callTool("get_activity", { run_id: state.run_id, full: true });
+      const next = result?.structuredContent ?? result?.structured_content ?? result;
+      if (!next?.run_id) return false;
+      render(next);
+      return true;
+    } catch (_) {
+      // Keep the compact retained state if historical expansion cannot be refreshed.
+      return false;
+    }
+  }
+
   header.addEventListener("click", async () => {
     initialViewResolved = true;
     const expanding = root.classList.contains("collapsed");
     setCollapsed(!root.classList.contains("collapsed"), preferSummaryCollapsedHeader);
-    if (expanding && state?.summary_only && state?.run_id && window.openai?.callTool) {
-      try {
-        const result = await window.openai.callTool("get_activity", { run_id: state.run_id, full: true });
-        const next = result?.structuredContent ?? result?.structured_content ?? result;
-        if (next?.run_id) render(next);
-      } catch (_) {
-        // Keep the compact retained state if historical expansion cannot be refreshed.
-      }
-      return;
-    }
+    if (expanding && await hydrateFullActivity()) return;
     if (state?.run_id) render(state);
   });
   otherJobsButton.addEventListener("click", event => {
@@ -1315,6 +1406,230 @@ def activity_widget_html() -> str:
     }
   }
 
+  const richCodeKeys = new Set(["body", "code", "command", "needle", "output", "regex", "repl", "script", "source", "stderr", "stdout", "substring_pattern"]);
+  const richPathKeys = new Set(["cwd", "path", "project", "relative_path", "remote", "branch", "file_mask", "paths_include_glob"]);
+
+  function parsedJsonValue(value) {
+    if (typeof value !== "string") return { parsed: false, value };
+    const text = value.trim();
+    if (!text || !["{", "["].includes(text[0])) return { parsed: false, value };
+    try {
+      return { parsed: true, value: JSON.parse(text) };
+    } catch (_) {
+      return { parsed: false, value };
+    }
+  }
+
+  function looksLikeDiff(text) {
+    return /^diff --git /m.test(text) || (/^@@ .* @@/m.test(text) && (/^\+/m.test(text) || /^-/m.test(text)));
+  }
+
+  function codeLanguage(text, key) {
+    if (looksLikeDiff(text)) return "diff";
+    if (["output", "stderr", "stdout"].includes(key)) return "output";
+    if (key === "command" || /^#!.*\b(?:ba|z|fi)?sh\b/m.test(text)) return "shell";
+    if (/^\s*(?:def|class|from|import|async def)\b/m.test(text)) return "python";
+    if (/^\s*(?:const|let|var|function|interface|type|export|import)\b/m.test(text) || /=>/.test(text)) return "javascript";
+    if (/^\s*(?:SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER)\b/im.test(text)) return "sql";
+    return "code";
+  }
+
+  function looksLikeCode(text, key) {
+    if (looksLikeDiff(text)) return true;
+    if (richCodeKeys.has(key)) return text.includes("\n") || text.length > 52 || key === "command" || key === "regex";
+    if (!text.includes("\n")) return false;
+    return /^\s*(?:def|class|from|import|const|let|var|function|if|for|while|return|#include)\b/m.test(text)
+      || /[{};]\s*$/m.test(text)
+      || /=>/.test(text);
+  }
+
+  function copyButton(text) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "rich-copy";
+    button.textContent = "Copy";
+    button.addEventListener("click", async event => {
+      event.stopPropagation();
+      try {
+        await navigator.clipboard.writeText(text);
+        button.textContent = "Copied";
+        window.setTimeout(() => { button.textContent = "Copy"; }, 1200);
+      } catch (_) {
+        button.textContent = "Copy unavailable";
+        window.setTimeout(() => { button.textContent = "Copy"; }, 1200);
+      }
+    });
+    return button;
+  }
+
+  function enableHorizontalTouchDrag(scroller) {
+    let pointerId = null;
+    let startX = 0;
+    let startY = 0;
+    let startScrollLeft = 0;
+    let horizontal = false;
+    let decided = false;
+
+    scroller.addEventListener("pointerdown", event => {
+      if (event.pointerType !== "touch" || scroller.scrollWidth <= scroller.clientWidth) return;
+      pointerId = event.pointerId;
+      startX = event.clientX;
+      startY = event.clientY;
+      startScrollLeft = scroller.scrollLeft;
+      horizontal = false;
+      decided = false;
+    });
+
+    scroller.addEventListener("pointermove", event => {
+      if (event.pointerId !== pointerId) return;
+      const dx = event.clientX - startX;
+      const dy = event.clientY - startY;
+      if (!decided) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < 5) return;
+        horizontal = Math.abs(dx) > Math.abs(dy) * 1.15;
+        decided = true;
+        if (horizontal && scroller.setPointerCapture) scroller.setPointerCapture(pointerId);
+      }
+      if (horizontal) scroller.scrollLeft = startScrollLeft - dx;
+    });
+
+    const finish = event => {
+      if (event.pointerId !== pointerId) return;
+      if (scroller.hasPointerCapture?.(pointerId)) scroller.releasePointerCapture(pointerId);
+      pointerId = null;
+    };
+    scroller.addEventListener("pointerup", finish);
+    scroller.addEventListener("pointercancel", finish);
+  }
+
+  function appendCodeBlock(container, text, key = "") {
+    const language = codeLanguage(text, key);
+    const block = document.createElement("div");
+    block.className = `rich-code rich-code-${language}`;
+    const toolbar = document.createElement("div");
+    toolbar.className = "rich-code-toolbar";
+    const label = document.createElement("span");
+    label.textContent = language;
+    toolbar.append(label, copyButton(text));
+    const scroll = document.createElement("div");
+    scroll.className = "rich-code-scroll";
+    const lineCount = text.split("\n").length;
+    const numbers = document.createElement("pre");
+    numbers.className = "rich-code-numbers";
+    numbers.textContent = Array.from({ length: lineCount }, (_, index) => String(index + 1)).join("\n");
+    const content = document.createElement("pre");
+    content.className = "rich-code-content";
+    content.textContent = text || " ";
+    const contentScroll = document.createElement("div");
+    contentScroll.className = "rich-code-content-scroll";
+    contentScroll.append(content);
+    enableHorizontalTouchDrag(contentScroll);
+    scroll.append(numbers, contentScroll);
+    block.append(toolbar, scroll);
+    container.append(block);
+  }
+
+  function appendScalarValue(container, value, key = "") {
+    if (value === null || value === undefined) {
+      const scalar = document.createElement("span");
+      scalar.className = "rich-scalar rich-null";
+      scalar.textContent = "null";
+      container.append(scalar);
+      return;
+    }
+    if (typeof value === "boolean" || typeof value === "number") {
+      const scalar = document.createElement("span");
+      scalar.className = `rich-scalar rich-${typeof value}`;
+      scalar.textContent = String(value);
+      container.append(scalar);
+      return;
+    }
+
+    const text = String(value);
+    const parsed = parsedJsonValue(text);
+    if (parsed.parsed) {
+      appendStructuredValue(container, parsed.value, 0, key);
+      return;
+    }
+    if (looksLikeCode(text, key)) {
+      appendCodeBlock(container, text, key);
+      return;
+    }
+    if (richPathKeys.has(key) || key.endsWith("_path") || key.endsWith("_id") || key === "name_path" || key === "name_path_pattern") {
+      const code = document.createElement("code");
+      code.className = "rich-inline-code";
+      code.textContent = text;
+      container.append(code);
+      return;
+    }
+    if (text.includes("\n") || text.length > 180) {
+      const prose = document.createElement("div");
+      prose.className = "rich-text";
+      prose.textContent = text;
+      container.append(prose);
+      return;
+    }
+    const scalar = document.createElement("span");
+    scalar.className = "rich-string";
+    scalar.textContent = text;
+    container.append(scalar);
+  }
+
+  function appendStructuredValue(container, value, depth = 0, key = "") {
+    if (value === null || typeof value !== "object") {
+      appendScalarValue(container, value, key);
+      return;
+    }
+
+    const entries = Array.isArray(value) ? value.map((item, index) => [String(index), item]) : Object.entries(value);
+    if (depth > 0) {
+      const details = document.createElement("details");
+      details.className = "rich-nested";
+      details.open = depth === 1 && entries.length <= 5;
+      const summary = document.createElement("summary");
+      summary.textContent = Array.isArray(value)
+        ? `${entries.length} item${entries.length === 1 ? "" : "s"}`
+        : `${entries.length} field${entries.length === 1 ? "" : "s"}`;
+      const inner = document.createElement("div");
+      inner.className = `rich-structure${Array.isArray(value) ? " rich-array" : ""}`;
+      for (const [childKey, childValue] of entries) appendStructuredRow(inner, childKey, childValue, depth + 1);
+      details.append(summary, inner);
+      container.append(details);
+      return;
+    }
+
+    const structure = document.createElement("div");
+    structure.className = `rich-structure${Array.isArray(value) ? " rich-array" : ""}`;
+    for (const [childKey, childValue] of entries) appendStructuredRow(structure, childKey, childValue, depth + 1);
+    container.append(structure);
+  }
+
+  function appendStructuredRow(container, key, value, depth) {
+    const row = document.createElement("div");
+    row.className = "rich-field";
+    if (typeof value === "string" && looksLikeCode(value, key)) row.classList.add("rich-field-block");
+    const name = document.createElement("div");
+    name.className = "rich-field-name";
+    name.textContent = key;
+    const content = document.createElement("div");
+    content.className = "rich-field-value";
+    if (value !== null && typeof value === "object") appendStructuredValue(content, value, depth, key);
+    else appendScalarValue(content, value, key);
+    row.append(name, content);
+    container.append(row);
+  }
+
+  function renderRichValue(container, rawValue, structuredValue = undefined) {
+    container.replaceChildren();
+    if (structuredValue !== undefined && structuredValue !== null) {
+      appendStructuredValue(container, structuredValue);
+      return;
+    }
+    const parsed = parsedJsonValue(rawValue);
+    if (parsed.parsed) appendStructuredValue(container, parsed.value);
+    else appendScalarValue(container, rawValue ?? "");
+  }
+
   async function loadToolDetail(row) {
     const refs = row._activityRefs;
     const callId = row.dataset.callId;
@@ -1327,12 +1642,14 @@ def activity_widget_html() -> str:
       const result = await window.openai.callTool("get_activity_detail", { run_id: state.run_id, call_id: callId });
       const detail = result?.structuredContent ?? result?.structured_content ?? result;
       if (!detail?.call_id || detail.call_id !== callId) throw new Error("Mismatched activity detail");
-      refs.arguments.textContent = detail.arguments || "{}";
+      renderRichValue(refs.arguments, detail.arguments || "{}", detail.structured_arguments);
       const hasMedia = Boolean(detail.media);
       refs.result.parentElement.hidden = hasMedia;
-      refs.result.textContent = hasMedia
-        ? ""
-        : detail.result ?? (detail.status === "running" ? "Tool is still running." : "No result returned.");
+      if (hasMedia) refs.result.replaceChildren();
+      else renderRichValue(
+        refs.result,
+        detail.result ?? (detail.status === "running" ? "Tool is still running." : "No result returned."),
+      );
       await loadToolMedia(row, detail.media);
       refs.loading.hidden = true;
       refs.content.hidden = false;
@@ -1525,16 +1842,16 @@ def activity_widget_html() -> str:
       const argumentsLabel = document.createElement("span");
       argumentsLabel.className = "detail-label";
       argumentsLabel.textContent = "Parameters";
-      argumentsValue = document.createElement("pre");
-      argumentsValue.className = "detail-value";
+      argumentsValue = document.createElement("div");
+      argumentsValue.className = "detail-value rich-value";
       argumentsBlock.append(argumentsLabel, argumentsValue);
       const resultBlock = document.createElement("div");
       resultBlock.className = "detail-block";
       const resultLabel = document.createElement("span");
       resultLabel.className = "detail-label";
       resultLabel.textContent = "Result";
-      resultValue = document.createElement("pre");
-      resultValue.className = "detail-value";
+      resultValue = document.createElement("div");
+      resultValue.className = "detail-value rich-value";
       resultBlock.append(resultLabel, resultValue);
 
       mediaBlock = document.createElement("div");
@@ -1620,6 +1937,13 @@ def activity_widget_html() -> str:
     row.dataset.jobId = entry.job_id || "";
     row.dataset.entryKind = entry.kind;
     row._activityEntry = entry;
+    const renderSignature = [
+      entry.status, entry.tool_name, entry.scope || "", entry.detail || "",
+      entry.submitted_at ?? "", entry.started_at ?? "", entry.finished_at ?? "",
+      expandedRows.has(entry.key) ? "1" : "0",
+    ].join("\\u001f");
+    if (row._activityRenderSignature === renderSignature) return;
+    row._activityRenderSignature = renderSignature;
     row.className = `call ${entry.status}${isJob ? " job-entry" : ""}`;
     refs.status.textContent = statusIcon(entry.status);
     refs.toolName.textContent = entry.tool_name;
@@ -1655,7 +1979,7 @@ def activity_widget_html() -> str:
 
   function reconcileRows(primary, background, now) {
     const retained = new Set([...primary, ...background].map(entry => entry.key));
-    const oldScrollTop = body.scrollTop;
+    const oldScrollTop = bodyScroll.scrollTop;
     reconcileInto(calls, primary, now);
     reconcileInto(backgroundJobsList, background, now);
     for (const [key, row] of rowsByKey) {
@@ -1664,7 +1988,7 @@ def activity_widget_html() -> str:
       rowsByKey.delete(key);
       expandedRows.delete(key);
     }
-    if (oldScrollTop > 0) body.scrollTop = oldScrollTop;
+    if (oldScrollTop > 0) bodyScroll.scrollTop = oldScrollTop;
   }
 
   function refreshDurations() {
@@ -1692,6 +2016,12 @@ def activity_widget_html() -> str:
   function render(next) {
     if (!next || !next.run_id) return;
     state = next;
+    if (performance.now() - lastBodyScrollAt < scrollIdleDelay) {
+      deferredRenderState = next;
+      scheduleDeferredRender();
+      return;
+    }
+    deferredRenderState = null;
     applyInitialCollapsedPolicy(next);
     const now = Date.now() / 1000;
     const activeHeaderEntry = headerEntry(next);
@@ -1816,7 +2146,10 @@ def activity_widget_html() -> str:
   }
   window.addEventListener("openai:set_globals", acceptGlobals, { passive: true });
 
-  if (state?.run_id) render(state);
+  if (state?.run_id) {
+    render(state);
+    if (!root.classList.contains("collapsed")) void hydrateFullActivity();
+  }
   poll();
 })();
 </script>

@@ -28,6 +28,20 @@ _MAX_CALLS_PER_SESSION = 500
 class DashboardActivitySessionSummary:
     """Compact retained-session state used for dashboard discovery and polling."""
 
+    _RECENT_TERMINAL_CALL_LIMIT = 8
+    _ACTIVE_STATUSES = frozenset({"running", "queued"})
+    _CALL_KEYS = (
+        "call_id",
+        "tool_name",
+        "detail",
+        "scope",
+        "status",
+        "submitted_at",
+        "started_at",
+        "finished_at",
+        "job_id",
+    )
+
     panel_id: str
     project_name: str
     display_name: str
@@ -36,14 +50,29 @@ class DashboardActivitySessionSummary:
     tool_count: int
     job_ids: tuple[str, ...]
     has_active_calls: bool
+    recent_calls: tuple[dict[str, Any], ...]
     latest_call: dict[str, Any] | None
 
     @classmethod
     def from_session(cls, session: dict[str, Any]) -> "DashboardActivitySessionSummary":
-        """Builds a compact summary without retaining the full call history."""
+        """Builds a bounded visual summary without retaining full results or arguments."""
         calls = list(session.get("calls", []))
         job_ids = tuple(dict.fromkeys(str(call["job_id"]) for call in calls if call.get("job_id")))
-        latest_call = dict(calls[-1]) if calls else None
+
+        active_calls = [call for call in calls if call.get("status") in cls._ACTIVE_STATUSES]
+        terminal_calls = [call for call in calls if call.get("status") not in cls._ACTIVE_STATUSES]
+        selected_calls = [*active_calls, *terminal_calls[-cls._RECENT_TERMINAL_CALL_LIMIT :]]
+        selected_ids: set[str] = set()
+        recent_calls: list[dict[str, Any]] = []
+        for call in selected_calls:
+            call_id = str(call.get("call_id") or "")
+            if call_id and call_id in selected_ids:
+                continue
+            if call_id:
+                selected_ids.add(call_id)
+            recent_calls.append({key: call.get(key) for key in cls._CALL_KEYS})
+
+        latest_call = {key: calls[-1].get(key) for key in cls._CALL_KEYS} if calls else None
         return cls(
             panel_id=str(session["panel_id"]),
             project_name=str(session.get("project_name") or ""),
@@ -52,7 +81,8 @@ class DashboardActivitySessionSummary:
             updated_at=float(session.get("updated_at") or 0.0),
             tool_count=len(calls),
             job_ids=job_ids,
-            has_active_calls=any(call.get("status") in {"running", "queued"} for call in calls),
+            has_active_calls=bool(active_calls),
+            recent_calls=tuple(recent_calls),
             latest_call=latest_call,
         )
 
@@ -343,6 +373,13 @@ class DashboardActivityArchive:
                 if changed:
                     session["updated_at"] = now
                     self._write_path(path, session)
+
+                stat = path.stat()
+                self._summary_cache[path] = _SessionSummaryCacheEntry(
+                    stat.st_mtime_ns,
+                    stat.st_size,
+                    DashboardActivitySessionSummary.from_session(session),
+                )
             self._prune()
 
     def _prune(self) -> None:

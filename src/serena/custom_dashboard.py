@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import re
 import threading
 import time
@@ -519,11 +520,7 @@ class DashboardSerenaActivityOverview:
                 "active": active,
             }
             if include_state:
-                if active:
-                    session = self._archive.get_session(summary.panel_id)
-                    panel["initial_state"] = self._panel_state(session, jobs)
-                else:
-                    panel["initial_state"] = self._summary_panel_state(summary, jobs)
+                panel["initial_state"] = self._summary_panel_state(summary, jobs)
             panels.append(panel)
         panels.sort(key=lambda item: (float(item.get("started_at") or 0.0), str(item["panel_id"])), reverse=True)
         return {"status": "success", "panels": panels}
@@ -538,9 +535,29 @@ class DashboardSerenaActivityOverview:
         summary: DashboardActivitySessionSummary,
         jobs: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
-        """Returns the compact bootstrap state for one inactive retained session."""
+        """Returns bounded first-paint state for one retained session."""
         visible_jobs = [self._job_payload(jobs[job_id]) for job_id in summary.job_ids if job_id in jobs]
-        calls = [self._call_payload(summary.latest_call)] if summary.latest_call is not None else []
+        running_jobs = [job for job in visible_jobs if job.get("status") == "running"]
+        terminal_jobs = [job for job in visible_jobs if job.get("status") != "running"]
+
+        latest_timestamps: list[float] = []
+        if summary.latest_call is not None:
+            latest_call_at = (
+                summary.latest_call.get("finished_at") or summary.latest_call.get("started_at") or summary.latest_call.get("submitted_at")
+            )
+            if isinstance(latest_call_at, int | float):
+                latest_timestamps.append(float(latest_call_at))
+        for job in visible_jobs:
+            job_at = job.get("finished_at") or job.get("started_at")
+            if isinstance(job_at, int | float):
+                latest_timestamps.append(float(job_at))
+        recently_active = (
+            summary.has_active_calls or bool(running_jobs) or (latest_timestamps and time.time() - max(latest_timestamps) <= 5 * 60)
+        )
+
+        selected_calls = summary.recent_calls if recently_active else ((summary.latest_call,) if summary.latest_call is not None else ())
+        payload_jobs = [*running_jobs, *terminal_jobs[-4:]] if recently_active else terminal_jobs[-1:]
+        calls = [self._call_payload(call) for call in selected_calls]
         return {
             "run_id": summary.panel_id,
             "project_name": summary.project_name,
@@ -550,10 +567,11 @@ class DashboardSerenaActivityOverview:
             "superseded": False,
             "summary_only": True,
             "partial": False,
+            "initial_expanded": bool(recently_active),
             "tool_count": summary.tool_count,
             "job_count": len(visible_jobs),
             "calls": calls,
-            "jobs": visible_jobs[-1:],
+            "jobs": payload_jobs,
         }
 
     def _panel_state(
@@ -575,7 +593,9 @@ class DashboardSerenaActivityOverview:
             payload_jobs = visible_jobs[-1:]
         elif changed_since is not None:
             payload_calls = [call for call in calls if self._call_changed_after(call, changed_since)]
-            payload_jobs = visible_jobs
+            running_jobs = [job for job in visible_jobs if job.get("status") == "running"]
+            terminal_jobs = [job for job in visible_jobs if job.get("status") != "running"]
+            payload_jobs = [*running_jobs, *terminal_jobs[-4:]]
         else:
             payload_calls = calls
             payload_jobs = visible_jobs
@@ -649,11 +669,13 @@ class DashboardSerenaActivityOverview:
         """Returns one retained tool call's bounded detail."""
         call = self._archive.get_call(panel_id, call_id)
         media = ActivityMedia.from_storage_dict(call.get("media")) or ActivityMedia.from_serialized_result(str(call.get("result") or ""))
+        parameters = str(call.get("parameters") or "")
         return {
             "call_id": call_id,
             "tool_name": call.get("tool_name") or "",
             "status": call.get("status") or "completed",
-            "arguments": call.get("parameters") or "{}",
+            "arguments": parameters or "{}",
+            "structured_arguments": self._activity_formatter.parse_parameters(parameters),
             "result": None if media is not None else call.get("error") or call.get("result"),
             "media": media.public_dict() if media is not None else None,
         }
@@ -855,6 +877,32 @@ class CustomDashboard:
         """Sets the retained dashboard name for one ChatGPT conversation."""
         return self._activity_archive.set_display_name(session_id, display_name)
 
+    def dashboard_state(self, *, include_state: bool = False) -> dict[str, Any]:
+        """Returns the complete dashboard state payload for API and first-paint bootstrap use."""
+        return {
+            "status": "success",
+            "session": self._session_overview.get_session(),
+            "serena": self._serena_activity_overview.get_panels(include_state=include_state),
+            "orchestrator": self._orchestrator_overview.get_panels(),
+        }
+
+    def render_index_html(self) -> str:
+        """Returns the dashboard shell with compact first-paint state and versioned static assets."""
+        index_path = self.static_dir / "index.html"
+        html = index_path.read_text(encoding="utf-8")
+
+        asset_paths = [self.static_dir / name for name in ("dashboard.js", "styles.css", "serena-logo.svg", "orchestrator-logo.svg")]
+        revision_input = "\x1f".join(f"{path.name}:{path.stat().st_mtime_ns}:{path.stat().st_size}" for path in asset_paths)
+        asset_version = hashlib.blake2s(revision_input.encode("utf-8"), digest_size=6).hexdigest()
+        for asset in ("dashboard.js", "styles.css", "serena-logo.svg", "orchestrator-logo.svg"):
+            html = html.replace(f'"{asset}"', f'"{asset}?v={asset_version}"')
+        html = html.replace('<html lang="en">', f'<html lang="en" data-asset-version="{asset_version}">', 1)
+
+        bootstrap = json.dumps(self.dashboard_state(include_state=True), ensure_ascii=False, separators=(",", ":"))
+        bootstrap = bootstrap.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+        bootstrap_tag = f'<script id="dashboard-bootstrap" type="application/json">{bootstrap}</script>'
+        return html.replace("</head>", f"  {bootstrap_tag}\n</head>", 1)
+
     @property
     def static_dir(self) -> Path:
         """Returns the directory containing the custom dashboard frontend."""
@@ -876,13 +924,7 @@ class CustomDashboard:
         @app.route("/dashboard/api/state", methods=["GET"])
         def get_dashboard_state() -> Response:
             include_state = request.args.get("include_state") == "1"
-            payload = {
-                "status": "success",
-                "session": self._session_overview.get_session(),
-                "serena": self._serena_activity_overview.get_panels(include_state=include_state),
-                "orchestrator": self._orchestrator_overview.get_panels(),
-            }
-            return self._conditional_json_response(app, payload)
+            return self._conditional_json_response(app, self.dashboard_state(include_state=include_state))
 
         @app.route("/dashboard/api/session", methods=["GET"])
         def get_session() -> Response:

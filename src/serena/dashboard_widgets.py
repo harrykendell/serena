@@ -14,24 +14,61 @@ def serena_dashboard_widget_html(panel_id: str | None = None, initial_state: dic
 (() => {{
   const fallbackPanelId = {panel_json};
   const serverInitialOutput = {initial_state_json};
-  let bootstrap = {{}};
-  try {{ bootstrap = JSON.parse(window.name || "{{}}"); window.name = ""; }} catch (_) {{ bootstrap = {{}}; }}
-  const panelId = bootstrap.panel_id || fallbackPanelId;
-  const initialOutput = bootstrap.tool_output || serverInitialOutput || {{ run_id: panelId, project_name: "", superseded: false, calls: [], jobs: [] }};
+  let panelId = fallbackPanelId;
+  const initialOutput = serverInitialOutput || {{ run_id: panelId, project_name: "", superseded: false, calls: [], jobs: [] }};
   let activityOutput = initialOutput;
-  let initialReadPending = Boolean(bootstrap.tool_output || serverInitialOutput);
-  let live = typeof bootstrap.active === "boolean" ? bootstrap.active : true;
-  let loadedRevision = String(initialOutput?.revision || bootstrap.revision || "");
-  let announcedRevision = String(bootstrap.revision || loadedRevision);
+  let initialReadPending = Boolean(serverInitialOutput);
+  let live = true;
+  let loadedRevision = String(initialOutput?.revision || "");
+  let announcedRevision = loadedRevision;
   let stateDirty = !initialReadPending;
-  let forceFullOnNextRead = Boolean(live && initialOutput?.summary_only);
+
+  async function applyDashboardBootstrap(bootstrap) {{
+    if (!bootstrap?.panel_id) return;
+    panelId = String(bootstrap.panel_id);
+    live = typeof bootstrap.active === "boolean" ? bootstrap.active : true;
+    if (bootstrap.tool_output?.run_id) {{
+      activityOutput = bootstrap.tool_output;
+      initialReadPending = true;
+      loadedRevision = String(activityOutput.revision || bootstrap.revision || "");
+      announcedRevision = String(bootstrap.revision || loadedRevision);
+      stateDirty = false;
+      window.openai.toolOutput = activityOutput;
+      window.dispatchEvent(new CustomEvent("openai:set_globals", {{ detail: {{ globals: {{ toolOutput: activityOutput }} }} }}));
+      if (activityOutput.summary_only && activityOutput.initial_expanded) {{
+        try {{
+          await loadActivity(true);
+          initialReadPending = false;
+          window.openai.toolOutput = activityOutput;
+          window.dispatchEvent(new CustomEvent("openai:set_globals", {{ detail: {{ globals: {{ toolOutput: activityOutput }} }} }}));
+        }} catch (_) {{
+          // Retain the compact bootstrap if historical hydration is temporarily unavailable.
+        }}
+      }}
+    }}
+    requestAnimationFrame(() => parent.postMessage({{ type: "serena-dashboard-widget-ready", panel_id: panelId }}, location.origin));
+  }}
 
   async function getJson(path) {{
-    const response = await fetch(`/dashboard/api${{path}}`, {{ cache: "no-store", headers: {{ Accept: "application/json" }} }});
+    const url = new URL(`/dashboard/api${{path}}`, location.origin);
+    const response = await fetch(url, {{ cache: "no-store", headers: {{ Accept: "application/json" }} }});
     if (!response.ok) throw new Error(`${{response.status}} ${{response.statusText}}`);
     const data = await response.json();
     if (data?.status === "error") throw new Error(data.message || "Dashboard API error");
     return data;
+  }}
+
+  function boundedSummaryCalls(calls) {{
+    const active = calls.filter(call => call.status === "running" || call.status === "queued");
+    const terminal = calls.filter(call => call.status !== "running" && call.status !== "queued").slice(-8);
+    const selected = [...active, ...terminal];
+    const seen = new Set();
+    return selected.filter(call => {{
+      const key = String(call.call_id || "");
+      if (key && seen.has(key)) return false;
+      if (key) seen.add(key);
+      return true;
+    }});
   }}
 
   function mergeActivity(previous, next) {{
@@ -47,26 +84,26 @@ def serena_dashboard_widget_html(panel_id: str | None = None, initial_state: dic
         calls[index] = call;
       }}
     }}
+    const summaryOnly = Boolean(previous.summary_only);
     return {{
       ...previous,
       ...next,
       partial: false,
-      summary_only: false,
-      calls,
+      summary_only: summaryOnly,
+      calls: summaryOnly ? boundedSummaryCalls(calls) : calls,
       jobs: next.jobs || previous.jobs || [],
     }};
   }}
 
   async function loadActivity(forceFull = false) {{
     const updatedAt = Number(activityOutput?.updated_at);
-    const canRequestDelta = !forceFull && !activityOutput?.summary_only && Number.isFinite(updatedAt) && updatedAt > 0;
+    const canRequestDelta = !forceFull && Number.isFinite(updatedAt) && updatedAt > 0;
     const suffix = canRequestDelta ? `?changed_since=${{encodeURIComponent(updatedAt)}}` : "";
     const next = await getJson(`/serena/panels/${{encodeURIComponent(panelId)}}${{suffix}}`);
     activityOutput = mergeActivity(activityOutput, next);
     loadedRevision = String(activityOutput?.revision || announcedRevision || loadedRevision);
     announcedRevision = loadedRevision;
     stateDirty = false;
-    forceFullOnNextRead = false;
     return activityOutput;
   }}
 
@@ -82,13 +119,17 @@ def serena_dashboard_widget_html(panel_id: str | None = None, initial_state: dic
     toolOutput: initialOutput,
     notifyIntrinsicHeight,
     callTool: async (name, args) => {{
-      if (name === "get_activity" && initialReadPending) {{
-        initialReadPending = false;
-        return activityOutput;
-      }}
       if (name === "get_activity") {{
-        const forceFull = Boolean(args?.full) || forceFullOnNextRead;
-        if (forceFull || stateDirty || !activityOutput) return loadActivity(forceFull);
+        const forceFull = Boolean(args?.full);
+        if (forceFull) {{
+          initialReadPending = false;
+          return loadActivity(true);
+        }}
+        if (initialReadPending) {{
+          initialReadPending = false;
+          return activityOutput;
+        }}
+        if (stateDirty || !activityOutput) return loadActivity(false);
         return activityOutput;
       }}
       if (name === "get_activity_detail") return getJson(`/serena/panels/${{encodeURIComponent(panelId)}}/calls/${{encodeURIComponent(args.call_id)}}`);
@@ -98,13 +139,15 @@ def serena_dashboard_widget_html(panel_id: str | None = None, initial_state: dic
   }};
 
   window.addEventListener("message", event => {{
-    if (event.origin !== location.origin || event.data?.type !== "serena-dashboard-panel") return;
-    if (event.data.panel_id !== panelId) return;
-    const wasLive = live;
+    if (event.origin !== location.origin) return;
+    if (event.data?.type === "serena-dashboard-bootstrap") {{
+      applyDashboardBootstrap(event.data.bootstrap);
+      return;
+    }}
+    if (event.data?.type !== "serena-dashboard-panel" || event.data.panel_id !== panelId) return;
     live = Boolean(event.data.active);
     announcedRevision = String(event.data.revision || announcedRevision);
     if (announcedRevision && announcedRevision !== loadedRevision) stateDirty = true;
-    if (live && !wasLive && activityOutput?.summary_only) forceFullOnNextRead = true;
   }});
 }})();
 </script>
@@ -122,18 +165,33 @@ def orchestrator_dashboard_widget_html(panel_id: str | None = None, initial_stat
 (() => {{
   const fallbackPanelId = {panel_json};
   const serverInitialOutput = {initial_state_json};
-  let bootstrap = {{}};
-  try {{ bootstrap = JSON.parse(window.name || "{{}}"); window.name = ""; }} catch (_) {{ bootstrap = {{}}; }}
-  const panelId = bootstrap.panel_id || fallbackPanelId;
-  let activityOutput = bootstrap.tool_output || serverInitialOutput || {{ run_id: panelId, started_at: 0, superseded: false, delegates: [] }};
-  let initialReadPending = Boolean(bootstrap.tool_output || serverInitialOutput);
-  let live = typeof bootstrap.active === "boolean" ? bootstrap.active : true;
-  let loadedRevision = String(bootstrap.revision || "");
-  let announcedRevision = loadedRevision;
+  let panelId = fallbackPanelId;
+  let activityOutput = serverInitialOutput || {{ run_id: panelId, started_at: 0, superseded: false, delegates: [] }};
+  let initialReadPending = Boolean(serverInitialOutput);
+  let live = true;
+  let loadedRevision = "";
+  let announcedRevision = "";
   let stateDirty = !initialReadPending;
 
+  function applyDashboardBootstrap(bootstrap) {{
+    if (!bootstrap?.panel_id) return;
+    panelId = String(bootstrap.panel_id);
+    live = typeof bootstrap.active === "boolean" ? bootstrap.active : true;
+    if (bootstrap.tool_output?.run_id) {{
+      activityOutput = bootstrap.tool_output;
+      initialReadPending = true;
+      loadedRevision = String(bootstrap.revision || "");
+      announcedRevision = loadedRevision;
+      stateDirty = false;
+      window.openai.toolOutput = activityOutput;
+      window.dispatchEvent(new CustomEvent("openai:set_globals", {{ detail: {{ globals: {{ toolOutput: activityOutput }} }} }}));
+    }}
+    requestAnimationFrame(() => parent.postMessage({{ type: "serena-dashboard-widget-ready", panel_id: panelId }}, location.origin));
+  }}
+
   async function getJson(path) {{
-    const response = await fetch(`/dashboard/api${{path}}`, {{ cache: "no-store", headers: {{ Accept: "application/json" }} }});
+    const url = new URL(`/dashboard/api${{path}}`, location.origin);
+    const response = await fetch(url, {{ cache: "no-store", headers: {{ Accept: "application/json" }} }});
     if (!response.ok) throw new Error(`${{response.status}} ${{response.statusText}}`);
     const data = await response.json();
     if (data?.status === "error") throw new Error(data.message || "Dashboard API error");
@@ -173,8 +231,12 @@ def orchestrator_dashboard_widget_html(panel_id: str | None = None, initial_stat
   }};
 
   window.addEventListener("message", event => {{
-    if (event.origin !== location.origin || event.data?.type !== "serena-dashboard-panel") return;
-    if (event.data.panel_id !== panelId) return;
+    if (event.origin !== location.origin) return;
+    if (event.data?.type === "serena-dashboard-bootstrap") {{
+      applyDashboardBootstrap(event.data.bootstrap);
+      return;
+    }}
+    if (event.data?.type !== "serena-dashboard-panel" || event.data.panel_id !== panelId) return;
     live = Boolean(event.data.active);
     announcedRevision = String(event.data.revision || announcedRevision);
     if (announcedRevision && announcedRevision !== loadedRevision) stateDirty = true;

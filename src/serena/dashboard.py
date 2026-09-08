@@ -268,13 +268,18 @@ class SerenaDashboardAPI:
         # Static files
         @self._app.route("/dashboard/<path:filename>")
         def serve_dashboard(filename: str) -> Response:
+            if filename == "index.html":
+                response = Response(self._custom_dashboard.render_index_html(), mimetype="text/html")
+                response.headers["Cache-Control"] = "private, no-store"
+                return response
+
             response = send_from_directory(self._custom_dashboard.static_dir, filename)
-            response.headers["Cache-Control"] = "private, no-store"
+            response.headers["Cache-Control"] = "private, max-age=31536000, immutable" if request.args.get("v") else "private, no-cache"
             return response
 
         @self._app.route("/dashboard/")
         def serve_dashboard_index() -> Response:
-            response = send_from_directory(self._custom_dashboard.static_dir, "index.html")
+            response = Response(self._custom_dashboard.render_index_html(), mimetype="text/html")
             response.headers["Cache-Control"] = "private, no-store"
             return response
 

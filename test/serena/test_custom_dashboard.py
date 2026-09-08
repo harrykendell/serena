@@ -124,6 +124,7 @@ def test_custom_dashboard_serves_fork_specific_frontend_and_session_api(tmp_path
     redirect = client.get("/dashboard", base_url="https://serena.kendell.uk")
     response = client.get("/dashboard/")
     dashboard_script = client.get("/dashboard/dashboard.js")
+    versioned_dashboard_script = client.get("/dashboard/dashboard.js?v=test")
     state = client.get("/dashboard/api/state?include_state=1").get_json()
     session = client.get("/dashboard/api/session").get_json()
     serena = client.get("/dashboard/api/serena").get_json()
@@ -137,12 +138,16 @@ def test_custom_dashboard_serves_fork_specific_frontend_and_session_api(tmp_path
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "private, no-store"
     assert dashboard_script.status_code == 200
-    assert dashboard_script.headers["Cache-Control"] == "private, no-store"
+    assert dashboard_script.headers["Cache-Control"] == "private, no-cache"
+    assert versioned_dashboard_script.headers["Cache-Control"] == "private, max-age=31536000, immutable"
     assert b"Serena + Orchestrator" in response.data
     assert b"MCP dashboard" in response.data
     assert b"orchestrator-logo.svg" in response.data
     assert b"One retained activity panel for each ChatGPT conversation" in response.data
     assert b"serena-widgets" in response.data
+    assert b"dashboard-bootstrap" in response.data
+    assert b"dashboard.js?v=" in response.data
+    assert b"styles.css?v=" in response.data
     assert b"Orchestrator" in response.data
     assert b"window.openai" in serena_widget.data
     assert b"get_activity" in serena_widget.data
@@ -210,7 +215,7 @@ def test_dashboard_bootstraps_inactive_serena_panels_with_compact_history(tmp_pa
         tool_usage_stats=None,
     )
     client = dashboard._app.test_client()
-    for task in (1, 2):
+    for task in range(1, 13):
         log_handler.emit_message(
             f"INFO [Task-{task}:ReadFileTool] serena.tools.tools_base:_log_tool_application:291 - "
             f"read_file: relative_path='file-{task}.txt'; project: serena; session_id: session-a"
@@ -222,8 +227,9 @@ def test_dashboard_bootstraps_inactive_serena_panels_with_compact_history(tmp_pa
 
     assert panel["active"] is False
     assert state["summary_only"] is True
-    assert state["tool_count"] == 2
-    assert len(state["calls"]) == 1
+    assert state["tool_count"] == 12
+    assert len(state["calls"]) == 8
+    assert state["calls"][-1]["scope"] == "file-12.txt"
 
 
 def test_dashboard_orders_serena_panels_newest_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -318,6 +324,14 @@ def test_retained_serena_panel_preserves_semantic_detail_and_scope(tmp_path: Pat
     assert calls["search_for_pattern"]["scope"] == "src/serena"
     assert calls["replace_in_files"]["detail"] == "old value"
     assert calls["replace_in_files"]["scope"] == "src/serena"
+
+    detail = client.get(f"/dashboard/api/serena/panels/{panel_id}/calls/{calls['replace_in_files']['call_id']}").get_json()
+    assert detail["structured_arguments"] == {
+        "needle": "old value",
+        "repl": "new value",
+        "mode": "literal",
+        "relative_path": "src/serena",
+    }
 
 
 def test_retained_serena_panel_serves_rendered_media_instead_of_result_repr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
