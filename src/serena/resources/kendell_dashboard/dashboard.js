@@ -11,7 +11,7 @@ const executionOutputCache = new Map();
 const executionOutputRequests = new Set();
 const jobCpuSamples = new Map();
 const scrollerStates = new WeakMap();
-const sessionWidgetTemplates = new Map();
+const sessionWidgetLoaders = new Map();
 const expandedExecutionKeys = new Set();
 const executionRenderState = {
   lastScrollAt: 0,
@@ -949,17 +949,99 @@ function updateSessionWidgetHeading(entry, panel) {
   date.hidden = dateText === "—";
 }
 
-async function sessionWidgetTemplate(kind) {
-  let request = sessionWidgetTemplates.get(kind);
-  if (!request) {
-    request = fetch(`/dashboard/widget/${kind}?load=${DASHBOARD_LOAD_ID}`, { cache: "force-cache" })
-      .then(response => {
-        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-        return response.text();
-      });
-    sessionWidgetTemplates.set(kind, request);
+class SessionWidgetLoader {
+  constructor(kind) {
+    this.sourceUrl = `/dashboard/widget/${kind}?load=${DASHBOARD_LOAD_ID}`;
+    this.documentUrlPromise = null;
+    this.queue = [];
+    this.loadingFrame = null;
+    this.loadingTimeout = null;
+    this.observer = "IntersectionObserver" in window
+      ? new IntersectionObserver(entries => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+            this.observer.unobserve(entry.target);
+            this.enqueue(entry.target);
+          }
+        }, { rootMargin: "800px 0px" })
+      : null;
   }
-  return request;
+
+  prepare(frame, active) {
+    if (active || !this.observer) {
+      this.enqueue(frame, active);
+      return;
+    }
+    this.observer.observe(frame);
+  }
+
+  prioritize(frame) {
+    this.observer?.unobserve(frame);
+    this.enqueue(frame, true);
+  }
+
+  enqueue(frame, priority = false) {
+    if (frame.dataset.widgetStarted === "true" || frame.dataset.widgetQueued === "true") return;
+    frame.dataset.widgetQueued = "true";
+    if (priority) this.queue.unshift(frame);
+    else this.queue.push(frame);
+    this.drain();
+  }
+
+  complete(frame) {
+    if (this.loadingFrame !== frame) return;
+    window.clearTimeout(this.loadingTimeout);
+    this.loadingFrame = null;
+    this.loadingTimeout = null;
+    this.drain();
+  }
+
+  documentUrl() {
+    if (!this.documentUrlPromise) {
+      this.documentUrlPromise = fetch(this.sourceUrl, { cache: "force-cache" })
+        .then(response => {
+          if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+          return response.text();
+        })
+        .then(html => URL.createObjectURL(new Blob([html], { type: "text/html" })))
+        .catch(() => this.sourceUrl);
+    }
+    return this.documentUrlPromise;
+  }
+
+  drain() {
+    if (this.loadingFrame) return;
+
+    let frame = this.queue.shift();
+    while (frame && !frame.isConnected) frame = this.queue.shift();
+    if (!frame) return;
+
+    delete frame.dataset.widgetQueued;
+    frame.dataset.widgetStarted = "true";
+    this.loadingFrame = frame;
+    this.documentUrl().then(url => {
+      if (!frame.isConnected) {
+        this.complete(frame);
+        return;
+      }
+      frame.src = url;
+      this.loadingTimeout = window.setTimeout(() => {
+        if (this.loadingFrame !== frame) return;
+        this.loadingFrame = null;
+        this.loadingTimeout = null;
+        this.drain();
+      }, 5000);
+    });
+  }
+}
+
+function sessionWidgetLoader(kind) {
+  let loader = sessionWidgetLoaders.get(kind);
+  if (!loader) {
+    loader = new SessionWidgetLoader(kind);
+    sessionWidgetLoaders.set(kind, loader);
+  }
+  return loader;
 }
 
 function sessionWidgetBootstrap(panel, kind) {
@@ -981,6 +1063,7 @@ function sessionWidgetBootstrap(panel, kind) {
 
 function renderSessionWidgets(containerId, countId, panels, kind) {
   const container = byId(containerId);
+  const loader = sessionWidgetLoader(kind);
   const orderedPanels = [...panels].sort((left, right) => {
     const leftStarted = Number(left.started_at) || 0;
     const rightStarted = Number(right.started_at) || 0;
@@ -1009,27 +1092,21 @@ function renderSessionWidgets(containerId, countId, panels, kind) {
       frame.loading = "eager";
       frame.title = kind === "serena" ? "Serena session activity" : "Orchestrator activity";
       frame.addEventListener("load", () => {
-        if (frame.dataset.widgetReady !== "true") return;
+        if (frame.dataset.widgetStarted !== "true") return;
         frame.removeAttribute("name");
         frame.dataset.loaded = "true";
         requestAnimationFrame(() => frame.classList.add("ready"));
+        loader.complete(frame);
       });
       frame.addEventListener("error", () => {
+        if (frame.dataset.widgetStarted !== "true") return;
         frame.dataset.loaded = "true";
         frame.classList.add("ready");
+        loader.complete(frame);
       });
       shell.append(frame);
       entry.append(shell);
-
-      sessionWidgetTemplate(kind)
-        .then(html => {
-          frame.dataset.widgetReady = "true";
-          frame.srcdoc = html;
-        })
-        .catch(() => {
-          frame.dataset.widgetReady = "true";
-          frame.src = `/dashboard/widget/${kind}?load=${DASHBOARD_LOAD_ID}`;
-        });
+      loader.prepare(frame, Boolean(panel.active));
       return entry;
     },
     (entry, panel) => {
@@ -1039,7 +1116,7 @@ function renderSessionWidgets(containerId, countId, panels, kind) {
         shell.classList.toggle("retained-session", !panel.active);
       }
       const frame = entry.querySelector(".activity-widget-frame");
-      if (frame?.contentWindow) {
+      if (frame?.dataset.loaded === "true" && frame.contentWindow) {
         frame.contentWindow.postMessage(
           {
             type: "serena-dashboard-panel",
@@ -1049,6 +1126,8 @@ function renderSessionWidgets(containerId, countId, panels, kind) {
           },
           location.origin,
         );
+      } else if (frame && panel.active) {
+        loader.prioritize(frame);
       }
 
       updateSessionWidgetHeading(entry, panel);
