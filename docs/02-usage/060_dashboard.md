@@ -71,15 +71,3 @@ On other platforms, you may still access it by
   (the tool `open_dashboard` is enabled for this purpose, provided that the dashboard is active, 
   not opened by default and the GUI tool, which can provide the URL, is not enabled)
 * navigating directly to the URL (see above).
-
-## The GUI Log Viewer
-
-The Serena GUI Log Viewer is a legacy application which provides access to Serena's live logs.
-
-Via its menu, it furthermore allows you to 
- * shut down the agent
- * access the dashboard's URL (if it is running).
-
-The tool is mainly supported on Windows, but it may work on some Linux systems as well (depending on your desktop environment).
-
-To enable the tool, set `gui_log_window` to `true` in Serena's [global configuration file](global-config).

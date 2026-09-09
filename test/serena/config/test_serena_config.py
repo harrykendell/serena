@@ -14,7 +14,7 @@ from serena.config.serena_config import (
     SerenaConfig,
     SerenaConfigError,
 )
-from serena.constants import PROJECT_TEMPLATE_FILE, SERENA_CONFIG_TEMPLATE_FILE, SERENA_MANAGED_DIR_NAME
+from serena.constants import PROJECT_TEMPLATE_FILE, SERENA_MANAGED_DIR_NAME
 from serena.project import MemoryManager, Project
 from solidlsp.ls_config import LanguageServerId
 from test.conftest import create_default_serena_config
@@ -157,32 +157,6 @@ class TestProjectConfig:
     def test_template_is_complete(self):
         _, is_complete = ProjectConfig._load_yaml_dict(PROJECT_TEMPLATE_FILE)
         assert is_complete, "Project template YAML is incomplete; all fields must be present (with descriptions)."
-
-    def test_legacy_mode_and_tool_keys_are_migrated_out(self, tmp_path: Path):
-        legacy_config = tmp_path / "project.yml"
-        legacy_config.write_text(
-            Path(PROJECT_TEMPLATE_FILE).read_text()
-            + "\nexcluded_tools: [read_file]\n"
-            + "included_optional_tools: [start_job]\n"
-            + "fixed_tools: [find_symbol]\n"
-            + "base_modes: [editing]\n"
-            + "default_modes: [interactive]\n"
-            + "added_modes: [planning]\n"
-        )
-
-        data, is_complete = ProjectConfig._load_yaml_dict(legacy_config)
-
-        assert not is_complete
-        for key in (
-            "excluded_tools",
-            "included_optional_tools",
-            "fixed_tools",
-            "base_modes",
-            "default_modes",
-            "added_modes",
-        ):
-            assert key not in data
-        ProjectConfig._from_dict(data, [])
 
 
 class TestGetConfiguredProjectSerenaFolder:
@@ -328,7 +302,7 @@ class TestProjectConfigYamlValidation:
         try:
             serena_dir = project_dir / SERENA_MANAGED_DIR_NAME
             serena_dir.mkdir(parents=True)
-            (serena_dir / "project.yml").write_text('project_name: "demo"\nlanguages: ["csharp"]\nignored_paths:\n- **/bin/**\n')
+            (serena_dir / "project.yml").write_text('project_name: "demo"\nlanguage_servers: ["csharp"]\nignored_paths:\n- **/bin/**\n')
 
             with pytest.raises(ValueError) as exc_info:
                 ProjectConfig.load(project_dir, create_default_serena_config())
@@ -375,31 +349,6 @@ class TestSerenaConfigLoadSave:
             body_lines.append(f"  - {p}")
         self.master_config_path.write_text("\n".join(body_lines) + "\n")
 
-    def test_legacy_mode_and_tool_keys_are_removed_from_master_config(self) -> None:
-        self.master_config_path.write_text(
-            Path(SERENA_CONFIG_TEMPLATE_FILE).read_text()
-            + "\nexcluded_tools: [read_file]\n"
-            + "included_optional_tools: [start_job]\n"
-            + "fixed_tools: [find_symbol]\n"
-            + "base_modes: [editing]\n"
-            + "default_modes: [interactive]\n"
-            + "added_modes: [planning]\n"
-        )
-
-        config = SerenaConfig.from_config_file()
-
-        assert not hasattr(config, "base_modes")
-        persisted_config = self.master_config_path.read_text()
-        for key in (
-            "excluded_tools:",
-            "included_optional_tools:",
-            "fixed_tools:",
-            "base_modes:",
-            "default_modes:",
-            "added_modes:",
-        ):
-            assert key not in persisted_config
-
     def test_empty_projects_key_is_treated_as_empty_list(self):
         """A bare ``projects:`` key should not abort config loading."""
         self.master_config_path.write_text("projects:\n")
@@ -410,7 +359,7 @@ class TestSerenaConfigLoadSave:
         """A malformed project.yml must not abort loading of the others."""
         good_project = self._make_project_dir(
             "good_project",
-            'project_name: "good_project"\nlanguages: ["python"]\n',
+            'project_name: "good_project"\nlanguage_servers: ["python"]\n',
         )
         # Invalid YAML: a stray colon at the start of a mapping value.
         bad_project = self._make_project_dir(
@@ -431,11 +380,11 @@ class TestSerenaConfigLoadSave:
     def test_alias_like_ignored_path_error_is_logged_with_hint(self, caplog):
         good_project = self._make_project_dir(
             "good_project",
-            'project_name: "good_project"\nlanguages: ["python"]\n',
+            'project_name: "good_project"\nlanguage_servers: ["python"]\n',
         )
         bad_project = self._make_project_dir(
             "bad_project",
-            'project_name: "bad_project"\nlanguages: ["csharp"]\nignored_paths:\n- **/bin/**\n',
+            'project_name: "bad_project"\nlanguage_servers: ["csharp"]\nignored_paths:\n- **/bin/**\n',
         )
         self._write_master_config([good_project, bad_project])
 
@@ -450,10 +399,10 @@ class TestSerenaConfigLoadSave:
         """
         Tests that agents changing SerenaConfig by adding projects in parallel do not lose each other's changes.
         """
-        p1 = self._make_project_dir("project1", 'project_name: "project1"\nlanguages: ["python"]\n')
-        p2 = self._make_project_dir("project2", 'project_name: "project1"\nlanguages: ["python"]\n')
-        p3 = self._make_project_dir("project3", 'project_name: "project1"\nlanguages: ["python"]\n')
-        p4 = self._make_project_dir("project4", 'project_name: "project1"\nlanguages: ["python"]\n')
+        p1 = self._make_project_dir("project1", 'project_name: "project1"\nlanguage_servers: ["python"]\n')
+        p2 = self._make_project_dir("project2", 'project_name: "project1"\nlanguage_servers: ["python"]\n')
+        p3 = self._make_project_dir("project3", 'project_name: "project1"\nlanguage_servers: ["python"]\n')
+        p4 = self._make_project_dir("project4", 'project_name: "project1"\nlanguage_servers: ["python"]\n')
 
         self._write_master_config([p1, p2])
 
@@ -486,7 +435,7 @@ class TestGetRegisteredProjectWithDanglingProject:
     def _make_project_dir(self, name: str) -> Path:
         project_dir = self.test_dir / name
         (project_dir / SERENA_MANAGED_DIR_NAME).mkdir(parents=True)
-        (project_dir / SERENA_MANAGED_DIR_NAME / "project.yml").write_text(f'project_name: "{name}"\nlanguages: ["python"]\n')
+        (project_dir / SERENA_MANAGED_DIR_NAME / "project.yml").write_text(f'project_name: "{name}"\nlanguage_servers: ["python"]\n')
         return project_dir
 
     def test_dangling_project_does_not_break_lookup_of_valid_project(self):

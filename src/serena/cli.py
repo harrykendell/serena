@@ -366,7 +366,6 @@ class ProjectCommands(AutoRegisteringGroup):
             serena_config=serena_config,
             project_name=name,
             languages=languages if languages else None,
-            interactive=True,
         )
         languages_str = (
             ", ".join([lang.value for lang in generated_conf.language_servers]) if generated_conf.language_servers else "auto-detect"

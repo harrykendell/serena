@@ -11,7 +11,6 @@ from sensai.util.string import TextBuilder, ToStringMixin
 
 from serena.config.serena_config import (
     ProjectConfig,
-    ProjectConfigAutoGenerationMode,
     SerenaConfig,
 )
 from serena.ls_manager import LanguageServerFactory, LanguageServerManager
@@ -129,13 +128,13 @@ class Project(ToStringMixin):
         cls,
         project_root: str | Path,
         serena_config: "SerenaConfig",
-        autogen: ProjectConfigAutoGenerationMode = ProjectConfigAutoGenerationMode.SYNCHRONOUS,
+        autogenerate: bool = True,
     ) -> "Project":
-        assert serena_config is not None
+        """Loads a project, optionally creating its canonical configuration."""
         project_root = Path(project_root).resolve()
         if not project_root.exists():
             raise FileNotFoundError(f"Project root not found: {project_root}")
-        project_config = ProjectConfig.load(project_root, serena_config=serena_config, autogen=autogen)
+        project_config = ProjectConfig.load(project_root, serena_config=serena_config, autogenerate=autogenerate)
         return Project(project_root=str(project_root), project_config=project_config, serena_config=serena_config)
 
     def save_config(self) -> None:
@@ -506,8 +505,6 @@ class Project(ToStringMixin):
         :return: the language server manager, which is also stored in the project instance
         """
         try:
-            self.project_config.await_asynchronous_completion()
-
             # determine timeout to use for LS calls
             tool_timeout = self.serena_config.tool_timeout
             if tool_timeout is None or tool_timeout < 0:

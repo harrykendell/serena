@@ -179,7 +179,7 @@ class TestRegisteredProjectGlobalIgnoredPaths:
         serena_dir = self.project_path / ".serena"
         serena_dir.mkdir(exist_ok=True)
         (serena_dir / "project.yml").write_text(
-            'project_name: "test_project"\nlanguages: ["python"]\nignored_paths: []\nignore_all_files_in_gitignore: false\n'
+            'project_name: "test_project"\nlanguage_servers: ["python"]\nignored_paths: []\nignore_all_files_in_gitignore: false\n'
         )
         serena_config = SerenaConfig(ignored_paths=["node_modules"]).with_headless_mode_overrides()
         registered = RegisteredProject.from_project_root(

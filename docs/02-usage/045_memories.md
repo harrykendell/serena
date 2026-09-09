@@ -205,11 +205,3 @@ serena without having a running MCP server. Discover the full surface and per-co
 serena memories --help
 serena memories <subcommand> --help
 ```
-
-## Disabling Memories and Onboarding
-
-If you do not require the functionality described in this section, you can selectively disable it.
-
- * To disable all memory related tools (including onboarding), adding `no-memories` to the `base_modes`
-   in Serena's [global configuration](050_configuration).
- * Similarly, to disable only onboarding, add `no-onboarding` to the `base_modes`.
