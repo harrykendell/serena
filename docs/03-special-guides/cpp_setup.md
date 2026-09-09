@@ -1,105 +1,48 @@
-# C/C++ Setup Guide
+# C/C++ semantic setup
 
-This guide explains how to prepare a C/C++ project so that Serena can provide reliable code intelligence via clangd or ccls language servers.
+Serena's retained C/C++ language server is clangd. Configure a project with `cpp` in `language_servers` when C/C++ semantic tools are required.
 
----
+## Compilation database
 
-## General
+For reliable cross-file symbols and references, generate `compile_commands.json` at the project root with the real compiler flags, include paths, and language standard used by the build.
 
-Serena supports two C/C++ language servers, clangd (default) and ccls.
-Both have their pros and cons and require a properly configured `compile_commands.json` 
-for cross-file reference finding, see below for details.
+Clangd needs usable absolute directory paths in the compilation database. Serena reads the root `compile_commands.json`, normalises relative directories when necessary, and writes the derived database to:
 
-Your project must have a `compile_commands.json` file at the repository root. 
-This file is essential for correct parsing and cross-file reference finding.
+```text
+.serena/compile_commands.json
+```
 
-You can use a specific clangd or ccls installation (e.g., a custom build or a version provided by your project),
-by specifying the path in your configuration, see [ls-specific-settings](ls-specific-settings) for details.
+The original build-generated file is not modified. Serena then launches clangd with the derived directory via `--compile-commands-dir`.
 
-## compile_commands.json Requirements
-
-For reliable cross-file reference finding with clangd, your `compile_commands.json` must:
-
-1. **Include proper C++ standard flags** (e.g., `-std=c++17`)
-2. **Include all necessary include paths** (`-I` flags)
-
----
-
-### With clangd
-
-By default, Serena automatically downloads and manages clangd. Since clangd does not properly work with relative paths in `compile_commands.json`,
-Serena will detect them and transform them into absolute paths automatically (writing a new `compile_commands.json` file), if needed.
-
-#### Customizing the Compilation Database Location
-
-By default, Serena creates the transformed compilation database at `.serena/compile_commands.json`. 
-You can customize this location via project settings:
+The output directory can be changed for a trusted project through language-server settings:
 
 ```yaml
-# .serena/project.yml
-language_servers:
+ls_specific_settings:
   cpp:
-    compile_commands_dir: custom/rel/path (defaults to .serena)
+    compile_commands_dir: ".serena"
 ```
 
-### With ccls
+## Clangd runtime
 
-ccls requires manual installation and configuration. It may perform better in some situations.
+On the supported Linux x86-64 deployment, Serena manages the pinned clangd runtime automatically when it is not already available. The retained default is clangd 19.1.2.
 
-#### Installation
+A trusted project can override that version:
 
-**Linux:**
-```bash
-# Ubuntu/Debian (22.04+)
-sudo apt-get install ccls
-
-# Fedora/RHEL
-sudo dnf install ccls
-
-# Arch Linux
-sudo pacman -S ccls
+```yaml
+ls_specific_settings:
+  cpp:
+    clangd_version: "19.1.2"
 ```
 
-**macOS:**
-```bash
-brew install ccls
-```
+For normal Kendell projects, leave the default unchanged unless a project has a concrete compatibility requirement.
 
-**Windows:**
+## Practical checks
 
-```bash
-choco install ccls
-```
+If C/C++ navigation is incomplete, first verify that:
 
-#### Configuration
+- the root `compile_commands.json` exists and is current;
+- every relevant translation unit is present in it;
+- compiler include paths and `-std=` flags match the real build;
+- generated headers or source files needed by clangd exist before semantic queries run.
 
-After installing ccls, configure Serena to use it via project settings (in `.serena/project.yml`)
-by adding `cpp_ccls` to the `languages` list. Replace `cpp` with `cpp_ccls` if you already have the `cpp` entry.
-
-ccls can handle relative paths in `compile_commands.json`, so no transformation is necessary
-and no transformed `compile_commands.json` file will be created.
-
----
-
-## Known Limitations
-
-### Files Created After Server Initialization
-
-Both clangd and ccls have a fundamental limitation: 
-**files created by external mechanisms after the language server starts are not automatically indexed**.
-
-Cross-file references to newly created files will not work unless the new file is at some point opened by the language server (for example, by a symbol lookup in it), or until `compile_commands.json` is updated and 
-the language server is restarted.
-
----
-
-## Reference
-
-- Clangd official documentation: https://clangd.llvm.org/
-- Clangd project setup: https://clangd.llvm.org/installation#project-setup
-- CCLS repository: https://github.com/MaskRay/ccls
-
-## Unreal Engine projects
-
-For Unreal Engine 5 projects (reflection macros, UnrealBuildTool), see the
-[Unreal Engine Setup Guide](unreal_engine_setup_guide_for_serena.md).
+Clangd uses background indexing, so a correct compilation database is the main prerequisite for reliable project-wide references.

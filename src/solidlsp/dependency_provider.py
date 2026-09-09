@@ -359,7 +359,7 @@ class DownloadedDependency:
                 if is_running_in_ci():
                     raise RuntimeError(
                         f"No SHA256 hash found for {self._url}. "
-                        "Please update the hash database by running 'scripts/update_downloaded_dependency_hashes.py'."
+                        "Add the verified hash to solidlsp's downloaded dependency hash database before running in CI."
                     )
                 log.warning("No SHA256 hash found for %s. The downloaded file will not be verified.", self._url)
         else:

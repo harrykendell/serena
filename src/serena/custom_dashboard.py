@@ -556,7 +556,7 @@ class CustomDashboard:
         self._session_overview = DashboardSessionOverview(agent)
         self._memory_overview = DashboardMemoryOverview(agent)
         self._activity_archive = DashboardActivityArchive(agent.execution_store)
-        self._job_overview = DashboardJobOverview(JobManager())
+        self._job_overview = DashboardJobOverview(agent.job_manager)
         self._serena_activity_overview = DashboardSerenaActivityOverview(
             self._activity_archive,
             self._job_overview,

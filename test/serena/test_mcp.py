@@ -21,6 +21,7 @@ class MockAgent:
         self.serena_config = None
         self._execution_store_dir = TemporaryDirectory(prefix="serena-mcp-test-store-")
         self.execution_store = ExecutionStore(Path(self._execution_store_dir.name), migrate_legacy=False)
+        self.job_manager = MagicMock()
 
     @staticmethod
     def get_active_project_for_session(session_id: str):

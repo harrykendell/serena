@@ -1,134 +1,55 @@
-# the name by which the project can be referenced within Serena/when chatting with the LLM.
+# name used to reference this project in Serena.
 project_name: "project_name"
 
-# list of language servers to start when using the LSP backend; choose from:
-#   ada                    al                     angular                ansible                bash
-#   bsl                    clojure                cpp                    cpp_ccls               crystal
-#   csharp                 csharp_omnisharp       cue                    dart                   deno
-#   elixir                 elm                    erlang                 fortran                fsharp
-#   gdscript               gleam                  go                     groovy                 haskell
-#   haxe                   hlsl                   html                   java                   json
-#   julia                  kotlin                 latex                  lean4                  lua
-#   luau                   markdown               matlab                 msl                    nextflow
-#   nix                    ocaml                  pascal                 perl                   php
-#   php_phpactor           php_phpantom           powershell             python                 python_basedpyright
-#   python_jedi            python_pyrefly         python_ty              qml                    r
-#   rego                   ruby                   ruby_solargraph        rust                   scala
-#   scss                   solidity               svelte                 swift                  systemverilog
-#   terraform              toml                   typescript             typescript_vts         vue
-#   wolfram                yaml                   zig
-#   (This list may be outdated; generated with scripts/print_language_list.py;
-#   For the current list, see values of the LanguageServerId enum here:
-#   https://github.com/oraios/serena/blob/main/src/solidlsp/ls_config.py)
-# For some languages, there are several alternative language servers, e.g. csharp_omnisharp, ruby_solargraph.)
-# Note:
-#   - For C, use cpp
-#   - For JavaScript, use typescript
-#   - For Angular projects, use angular (subsumes typescript+html; requires `npm install` in the project root)
-#   - For Svelte projects, use svelte (subsumes typescript/javascript for .svelte projects; requires npm)
-#   - For Deno projects, use deno (serves the same .ts/.js files as typescript; requires the deno CLI on PATH)
-#   - For SCSS / Sass / plain CSS, use scss (some-sass-language-server handles all three)
-#   - For Free Pascal/Lazarus, use pascal
-# Special requirements:
-#   Some language servers require additional setup/installations.
-#   See here for details: https://oraios.github.io/serena/01-about/020_programming-languages.html#language-servers
-# When using multiple language servers, the first language server that supports a given file will be used for that file.
-# The first language server is the default language and the respective language server will be used as a fallback.
+# language servers explicitly preferred for this project. Supported values:
+#   bash  cpp  html  json  latex  markdown  matlab
+#   nix   python  scss  toml  typescript  yaml
+# For C use cpp; for JavaScript use typescript; scss also handles Sass/CSS.
 language_servers: ["python"]
 
-# whether Serena should automatically detect additional applicable language servers for this project.
-# Automatically detected servers are started lazily only when semantic tools need them; explicitly listed
-# servers remain preferred when several servers support the same file type.
+# detect additional applicable retained language servers from project/source files.
+# Detected servers are started lazily when semantic tools need them.
 auto_detect_language_servers: true
 
-# the encoding used by text files in the project
-# For a list of possible encodings, see https://docs.python.org/3.11/library/codecs.html#standard-encodings
+# source-file encoding.
 encoding: "utf-8"
 
-# optional shell command to run before language-server services are initialised.
-# the command runs in the project root directory and is only executed if the project is trusted
-# (see trusted_project_path_patterns in the global configuration).
-# serena waits for the command to exit: a non-zero exit code is logged as an error but does not
-# abort activation. a per-project timeout (activation_command_timeout, default 180s) is the safety
-# backstop for non-terminating commands; on expiry the process is killed and activation continues.
-# example: activation_command: "npx nx run-many -t build"
+# optional trusted shell command run before language-server initialisation.
+# It is ignored unless this project is trusted by the global configuration.
 activation_command:
 
-# maximum time in seconds to wait for activation_command to complete before killing it (default 180s).
-# must be a positive number.
-activation_command_timeout: 180
+# positive timeout in seconds for activation_command.
+activation_command_timeout: 180.0
 
-# line ending convention to use when writing source files.
-# Possible values: unset (use global setting), "lf", "crlf", or "native" (platform default)
-# This does not affect Serena's own files (e.g. memories and configuration files), which always use native line endings.
+# line endings used when writing source files: null (inherit), "lf", "crlf", or "native".
 line_ending:
 
-# whether to use project's .gitignore files to ignore files
-ignore_all_files_in_gitignore: true
-
-# advanced configuration option allowing to configure language server-specific options.
-# Maps the language key to the options.
-# The settings are considered only if the project is trusted (see global configuration to define trusted projects).
-# See https://oraios.github.io/serena/02-usage/050_configuration.html#language-server-specific-settings
-ls_specific_settings: {}
-
-# list of workspace folder paths (LSP backend only).
-# These folders will be used to build up Serena's symbol index.
-# Paths must be within the project root and should thus be relative to the project root.
-# Furthermore, the paths should not be filtered by ignore settings.
-# Default setting: The entire project root folder (".") is considered.
-# In (large) monorepos, this can be used to index only subfolders of the project root, e.g.
-#   ls_workspace_folders:
-#     - "./subproject1"
-#     - "./subproject2"
-ls_workspace_folders: ["."]
-
-# list of additional workspace folder paths for cross-package reference support.
-# Paths can be absolute or relative to the project root.
-# Each folder is registered as an LSP workspace folder, enabling language servers to discover
-# symbols and references across package boundaries, but these folders are not indexed by Serena,
-# i.e. the respective symbols will not be found using Serena's symbol search tools.
-# Example:
-#   additional_workspace_folders:
-#     - ../sibling-package
-#     - ../shared-lib
-ls_additional_workspace_folders: []
-
-# list of additional paths to ignore in this project.
-# Same syntax as gitignore, so you can use * and **.
-# Important: quote patterns that start with `*`, otherwise YAML treats them as aliases.
-# Example:
-#   ignored_paths:
-#     - "examples/**"
-#     - ".worktrees/**"
-#     - "**/bin/**"
-#     - "**/obj/**"
-# Note: global ignored_paths from serena_config.yml are also applied additively.
-ignored_paths: []
-
-# whether the project is in read-only mode
-# If set to true, all editing tools will be disabled and attempts to use them will result in an error
-# Added on 2025-04-18
-read_only: false
-
-# initial prompt for the project. It will always be given to the LLM upon activating the project
-# (contrary to the memories, which are loaded on demand).
-initial_prompt: ""
-
-# time budget (seconds) per tool call for the retrieval of additional symbol information
-# such as docstrings or parameter information.
-# This overrides the corresponding setting in the global configuration; see the documentation there.
-# If null or missing, use the setting from the global configuration.
+# time budget in seconds for optional symbol hover/info retrieval; null inherits the global value.
 symbol_info_budget:
 
-# list of regex patterns which, when matched, mark a memory entry as read‑only.
-# Extends the list from the global configuration, merging the two lists.
+# memory restrictions, expressed as regular-expression patterns.
 read_only_memory_patterns: []
-
-# list of regex patterns for memories to completely ignore.
-# Matching memories will not appear in list_memories or activate_project output
-# and cannot be accessed via read_memory or write_memory.
-# To access ignored memory files, use the read_file tool on the raw file path.
-# Extends the list from the global configuration, merging the two lists.
-# Example: ["_archive/.*", "_episodes/.*"]
 ignored_memory_patterns: []
+
+# trusted language-server implementation overrides keyed by language-server id.
+ls_specific_settings: {}
+
+# whether project .gitignore rules are applied to Serena file discovery.
+ignore_all_files_in_gitignore: true
+
+# additional gitignore-style project-relative paths to ignore.
+ignored_paths: []
+
+# read-only projects expose retrieval but reject editing/mutation tools.
+read_only: false
+
+# project-specific instructions appended to Serena's fixed ChatGPT policy.
+initial_prompt: ""
+
+# project-relative folders exposed as language-server workspaces.
+ls_workspace_folders:
+  - "."
+
+# additional workspace folders made visible to language servers for cross-package references.
+# These may be absolute or project-relative and are not indexed as Serena project symbols.
+ls_additional_workspace_folders: []

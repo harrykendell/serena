@@ -11,10 +11,8 @@ same identifiers, as real generated reflection code does).
 The fixture's stub engine headers mirror UE 5.7's ObjectMacros.h: annotation
 macros are empty in real UE compilation too (only UnrealHeaderTool parses them).
 
-The fixture lives in its own repository directory (ue_test_repo) served by
-clangd only: ccls 0.20240202, the build shipped by Ubuntu and Homebrew, crashes
-intermittently when its session covers the stub engine headers, and clangd is
-the supported backend for Unreal Engine projects (see the setup guide).
+The fixture lives in its own repository directory (ue_test_repo) and is served by
+the retained clangd backend.
 """
 
 import os

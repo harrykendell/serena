@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: astral-sh/setup-uv@v6
+      - name: Install C/C++ language server
+        run: sudo apt-get update && sudo apt-get install -y clangd
+      - name: Install environment
+        run: uv sync --extra dev --locked
+      - name: Lint
+        run: uv run poe lint
+      - name: Type-check
+        run: uv run poe type-check
+      - name: Test
+        env:
+          PYTEST_MARKERS: >-
+            python or typescript or cpp or bash or nix or matlab or markdown or latex or yaml or json or toml or html or scss or snapshot or slow
+        run: uv run poe test -q --tb=short

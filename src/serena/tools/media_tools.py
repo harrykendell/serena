@@ -10,23 +10,20 @@ import socket
 import stat
 import subprocess
 import tempfile
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar
 from urllib.parse import urljoin, urlparse
 
 import requests
 from mcp.server.fastmcp import Audio, FastMCP, Image
 from mcp.types import CallToolResult, ContentBlock, ResourceLink, TextContent
-from pydantic import AnyUrl, BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict
 
-from serena.execution_store import ExecutionStore
+from serena.file_snapshots import FILE_EXPORT_MAX_SIZE, FileSnapshotStore
 from serena.tools.tools_base import Tool, ToolMarkerCanEdit
 
 _FILE_RESOURCE_URI_TEMPLATE = "serena-file://export/{token}"
-_FILE_EXPORT_MAX_SIZE = 100 * 1024 * 1024
 
 
 class OpenAIFile(BaseModel):
@@ -40,200 +37,6 @@ class OpenAIFile(BaseModel):
     file_name: str | None = None
 
 
-@dataclass(frozen=True, kw_only=True)
-class _FileSnapshot:
-    """Represents one immutable file snapshot retained in private Serena storage."""
-
-    path: Path
-    link: ResourceLink
-
-
-class _FileSnapshotStore:
-    """Owns immutable snapshots backing ChatGPT file resources.
-
-    Snapshots are kept in Serena's persistent user-data directory rather than the
-    system temporary directory. This lets a chat reopen an exported file after an
-    MCP restart or temporary-directory cleanup. Storage remains bounded by evicting
-    least-recently-used snapshots only when new snapshots are created.
-    """
-
-    _TOKEN_BYTES = 24
-    _MAX_TOTAL_SIZE = 2 * 1024 * 1024 * 1024
-    _MAX_SNAPSHOTS = 2048
-    _LOCK: ClassVar[threading.Lock] = threading.Lock()
-
-    @classmethod
-    def _root(cls) -> Path:
-        """Returns the private persistent directory used for file snapshots."""
-        configured_home = os.getenv("SERENA_HOME", "").strip()
-        serena_home = Path(configured_home).expanduser() if configured_home else Path.home() / ".serena"
-        root = serena_home / "chat_file_snapshots"
-        root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if root.is_symlink() or not root.is_dir():
-            raise RuntimeError("Serena file snapshot store is not a private directory")
-        if stat.S_IMODE(root.stat().st_mode) != 0o700:
-            root.chmod(0o700)
-        return root
-
-    @classmethod
-    def _legacy_root(cls) -> Path:
-        """Returns the former temporary snapshot directory for compatibility reads."""
-        return Path(tempfile.gettempdir(), f"serena-chat-files-{os.getuid()}")
-
-    @classmethod
-    def _prune(cls, root: Path, incoming_size: int) -> None:
-        """Evicts unreferenced LRU snapshots until a new snapshot fits within bounds."""
-        pinned = ExecutionStore.retained_file_tokens_from_disk()
-        snapshots: list[tuple[Path, os.stat_result]] = []
-        total_size = 0
-        for path in root.iterdir():
-            if path.name.startswith("."):
-                continue
-            try:
-                file_stat = path.stat()
-            except FileNotFoundError:
-                continue
-            if not stat.S_ISREG(file_stat.st_mode):
-                continue
-            total_size += file_stat.st_size
-            if path.name not in pinned:
-                snapshots.append((path, file_stat))
-
-        snapshots.sort(key=lambda item: item[1].st_mtime)
-        total_count = sum(1 for path in root.iterdir() if path.is_file() and not path.name.startswith("."))
-        while snapshots and (total_count >= cls._MAX_SNAPSHOTS or total_size + incoming_size > cls._MAX_TOTAL_SIZE):
-            path, file_stat = snapshots.pop(0)
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                continue
-            total_count -= 1
-            total_size -= file_stat.st_size
-
-    @classmethod
-    def _validate_token(cls, token: str) -> None:
-        """Rejects tokens that cannot name one snapshot in the private store."""
-        if len(token) != cls._TOKEN_BYTES * 2:
-            raise ValueError("Invalid Serena file resource")
-        try:
-            bytes.fromhex(token)
-        except ValueError as exc:
-            raise ValueError("Invalid Serena file resource") from exc
-
-    @staticmethod
-    def _content_versioned_display_name(name: str, digest: str) -> str:
-        """Returns a cache-safe display name versioned by immutable file content."""
-        path = Path(name)
-        suffix = "".join(path.suffixes)
-        stem = path.name[: -len(suffix)] if suffix else path.name
-        return f"{stem}-{digest[:16]}{suffix}"
-
-    @classmethod
-    def snapshot(
-        cls,
-        source_path: Path,
-        *,
-        display_name: str | None = None,
-        description: str = "Immutable file snapshot exported by Serena",
-        max_size: int = _FILE_EXPORT_MAX_SIZE,
-        version_display_name_by_content: bool = False,
-    ) -> _FileSnapshot:
-        """Copies one file into persistent private storage and returns its immutable resource link."""
-        if not source_path.is_file():
-            raise FileNotFoundError(f"File does not exist: {source_path}")
-
-        size = source_path.stat().st_size
-        if size > max_size:
-            raise ValueError(f"File exceeds the {max_size // (1024 * 1024)} MiB export limit")
-
-        name = display_name or source_path.name
-        mime_type, _ = mimetypes.guess_type(name)
-        token = secrets.token_hex(cls._TOKEN_BYTES)
-        content_digest = hashlib.sha256() if version_display_name_by_content else None
-
-        with cls._LOCK:
-            root = cls._root()
-            cls._prune(root, size)
-            snapshot_path = root / token
-            temporary_path = root / f".{token}.tmp"
-
-            fd = os.open(temporary_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            bytes_written = 0
-            try:
-                with os.fdopen(fd, "wb") as output:
-                    with source_path.open("rb") as source:
-                        while chunk := source.read(1024 * 1024):
-                            bytes_written += len(chunk)
-                            if bytes_written > max_size:
-                                raise ValueError(f"File exceeds the {max_size // (1024 * 1024)} MiB export limit")
-                            if content_digest is not None:
-                                content_digest.update(chunk)
-                            output.write(chunk)
-                os.replace(temporary_path, snapshot_path)
-            finally:
-                temporary_path.unlink(missing_ok=True)
-
-        if content_digest is not None:
-            name = cls._content_versioned_display_name(name, content_digest.hexdigest())
-
-        return _FileSnapshot(
-            path=snapshot_path,
-            link=ResourceLink(
-                type="resource_link",
-                name=name,
-                uri=AnyUrl(f"serena-file://export/{token}"),
-                mimeType=mime_type or "application/octet-stream",
-                size=bytes_written,
-                description=description,
-            ),
-        )
-
-    @classmethod
-    def snapshot_project_file(cls, project, relative_path: str) -> _FileSnapshot:
-        """Snapshots one confined project file into persistent private storage."""
-        project.validate_relative_path(relative_path)
-        path = Path(project.project_root, relative_path)
-        return cls.snapshot(
-            path,
-            display_name=path.name,
-            description=f"File exported from Serena project {project.project_name}",
-        )
-
-    @classmethod
-    def _migrate_legacy_snapshot(cls, token: str, destination: Path) -> bool:
-        """Copies one still-present legacy temporary snapshot into persistent storage."""
-        legacy_path = cls._legacy_root() / token
-        if not legacy_path.is_file():
-            return False
-        if legacy_path.stat().st_size > _FILE_EXPORT_MAX_SIZE:
-            raise ValueError(f"File exceeds the {_FILE_EXPORT_MAX_SIZE // (1024 * 1024)} MiB export limit")
-
-        temporary_path = destination.parent / f".{token}.legacy.tmp"
-        try:
-            shutil.copyfile(legacy_path, temporary_path)
-            temporary_path.chmod(0o600)
-            os.replace(temporary_path, destination)
-        finally:
-            temporary_path.unlink(missing_ok=True)
-        legacy_path.unlink(missing_ok=True)
-        return True
-
-    @classmethod
-    def read(cls, token: str) -> bytes:
-        """Reads one persistent snapshot identified by an opaque resource token."""
-        cls._validate_token(token)
-        with cls._LOCK:
-            root = cls._root()
-            path = root / token
-            if not path.is_file() and not cls._migrate_legacy_snapshot(token, path):
-                raise FileNotFoundError("Serena file snapshot no longer exists")
-            if path.stat().st_size > _FILE_EXPORT_MAX_SIZE:
-                raise ValueError(f"File exceeds the {_FILE_EXPORT_MAX_SIZE // (1024 * 1024)} MiB export limit")
-            data = path.read_bytes()
-            os.utime(path, None)
-            return data
-
-
 def register_file_export_resource(mcp: FastMCP) -> None:
     """Registers the binary resource used to read immutable file snapshots."""
 
@@ -244,7 +47,7 @@ def register_file_export_resource(mcp: FastMCP) -> None:
         mime_type="application/octet-stream",
     )
     def read_exported_file(token: str) -> bytes:
-        return _FileSnapshotStore.read(token)
+        return FileSnapshotStore.read(token)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -281,7 +84,7 @@ def read_result_file_link(link: ResourceLink) -> bytes:
     prefix = _FILE_RESOURCE_URI_TEMPLATE.split("{token}", 1)[0]
     if not uri.startswith(prefix):
         raise ValueError("Resource link is not a Serena exported project file")
-    return _FileSnapshotStore.read(uri.removeprefix(prefix))
+    return FileSnapshotStore.read(uri.removeprefix(prefix))
 
 
 class _McpMediaTool(Tool):
@@ -341,7 +144,7 @@ class DownloadFileTool(Tool):
         :param relative_path: project-relative path to the file
         :return: standard MCP resource link for the exported file
         """
-        return _FileSnapshotStore.snapshot_project_file(self.project, relative_path).link
+        return FileSnapshotStore.snapshot_project_file(self.project, relative_path).link
 
     def prepare_mcp_result(self, result: object) -> CallToolResult:
         """Returns the exported project file as a standard MCP resource link."""
@@ -426,8 +229,8 @@ class UploadFileTool(Tool, ToolMarkerCanEdit):
 
                     response.raise_for_status()
                     content_length = response.headers.get("Content-Length")
-                    if content_length is not None and int(content_length) > _FILE_EXPORT_MAX_SIZE:
-                        raise ValueError(f"ChatGPT file exceeds the {_FILE_EXPORT_MAX_SIZE // (1024 * 1024)} MiB import limit")
+                    if content_length is not None and int(content_length) > FILE_EXPORT_MAX_SIZE:
+                        raise ValueError(f"ChatGPT file exceeds the {FILE_EXPORT_MAX_SIZE // (1024 * 1024)} MiB import limit")
 
                     with destination.open("wb") as output:
                         for chunk in response.iter_content(chunk_size=1024 * 1024):
@@ -435,8 +238,8 @@ class UploadFileTool(Tool, ToolMarkerCanEdit):
                             if not chunk:
                                 continue
                             bytes_written += len(chunk)
-                            if bytes_written > _FILE_EXPORT_MAX_SIZE:
-                                raise ValueError(f"ChatGPT file exceeds the {_FILE_EXPORT_MAX_SIZE // (1024 * 1024)} MiB import limit")
+                            if bytes_written > FILE_EXPORT_MAX_SIZE:
+                                raise ValueError(f"ChatGPT file exceeds the {FILE_EXPORT_MAX_SIZE // (1024 * 1024)} MiB import limit")
                             output.write(chunk)
                             digest.update(chunk)
                     return bytes_written, digest.hexdigest()
@@ -484,7 +287,7 @@ class UploadFileTool(Tool, ToolMarkerCanEdit):
         temporary_path = self._create_temporary_upload_path(destination)
         try:
             byte_count, sha256 = self._download_to(source, temporary_path)
-            source_snapshot = _FileSnapshotStore.snapshot(
+            source_snapshot = FileSnapshotStore.snapshot(
                 temporary_path,
                 display_name=source_name,
                 description="Immutable ChatGPT upload snapshot retained by Serena",
@@ -531,7 +334,7 @@ class FetchMediaFileTool(_McpMediaTool):
         if mime_type is not None:
             media_type, _, media_format = mime_type.partition("/")
             if media_type in {"image", "audio"}:
-                snapshot = _FileSnapshotStore.snapshot(
+                snapshot = FileSnapshotStore.snapshot(
                     path,
                     display_name=path.name,
                     description=f"Media exported from Serena project {self.project.project_name}",
@@ -615,7 +418,7 @@ class RenderPdfPageTool(_McpMediaTool):
                 raise RuntimeError(f"PDF page {page} does not exist or could not be rendered")
 
             display_name = f"{path.stem}-p{page}-{dpi}dpi.png"
-            snapshot = _FileSnapshotStore.snapshot(
+            snapshot = FileSnapshotStore.snapshot(
                 temporary_output,
                 display_name=display_name,
                 description=f"PDF page rendered from Serena project {self.project.project_name}",

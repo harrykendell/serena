@@ -7,8 +7,6 @@ import time
 from typing import Literal
 
 from serena.jobs import (
-    DEFAULT_MAX_CONCURRENT_JOBS,
-    JobManager,
     JobPersistenceInfo,
     JobRecord,
     JobRuntimeInfo,
@@ -23,7 +21,7 @@ class _JobTool(Tool):
 
     def __init__(self, agent):
         super().__init__(agent)
-        self._job_manager = JobManager(max_concurrent_jobs=DEFAULT_MAX_CONCURRENT_JOBS)
+        self._job_manager = agent.job_manager
 
     @staticmethod
     def _record_payload(record: JobRecord) -> dict[str, object]:

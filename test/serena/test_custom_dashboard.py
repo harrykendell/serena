@@ -8,6 +8,7 @@ from orchestrator.config import OrchestratorConfig
 from orchestrator.dashboard_sessions import OrchestratorDashboardSessionArchive
 from serena.dashboard import DashboardServer
 from serena.execution_store import ExecutionStore
+from serena.jobs import JobManager
 from solidlsp.ls_config import LanguageServerId
 
 
@@ -17,6 +18,7 @@ class _DashboardAgent:
         self.callbacks = []
         self.project = project
         self.execution_store = ExecutionStore()
+        self.job_manager = JobManager()
 
     def register_config_changed_callback(self, callback) -> None:
         self.callbacks.append(callback)

@@ -179,9 +179,7 @@ class Project(ToStringMixin):
             if self.__ignore_spec is not None:
                 log.info("Ignore spec is now available for project; proceeding")
         if self.__ignore_spec is None:
-            raise ValueError(
-                "The ignore spec could not be computed; please check the log for errors and report here: https://github.com/oraios/serena/issues"
-            )
+            raise ValueError("The ignore spec could not be computed; please check the Serena log for errors.")
         return self.__ignore_spec
 
     @property
@@ -195,9 +193,7 @@ class Project(ToStringMixin):
             if self.__ignored_patterns is not None:
                 log.info("Ignored patterns are now available for project; proceeding")
         if self.__ignored_patterns is None:
-            raise ValueError(
-                "The ignored patterns could not be computed; please check the log for errors and report here: https://github.com/oraios/serena/issues"
-            )
+            raise ValueError("The ignored patterns could not be computed; please check the Serena log for errors.")
         return self.__ignored_patterns
 
     def _is_ignored_relative_path(self, relative_path: str | Path, ignore_non_source_files: bool = True) -> bool:

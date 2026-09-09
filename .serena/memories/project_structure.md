@@ -1,26 +1,35 @@
-# Serena — Project Core
+# Serena — Standalone Project Core
 
-Serena is an MCP-based "IDE for coding agents": semantic code retrieval/editing/refactoring tools driven by language servers.
+Serena is the Kendell-operated ChatGPT MCP coding runtime. This repository also ships the independent sibling Orchestrator MCP and shared runtime support; upstream distribution compatibility is not a product constraint.
 
 ## Source map
 
-- `src/serena/` — agent, MCP server, tools, project/config layer
-  - `agent.py`, `mcp.py`, `cli.py`, `hooks.py` — entrypoints/wiring
-  - `tools/` — tool implementations (memory_tools, symbol_tools, file_tools, workflow_tools, config_tools, cmd_tools)
-  - `tools/tools_base.py` — base classes for all tools
-  - `config/serena_config.py` — global/project configuration; the runtime has no context/mode configuration layer
-  - `chatgpt_policy.py` + `tools/MCP_TOOL_CLASSES` — fixed ChatGPT product instructions, tool-description overrides, and explicit MCP tool catalogue
-  - `code_editor.py`, `symbol.py`, `ls_manager.py` — symbolic editing / LS lifecycle
-  - `dashboard.py`, `custom_dashboard.py` — browser dashboard backend and Kendell dashboard
-  - `prompt_factory.py` — fixed ChatGPT prompts and Serena-local sandboxed Jinja rendering
-- `src/solidlsp/` — generic LSP client framework; retained adapters are Python, TypeScript/JavaScript, C/C++, LaTeX, Bash, Nix, HTML, SCSS/CSS, MATLAB, JSON, YAML, TOML, and Markdown
-- `test/serena/`, `test/solidlsp/<lang>/` — pytest suites; per-language tests gated by pytest markers
-- `test/resources/repos/<lang>/` — fixture projects used by language-server tests
-- `scripts/` — utilities (tool overview, profiling, maintenance)
-- `docs/` — Jupyter Book sources; build via `poe doc-build`
+- `src/serena/` — Serena MCP server, session/project runtime, tools, memories, execution/activity state, jobs, retained output/media, and Kendell dashboard. `runtime.py` owns session-to-project runtime binding; `file_snapshots.py` owns persistent exported-file snapshots.
+- `src/orchestrator/` — independent Orchestrator MCP.
+- `src/mcp_runtime/` — small shared runtime utilities used by the two MCPs.
+- `src/solidlsp/` — generic LSP protocol/process/cache layer plus the retained language adapters.
+- `test/serena/`, `test/orchestrator/`, `test/solidlsp/` — pytest suites; language suites use markers declared in `pyproject.toml`.
+- `test/resources/repos/` — fixture projects only for retained languages.
+- `scripts/` — small maintenance utilities: memory graph, retained language list, and tool overview.
+- `docs/03-special-guides/` — hand-maintained Kendell design/operation notes. There is no generated Sphinx/JupyterBook documentation pipeline.
 
-## Project-wide invariants
+## Core runtime architecture
 
-- Package name (PyPI): `serena-agent`; wheel includes `serena`, `orchestrator`, `mcp_runtime`, `solidlsp`.
-- Python: `>=3.11, <3.15`. Dependencies are exact-pinned in `pyproject.toml` (uvx installs from git, lockfile ignored — pin exactly).
-- Entry points: `serena` → `serena.cli:top_level`; `orchestrator` → `orchestrator.cli:main`.
+- `SessionRegistry` is the only session/project binding path, including the `global` startup scope. It caches one `ProjectRuntime` per project root; sessions switch bindings without shutting down runtimes used elsewhere.
+- `ProjectRuntime` groups one `Project`, runtime readiness, project execution coordination, active tools, prompt status, and access to the project's language-server and memory managers.
+- Process services are singular: `ExecutionStore` (including activity-panel runs), `JobManager`, `ToolOutputStore`, and `FileSnapshotStore`. Activity/dashboard components are read/presentation views over those services rather than independent state owners.
+- The Kendell dashboard remains Serena-hosted because it already composes Serena's read model with Orchestrator's independently persisted state cleanly; `mcp_runtime` remains shared utilities rather than shared runtime state.
+- `SerenaAgent` remains the MCP-facing application facade for tool catalogue, prompts, configuration, service wiring and execution routing. Project-runtime ownership no longer lives there, so renaming/splitting it would currently add churn without a clearer boundary.
+
+## Runtime/deployment invariants
+
+- Supported host environment: Linux with Python 3.13.
+- `uv.lock` is the authoritative dependency resolution; runtime dependencies in `pyproject.toml` are direct imports used by the shipped packages.
+- Wheel contents: `serena`, `orchestrator`, `mcp_runtime`, `solidlsp`.
+- Entry points: `serena` -> `serena.cli:top_level`; `orchestrator` -> `orchestrator.cli:main`.
+- CI is a single Linux/Python-3.13 workflow; no PyPI/TestPyPI, release, Docker, Nix packaging, devcontainer, generated-docs, or cross-platform release machinery is maintained.
+- Upstream Serena attribution remains under the MIT `LICENSE`.
+
+## Retained language catalogue
+
+Python, TypeScript/JavaScript, C/C++, Bash, Nix, MATLAB, Markdown, LaTeX, YAML, JSON, TOML, HTML, and SCSS/Sass/CSS. Language servers retain lazy detection/startup, cache persistence, and idle shutdown.

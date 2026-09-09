@@ -22,14 +22,8 @@ TStream = TypeVar("TStream", bound=str | bytes)
 
 
 def subprocess_kwargs() -> dict:
-    """
-    Returns a dictionary of keyword arguments for subprocess calls, adding platform-specific
-    flags that we want to use consistently.
-    """
-    kwargs = {}
-    if platform.system() == "Windows":
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    return kwargs
+    """Return subprocess keyword arguments shared by the supported Linux runtime."""
+    return {}
 
 
 def subprocess_run(

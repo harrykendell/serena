@@ -2,7 +2,6 @@ import os
 import platform
 import re
 import shutil as _sh
-import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path

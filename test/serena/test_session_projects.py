@@ -898,6 +898,23 @@ def test_switching_one_session_does_not_shutdown_shared_project(
     assert shutdown_calls == []
 
 
+def test_switching_global_scope_does_not_shutdown_project_used_by_mcp_session(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "global", "project_a")
+    _activate(agent, "session-b", "project_a")
+    shared_project = agent.get_active_project_for_session("session-b")
+    assert shared_project is not None
+    shutdown_calls: list[float] = []
+    monkeypatch.setattr(shared_project, "shutdown", lambda timeout=2.0: shutdown_calls.append(timeout))
+
+    _activate(agent, "global", "project_b")
+
+    assert shutdown_calls == []
+    assert agent.get_active_project_for_session("session-b") is shared_project
+
+
 def test_switching_one_session_does_not_redirect_another(multi_project_agent: tuple[SerenaAgent, dict[str, Path]]) -> None:
     agent, roots = multi_project_agent
     _activate(agent, "session-a", "project_a")

@@ -678,74 +678,29 @@ class PlatformUtils:
 
     @classmethod
     def get_platform_id(cls) -> PlatformId:
-        """
-        Returns the platform id for the current system
-        """
+        """Return the retained Linux platform identifier for the current host."""
         system = platform.system()
         machine = platform.machine()
         bitness = platform.architecture()[0]
-        if system == "Windows" and machine == "":
-            machine = cls._determine_windows_machine_type()
-        system_map = {"Windows": "win", "Darwin": "osx", "Linux": "linux"}
+        if system != "Linux":
+            raise SolidLSPException(f"Unsupported platform: {system=}; the standalone runtime supports Linux only")
+
         machine_map = {
-            "AMD64": "x64",
             "x86_64": "x64",
             "i386": "x86",
             "i686": "x86",
             "aarch64": "arm64",
             "arm64": "arm64",
-            "ARM64": "arm64",
         }
-        if system in system_map and machine in machine_map:
-            platform_id = system_map[system] + "-" + machine_map[machine]
-            if system == "Linux" and bitness == "64bit":
-                libc = platform.libc_ver()[0]
-                if libc != "glibc":
-                    # Format: linux-musl-arch (e.g., linux-musl-arm64)
-                    platform_id = f"{system_map[system]}-{libc}-{machine_map[machine]}"
-            return PlatformId(platform_id)
-        else:
-            raise SolidLSPException(f"Unknown platform: {system=}, {machine=}, {bitness=}")
+        if machine not in machine_map:
+            raise SolidLSPException(f"Unknown Linux architecture: {machine=}, {bitness=}")
 
-    @staticmethod
-    def _determine_windows_machine_type() -> str:
-        import ctypes
-        from ctypes import wintypes
-
-        class SYSTEM_INFO(ctypes.Structure):
-            class _U(ctypes.Union):
-                class _S(ctypes.Structure):
-                    _fields_ = [("wProcessorArchitecture", wintypes.WORD), ("wReserved", wintypes.WORD)]
-
-                _fields_ = [("dwOemId", wintypes.DWORD), ("s", _S)]
-                _anonymous_ = ("s",)
-
-            _fields_ = [
-                ("u", _U),
-                ("dwPageSize", wintypes.DWORD),
-                ("lpMinimumApplicationAddress", wintypes.LPVOID),
-                ("lpMaximumApplicationAddress", wintypes.LPVOID),
-                ("dwActiveProcessorMask", wintypes.LPVOID),
-                ("dwNumberOfProcessors", wintypes.DWORD),
-                ("dwProcessorType", wintypes.DWORD),
-                ("dwAllocationGranularity", wintypes.DWORD),
-                ("wProcessorLevel", wintypes.WORD),
-                ("wProcessorRevision", wintypes.WORD),
-            ]
-            _anonymous_ = ("u",)
-
-        sys_info = SYSTEM_INFO()
-        ctypes.windll.kernel32.GetNativeSystemInfo(ctypes.byref(sys_info))
-
-        arch_map = {
-            9: "AMD64",
-            5: "ARM",
-            12: "arm64",
-            6: "Intel Itanium-based",
-            0: "i386",
-        }
-
-        return arch_map.get(sys_info.wProcessorArchitecture, f"Unknown ({sys_info.wProcessorArchitecture})")
+        platform_id = f"linux-{machine_map[machine]}"
+        if bitness == "64bit":
+            libc = platform.libc_ver()[0]
+            if libc and libc != "glibc":
+                platform_id = f"linux-{libc}-{machine_map[machine]}"
+        return PlatformId(platform_id)
 
     @staticmethod
     def get_dotnet_version() -> DotnetVersion:

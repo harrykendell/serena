@@ -103,10 +103,8 @@ class ClangdLanguageServer(SolidLanguageServer):
 
     @override
     def is_ignored_dirname(self, dirname: str) -> bool:
-        return (
-            super().is_ignored_dirname(dirname)
-            or dirname == ".ccls-cache"
-            or (is_unreal_engine_project(self.repository_root_path) and dirname in UE_IGNORED_DIRNAMES)
+        return super().is_ignored_dirname(dirname) or (
+            is_unreal_engine_project(self.repository_root_path) and dirname in UE_IGNORED_DIRNAMES
         )
 
     def _raise_if_unreal_without_compile_db(self) -> None:

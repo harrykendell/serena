@@ -9,7 +9,6 @@ line_ending: native
 # We strongly recommend to always enable this option!
 # If you want to prevent the Dashboard window from being opened on launch,
 # set `web_dashboard_open_on_launch` to false (see below).
-# Further information: https://oraios.github.io/serena/02-usage/060_dashboard.html
 web_dashboard: True
 
 # whether to open the Dashboard in the default browser when Serena starts.
@@ -34,28 +33,13 @@ log_level: 20
 # This is useful for debugging language server issues.
 trace_lsp_communication: False
 
-# advanced configuration option allowing to configure language server-specific options.
-# Maps the language key to the options.
-# Have a look at the docstring of the constructors of the LS implementations within solidlsp (e.g., for C# or PHP) to see which options are available.
-# No documentation on options means no options are available.
+# advanced language-server implementation settings keyed by retained language id.
+# Use only settings documented by the corresponding adapter in src/solidlsp/language_servers/.
 ls_specific_settings: {}
 
-# mapping from language server keys to integer priority values (higher = more preferred), which determine
-# language server selection during automatic project creation and are used to break ties when multiple
-# language servers match an equal number of source files.
-# The priority values override Serena's default priorities:
-#   * 0 = experimental or secondary language servers, which are never auto-detected
-#         (e.g. `python_*` and `php_*` are "secondary"; also applies to non-programming languages like `json`)
-#   * 1 = supersets of other languages, which shall be preferred only if they match more files
-#         (e.g. `vue` and `svelte`, which are supersets of `typescript`)
-#   * 2 = default priority
-# Example:
-#   ls_priorities:
-#     python: 0
-#     python_basedpyright: 3
-# This example would achieve that `python_basedpyright` becomes the preferred language server for Python,
-# giving it a high priority of 3, while the default Python language server is fully excluded from
-# auto-detection with priority 0.
+# optional priority overrides for retained language-server auto-detection.
+# Higher values are preferred when several retained servers match the same source set.
+# A priority of 0 prevents automatic detection while still allowing explicit project selection.
 ls_priorities:
 
 # list of paths to ignore across all projects.

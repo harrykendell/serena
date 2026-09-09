@@ -13,7 +13,7 @@ pytestmark = pytest.mark.python
 
 
 @pytest.fixture(scope="module")
-def ls_with_ignored_dirs() -> Generator[SolidLanguageServer, None, None]:
+def ls_with_ignored_dirs() -> Generator[SolidLanguageServer]:
     """Fixture to set up an LS for the python test repo with the 'scripts' directory ignored."""
     ignored_paths = ["scripts", "custom_test"]
     with start_ls_context(ls_id=LanguageServerId.PYTHON, ignored_paths=ignored_paths) as ls:

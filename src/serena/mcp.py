@@ -724,7 +724,10 @@ class SerenaMCPFactory:
                 project_activation_error=project_activation_error,
                 web_dashboard_port=web_dashboard_port,
             )
-            self._activity_tracker = ActivityTracker(execution_store=self.agent.execution_store)
+            self._activity_tracker = ActivityTracker(
+                job_source=self.agent.job_manager,
+                execution_store=self.agent.execution_store,
+            )
         except Exception as e:
             show_fatal_exception_safe(e)
             raise
@@ -736,7 +739,7 @@ class SerenaMCPFactory:
         mcp = FastMCP(
             name="Serena",
             lifespan=self.server_lifespan,
-            website_url="https://oraios.github.io/serena",
+            website_url="https://mcp.kendell.uk/",
             icons=_server_icons(),
             host=host,
             port=port,
