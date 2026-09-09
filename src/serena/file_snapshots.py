@@ -15,6 +15,7 @@ from typing import ClassVar
 from mcp.types import ResourceLink
 from pydantic import AnyUrl
 
+from serena.errors import UserFacingError
 from serena.execution_store import ExecutionStore
 
 FILE_EXPORT_MAX_SIZE = 100 * 1024 * 1024
@@ -120,11 +121,11 @@ class FileSnapshotStore:
     ) -> FileSnapshot:
         """Copies one file into persistent private storage and returns its immutable resource link."""
         if not source_path.is_file():
-            raise FileNotFoundError(f"File does not exist: {source_path}")
+            raise UserFacingError(f"File does not exist: {source_path}")
 
         size = source_path.stat().st_size
         if size > max_size:
-            raise ValueError(f"File exceeds the {max_size // (1024 * 1024)} MiB export limit")
+            raise UserFacingError(f"File exceeds the {max_size // (1024 * 1024)} MiB export limit")
 
         name = display_name or source_path.name
         mime_type, _ = mimetypes.guess_type(name)
@@ -145,7 +146,7 @@ class FileSnapshotStore:
                         while chunk := source.read(1024 * 1024):
                             bytes_written += len(chunk)
                             if bytes_written > max_size:
-                                raise ValueError(f"File exceeds the {max_size // (1024 * 1024)} MiB export limit")
+                                raise UserFacingError(f"File exceeds the {max_size // (1024 * 1024)} MiB export limit")
                             if content_digest is not None:
                                 content_digest.update(chunk)
                             output.write(chunk)

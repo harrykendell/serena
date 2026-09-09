@@ -168,6 +168,11 @@ def test_download_file_rejects_path_outside_project(project: Project) -> None:
         _make_tool(DownloadFileTool, project).apply("../outside.txt")
 
 
+def test_download_file_rejects_missing_file(project: Project) -> None:
+    with pytest.raises(UserFacingError, match="File does not exist"):
+        _make_tool(DownloadFileTool, project).apply("missing.txt")
+
+
 def test_upload_file_writes_chatgpt_file_inside_project(project: Project, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     data = b"edited in chat\n"
 
@@ -211,13 +216,12 @@ def test_upload_file_writes_chatgpt_file_inside_project(project: Project, tmp_pa
 
     assert destination.read_bytes() == data
     assert stat.S_IMODE(destination.stat().st_mode) == expected_new_mode
-    assert "Uploaded edited.txt" in result
-    assert "source snapshot: serena-file://export/" in result
+    assert result.startswith("OK; uploaded=incoming/edited.txt; source_snapshot=serena-file://export/")
     snapshot_token = result.rsplit("/", maxsplit=1)[1]
     assert (tmp_path / ".serena-home" / "chat_file_snapshots" / snapshot_token).read_bytes() == data
     assert tool.get_mcp_tool_meta() == {"openai/fileParams": ["file"]}
 
-    with pytest.raises(FileExistsError):
+    with pytest.raises(UserFacingError):
         tool.apply(source, "incoming/edited.txt")
 
     destination.chmod(0o751)
@@ -253,16 +257,58 @@ def test_upload_file_enforces_total_transfer_timeout(project: Project, tmp_path:
     monkeypatch.setattr("serena.tools.media_tools.time.monotonic", lambda: next(times))
 
     source = OpenAIFile(download_url="https://files.example.test/file", file_id="file_test")
-    with pytest.raises(TimeoutError, match="120 seconds"):
+    with pytest.raises(UserFacingError, match="120 seconds"):
         _make_tool(UploadFileTool, project).apply(source, "incoming/slow.txt")
 
     assert not (tmp_path / "incoming" / "slow.txt").exists()
 
 
+def test_upload_file_rejects_invalid_source_url(project: Project, tmp_path: Path) -> None:
+    source = OpenAIFile(download_url="http://files.example.test/file", file_id="file_test")
+
+    with pytest.raises(UserFacingError, match="must be HTTPS"):
+        _make_tool(UploadFileTool, project).apply(source, "incoming/file.txt")
+
+    assert not (tmp_path / "incoming" / "file.txt").exists()
+
+
+def test_upload_file_does_not_echo_signed_source_url_on_http_failure(
+    project: Project, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    signed_url = "https://files.example.test/file?signature=secret-token"
+
+    class FakeResponse:
+        is_redirect = False
+        is_permanent_redirect = False
+        headers: dict[str, str] = {}
+        status_code = 403
+
+        def raise_for_status(self) -> None:
+            raise requests.HTTPError(f"403 Client Error for url: {signed_url}", response=self)
+
+        @staticmethod
+        def close() -> None:
+            return None
+
+    monkeypatch.setattr(
+        "serena.tools.media_tools.socket.getaddrinfo",
+        lambda *args, **kwargs: [(None, None, None, None, ("1.1.1.1", 443))],
+    )
+    monkeypatch.setattr(requests.Session, "get", lambda self, *args, **kwargs: FakeResponse())
+
+    source = OpenAIFile(download_url=signed_url, file_id="file_test")
+    with pytest.raises(UserFacingError) as exc_info:
+        _make_tool(UploadFileTool, project).apply(source, "incoming/file.txt")
+
+    assert str(exc_info.value) == "ChatGPT file download failed with HTTP 403"
+    assert "secret-token" not in str(exc_info.value)
+    assert not (tmp_path / "incoming" / "file.txt").exists()
+
+
 def test_fetch_media_file_rejects_non_media(project: Project, tmp_path: Path) -> None:
     (tmp_path / "notes.txt").write_text("not media")
 
-    with pytest.raises(ValueError, match="use download_file"):
+    with pytest.raises(UserFacingError, match="use download_file"):
         _make_tool(FetchMediaFileTool, project).apply("notes.txt")
 
 
@@ -331,7 +377,7 @@ def test_render_pdf_page_enforces_wall_clock_timeout(project: Project, tmp_path:
 
     monkeypatch.setattr("serena.tools.media_tools.subprocess.run", timeout_run)
 
-    with pytest.raises(RuntimeError, match="30 seconds"):
+    with pytest.raises(UserFacingError, match="30 seconds"):
         _make_tool(RenderPdfPageTool, project).apply("one-page.pdf", page=1, dpi=72)
 
     assert not (tmp_path / ".serena" / "chat_renders").exists()
@@ -340,5 +386,15 @@ def test_render_pdf_page_enforces_wall_clock_timeout(project: Project, tmp_path:
 def test_render_pdf_page_bounds_resolution(project: Project, tmp_path: Path) -> None:
     _write_minimal_pdf(tmp_path / "one-page.pdf")
 
-    with pytest.raises(ValueError, match="dpi must be between"):
+    with pytest.raises(UserFacingError, match="dpi must be between"):
         _make_tool(RenderPdfPageTool, project).apply("one-page.pdf", page=1, dpi=600)
+
+
+def test_render_pdf_page_rejects_invalid_type_and_page(project: Project, tmp_path: Path) -> None:
+    (tmp_path / "notes.txt").write_text("not a pdf")
+    with pytest.raises(UserFacingError, match="only accepts PDF"):
+        _make_tool(RenderPdfPageTool, project).apply("notes.txt", page=1)
+
+    _write_minimal_pdf(tmp_path / "one-page.pdf")
+    with pytest.raises(UserFacingError, match="1-based positive"):
+        _make_tool(RenderPdfPageTool, project).apply("one-page.pdf", page=0)

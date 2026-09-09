@@ -27,7 +27,9 @@ from serena.tools import (
     JobStatusTool,
     ReadFileTool,
     ReadMemoryTool,
+    ReadToolOutputTool,
     RenameSymbolTool,
+    RenderPdfPageTool,
     ReplaceContentTool,
     WriteMemoryTool,
 )
@@ -82,6 +84,16 @@ def _activate(agent: SerenaAgent, session_id: str, project_name: str) -> str:
             mcp_ctx=_mcp_context(session_id),
         ),
     )
+
+
+def test_unknown_project_activation_is_user_facing(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
+) -> None:
+    agent, _ = multi_project_agent
+    tool = agent.get_tool(ActivateProjectTool)
+
+    with pytest.raises(UserFacingError, match="not found"):
+        tool.apply(project="missing-project", session_id="session-a")
 
 
 def test_project_tool_execution_access_contract() -> None:
@@ -488,6 +500,56 @@ def test_read_file_missing_path_is_concise_mcp_failure(
         record = agent.execution_store.list_session_executions("session-a")[-1]
         assert record.status == "failed"
         assert record.error == message
+
+    asyncio.run(scenario())
+
+
+def test_read_tool_output_failures_are_concise_mcp_errors(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
+) -> None:
+    agent, _roots = multi_project_agent
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(ReadToolOutputTool))
+
+    async def scenario() -> None:
+        cases = [
+            ({"output_id": "missing-output"}, "Tool output 'missing-output' is unavailable or expired"),
+            ({"output_id": "missing-output", "offset": -1}, "offset must be non-negative"),
+            ({"output_id": "missing-output", "max_chars": 0}, "max_chars must be between 1 and 20000"),
+        ]
+        for arguments, expected in cases:
+            with pytest.raises(ToolError) as exc_info:
+                await mcp_tool.run(arguments, context=_mcp_context("session-a"))
+            message = str(exc_info.value)
+            assert message == expected
+            assert "Traceback" not in message
+            assert "ValueError:" not in message
+
+    asyncio.run(scenario())
+
+
+def test_pdf_request_failures_are_concise_mcp_errors(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
+) -> None:
+    agent, roots = multi_project_agent
+    _activate(agent, "session-a", "project_a")
+    (roots["project_a"] / "notes.txt").write_text("not a pdf")
+    (roots["project_a"] / "empty.pdf").write_bytes(b"%PDF-1.4\n")
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(RenderPdfPageTool))
+
+    async def scenario() -> None:
+        cases = [
+            ({"relative_path": "notes.txt", "page": 1}, "render_pdf_page only accepts PDF files"),
+            ({"relative_path": "empty.pdf", "page": 0}, "page must be a 1-based positive integer"),
+            ({"relative_path": "empty.pdf", "page": 1, "dpi": 600}, "dpi must be between 72 and 300"),
+        ]
+        for arguments, expected in cases:
+            with pytest.raises(ToolError) as exc_info:
+                await mcp_tool.run(arguments, context=_mcp_context("session-a"))
+            message = str(exc_info.value)
+            assert message == expected
+            assert "Traceback" not in message
+            assert "ValueError:" not in message
+            assert "RuntimeError:" not in message
 
     asyncio.run(scenario())
 

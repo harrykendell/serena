@@ -103,7 +103,7 @@ def test_shell_tool_oversize_response_reuses_live_transcript_id(tmp_path) -> Non
             response = tool.apply(command, max_answer_chars=400)
         finally:
             reset_execution_id(execution_token)
-        match = re.search(r"Shell transcript retained as ([0-9a-f]{32})", response)
+        match = re.search(r"output_id=([0-9a-f]{32})", response)
         assert match is not None
         output_id = match.group(1)
         descriptor = store.describe_execution(execution_id)

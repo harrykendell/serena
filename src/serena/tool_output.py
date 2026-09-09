@@ -7,6 +7,8 @@ from tempfile import TemporaryDirectory
 from threading import RLock
 from uuid import uuid4
 
+from serena.errors import UserFacingError
+
 
 @dataclass(frozen=True)
 class ToolOutputPage:
@@ -148,35 +150,28 @@ class ToolOutputStore:
     ) -> str:
         """Retains a result and renders an identified tail that fits the answer limit."""
         output_id = self.retain(tool_name, content, execution_id=execution_id)
-        return self.render_tail(output_id, max_answer_chars, answer_chars=len(content))
+        return self.render_tail(output_id, max_answer_chars)
 
     def render_tail(
         self,
         output_id: str,
         max_answer_chars: int,
         *,
-        answer_chars: int | None = None,
-        retained_label: str = "Full output",
         details: str | None = None,
     ) -> str:
-        """Render a bounded identified tail for an already retained result."""
+        """Renders a compact identified tail for an already retained result."""
         descriptor = self.describe(output_id)
-        answer_length = descriptor.total_chars if answer_chars is None else answer_chars
-        footer = f"\nUse read_tool_output(output_id='{output_id}', offset=<offset>) to read another page."
         details_text = f"\n{details}" if details else ""
-        available = max_answer_chars - len(footer) - len(details_text) - 280
-        tail_length = max(0, min(descriptor.total_chars, available))
+        tail_length = min(descriptor.total_chars, max(0, max_answer_chars - len(details_text) - 160))
 
         while True:
             tail_start = descriptor.total_chars - tail_length
-            page = self.read(output_id, tail_start, tail_length) if tail_length else None
             header = (
-                f"The answer is too long ({answer_length} characters). {retained_label} retained as {output_id}.\n"
-                f"Showing tail from character {tail_start}:{details_text}\n"
-                f"complete=false; truncated=true; total_chars={descriptor.total_chars}; "
-                f"shown_range={tail_start}:{descriptor.total_chars}\n"
+                f"truncated=true; total_chars={descriptor.total_chars}; output_id={output_id}\n"
+                f"shown_range={tail_start}:{descriptor.total_chars}{details_text}\n"
             )
-            response = f"{header}{page.content if page is not None else ''}{footer}"
+            page = self.read(output_id, tail_start, tail_length) if tail_length else None
+            response = f"{header}{page.content if page is not None else ''}"
             if len(response) <= max_answer_chars or tail_length == 0:
                 return response[:max_answer_chars]
             tail_length = max(0, tail_length - (len(response) - max_answer_chars))
@@ -201,16 +196,18 @@ class ToolOutputStore:
             return self.describe(output_id)
 
     def read(self, output_id: str, offset: int, max_chars: int) -> ToolOutputPage:
-        """Read one page from an explicitly identified retained result."""
+        """Reads one character-addressed page from an explicitly identified retained result."""
         if offset < 0:
-            raise ValueError("offset must be non-negative")
+            raise UserFacingError("offset must be non-negative")
         if max_chars <= 0:
-            raise ValueError("max_chars must be positive")
+            raise UserFacingError("max_chars must be positive")
 
         with self._lock:
-            record = self._record(output_id)
+            record = self._records.get(output_id)
+            if record is None:
+                raise UserFacingError(f"Tool output '{output_id}' is unavailable or expired")
             if offset > record.total_chars:
-                raise ValueError(f"offset {offset} exceeds retained output length {record.total_chars}")
+                raise UserFacingError(f"offset {offset} exceeds retained output length {record.total_chars}")
 
             # seek by characters rather than bytes so cursors remain correct for arbitrary UTF-8 output
             with record.path.open("r", encoding="utf-8", newline="") as output_file:
@@ -259,9 +256,10 @@ class ToolOutputStore:
             self._directory.cleanup()
 
     def _record(self, output_id: str) -> _ToolOutputRecord:
+        """Returns one retained-output record for internal store operations."""
         record = self._records.get(output_id)
         if record is None:
-            raise ValueError(f"Tool output '{output_id}' is not available. It may have expired or belong to a different Serena process.")
+            raise ValueError(f"Tool output '{output_id}' is not available")
         return record
 
     def _prune(self) -> None:

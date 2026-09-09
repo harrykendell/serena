@@ -20,6 +20,7 @@ from mcp.server.fastmcp import Audio, FastMCP, Image
 from mcp.types import CallToolResult, ContentBlock, ResourceLink, TextContent
 from pydantic import BaseModel, ConfigDict
 
+from serena.errors import UserFacingError
 from serena.file_snapshots import FILE_EXPORT_MAX_SIZE, FileSnapshotStore
 from serena.tools.tools_base import Tool, ToolMarkerCanEdit
 
@@ -135,7 +136,10 @@ class DownloadFileTool(Tool):
         :param relative_path: project-relative path to the file
         :return: standard MCP resource link for the exported file
         """
-        return FileSnapshotStore.snapshot_project_file(self.project, relative_path).link
+        try:
+            return FileSnapshotStore.snapshot_project_file(self.project, relative_path).link
+        except OSError as error:
+            raise UserFacingError(f"Could not export file: {error.strerror or error}") from None
 
     def prepare_mcp_result(self, result: object) -> CallToolResult:
         """Returns the exported project file as a standard MCP resource link."""
@@ -163,29 +167,43 @@ class UploadFileTool(Tool, ToolMarkerCanEdit):
         """Rejects non-HTTPS and private-network download destinations."""
         parsed = urlparse(download_url)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-            raise ValueError("ChatGPT file download URL must be an HTTPS URL without embedded credentials")
+            raise UserFacingError("ChatGPT file download URL must be HTTPS and contain no embedded credentials")
 
         try:
             addresses = {entry[4][0] for entry in socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)}
-        except socket.gaierror as exc:
-            raise ValueError("ChatGPT file download host could not be resolved") from exc
+        except socket.gaierror:
+            raise UserFacingError("ChatGPT file download host could not be resolved") from None
         if not addresses:
-            raise ValueError("ChatGPT file download host did not resolve to an address")
+            raise UserFacingError("ChatGPT file download host did not resolve to an address")
         for address in addresses:
             try:
                 ip = ipaddress.ip_address(address)
-            except ValueError as exc:
-                raise ValueError("ChatGPT file download host resolved to an invalid address") from exc
+            except ValueError:
+                raise UserFacingError("ChatGPT file download host resolved to an invalid address") from None
             if not ip.is_global:
-                raise ValueError("ChatGPT file download URL must resolve only to public addresses")
+                raise UserFacingError("ChatGPT file download URL must resolve only to public addresses")
 
     @classmethod
     def _remaining_download_time(cls, deadline: float) -> float:
         """Returns remaining wall-clock transfer time or raises on expiry."""
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError(f"ChatGPT file download exceeded {cls._TOTAL_TIMEOUT_SECONDS:g} seconds")
+            raise UserFacingError(f"ChatGPT file download exceeded {cls._TOTAL_TIMEOUT_SECONDS:g} seconds")
         return remaining
+
+    @staticmethod
+    def _download_failure_message(error: requests.RequestException) -> str:
+        """Returns a concise transfer failure without echoing the source URL."""
+        if isinstance(error, requests.Timeout):
+            return "ChatGPT file download request timed out"
+        if isinstance(error, requests.HTTPError):
+            response = error.response
+            if response is not None:
+                return f"ChatGPT file download failed with HTTP {response.status_code}"
+            return "ChatGPT file download failed with an HTTP error"
+        if isinstance(error, requests.ConnectionError):
+            return "ChatGPT file download connection failed"
+        return "ChatGPT file download failed"
 
     @classmethod
     def _download_to(cls, source: OpenAIFile, destination: Path) -> tuple[int, str]:
@@ -199,29 +217,37 @@ class UploadFileTool(Tool, ToolMarkerCanEdit):
             for redirect_index in range(cls._MAX_REDIRECTS + 1):
                 cls._validate_download_url(current_url)
                 remaining = cls._remaining_download_time(deadline)
-                response = session.get(
-                    current_url,
-                    stream=True,
-                    allow_redirects=False,
-                    timeout=(
-                        min(cls._CONNECT_TIMEOUT_SECONDS, remaining),
-                        min(cls._READ_TIMEOUT_SECONDS, remaining),
-                    ),
-                )
+                try:
+                    response = session.get(
+                        current_url,
+                        stream=True,
+                        allow_redirects=False,
+                        timeout=(
+                            min(cls._CONNECT_TIMEOUT_SECONDS, remaining),
+                            min(cls._READ_TIMEOUT_SECONDS, remaining),
+                        ),
+                    )
+                except requests.RequestException as error:
+                    raise UserFacingError(cls._download_failure_message(error)) from None
                 try:
                     if response.is_redirect or response.is_permanent_redirect:
                         if redirect_index >= cls._MAX_REDIRECTS:
-                            raise ValueError("ChatGPT file download exceeded the redirect limit")
+                            raise UserFacingError("ChatGPT file download exceeded the redirect limit")
                         location = response.headers.get("Location")
                         if not location:
-                            raise ValueError("ChatGPT file download redirect did not include a destination")
+                            raise UserFacingError("ChatGPT file download redirect did not include a destination")
                         current_url = urljoin(current_url, location)
                         continue
 
                     response.raise_for_status()
                     content_length = response.headers.get("Content-Length")
-                    if content_length is not None and int(content_length) > FILE_EXPORT_MAX_SIZE:
-                        raise ValueError(f"ChatGPT file exceeds the {FILE_EXPORT_MAX_SIZE // (1024 * 1024)} MiB import limit")
+                    if content_length is not None:
+                        try:
+                            announced_size = int(content_length)
+                        except ValueError:
+                            raise UserFacingError("ChatGPT file download returned an invalid Content-Length") from None
+                        if announced_size > FILE_EXPORT_MAX_SIZE:
+                            raise UserFacingError(f"ChatGPT file exceeds the {FILE_EXPORT_MAX_SIZE // (1024 * 1024)} MiB import limit")
 
                     with destination.open("wb") as output:
                         for chunk in response.iter_content(chunk_size=1024 * 1024):
@@ -230,14 +256,16 @@ class UploadFileTool(Tool, ToolMarkerCanEdit):
                                 continue
                             bytes_written += len(chunk)
                             if bytes_written > FILE_EXPORT_MAX_SIZE:
-                                raise ValueError(f"ChatGPT file exceeds the {FILE_EXPORT_MAX_SIZE // (1024 * 1024)} MiB import limit")
+                                raise UserFacingError(f"ChatGPT file exceeds the {FILE_EXPORT_MAX_SIZE // (1024 * 1024)} MiB import limit")
                             output.write(chunk)
                             digest.update(chunk)
                     return bytes_written, digest.hexdigest()
+                except requests.RequestException as error:
+                    raise UserFacingError(cls._download_failure_message(error)) from None
                 finally:
                     response.close()
 
-        raise RuntimeError("ChatGPT file download did not produce a response")
+        raise UserFacingError("ChatGPT file download did not produce a response")
 
     @staticmethod
     def _create_temporary_upload_path(destination: Path) -> Path:
@@ -258,7 +286,7 @@ class UploadFileTool(Tool, ToolMarkerCanEdit):
         :param file: ChatGPT file reference supplied by ``openai/fileParams``
         :param relative_path: destination path relative to the active project root
         :param overwrite: whether an existing destination file may be replaced
-        :return: uploaded filename, byte count, SHA-256 digest, and immutable source snapshot reference
+        :return: destination identity and immutable source snapshot reference
         """
         source = OpenAIFile.model_validate(file)
         self.project.validate_relative_path(relative_path)
@@ -267,35 +295,39 @@ class UploadFileTool(Tool, ToolMarkerCanEdit):
         root = Path(self.get_project_root()).resolve()
         destination = (root / relative_path).resolve(strict=False)
         if not destination.is_relative_to(root):
-            raise ValueError("Destination must remain inside the active project")
+            raise UserFacingError("Destination must remain inside the active project")
         if destination.exists() and not overwrite:
-            raise FileExistsError(f"Destination already exists: {relative_path}")
+            raise UserFacingError(f"Destination already exists: {relative_path}")
         if destination.exists() and not destination.is_file():
-            raise ValueError(f"Destination is not a regular file: {relative_path}")
+            raise UserFacingError(f"Destination is not a regular file: {relative_path}")
 
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        original_mode = stat.S_IMODE(destination.stat().st_mode) if destination.exists() else None
-        temporary_path = self._create_temporary_upload_path(destination)
         try:
-            byte_count, sha256 = self._download_to(source, temporary_path)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            original_mode = stat.S_IMODE(destination.stat().st_mode) if destination.exists() else None
+            temporary_path = self._create_temporary_upload_path(destination)
+        except OSError as error:
+            raise UserFacingError(f"Could not prepare upload destination: {error.strerror or error}") from None
+
+        try:
+            self._download_to(source, temporary_path)
             source_snapshot = FileSnapshotStore.snapshot(
                 temporary_path,
                 display_name=source_name,
                 description="Immutable ChatGPT upload snapshot retained by Serena",
             )
             if destination.exists() and not overwrite:
-                raise FileExistsError(f"Destination already exists: {relative_path}")
+                raise UserFacingError(f"Destination already exists: {relative_path}")
             if destination.exists() and original_mode is None:
                 original_mode = stat.S_IMODE(destination.stat().st_mode)
             if original_mode is not None:
                 temporary_path.chmod(original_mode)
             os.replace(temporary_path, destination)
+        except OSError as error:
+            raise UserFacingError(f"Could not store uploaded file: {error.strerror or error}") from None
         finally:
             temporary_path.unlink(missing_ok=True)
 
-        return (
-            f"Uploaded {source_name} to {relative_path} ({byte_count} bytes, sha256={sha256}); source snapshot: {source_snapshot.link.uri}"
-        )
+        return f"OK; uploaded={relative_path}; source_snapshot={source_snapshot.link.uri}"
 
 
 class FetchMediaFileTool(_McpMediaTool):
@@ -317,25 +349,28 @@ class FetchMediaFileTool(_McpMediaTool):
         self.project.validate_relative_path(relative_path)
         path = Path(self.get_project_root(), relative_path)
         if not path.is_file():
-            raise FileNotFoundError(f"File does not exist: {relative_path}")
-        if path.stat().st_size > self._MAX_FILE_SIZE:
-            raise ValueError(f"Media file exceeds the {self._MAX_FILE_SIZE // (1024 * 1024)} MiB size limit")
+            raise UserFacingError(f"File does not exist: {relative_path}")
+        try:
+            if path.stat().st_size > self._MAX_FILE_SIZE:
+                raise UserFacingError(f"Media file exceeds the {self._MAX_FILE_SIZE // (1024 * 1024)} MiB size limit")
 
-        mime_type, _ = mimetypes.guess_type(path.name)
-        if mime_type is not None:
-            media_type, _, media_format = mime_type.partition("/")
-            if media_type in {"image", "audio"}:
-                snapshot = FileSnapshotStore.snapshot(
-                    path,
-                    display_name=path.name,
-                    description=f"Media exported from Serena project {self.project.project_name}",
-                    max_size=self._MAX_FILE_SIZE,
-                    version_display_name_by_content=True,
-                )
-                if media_type == "image":
-                    return _NativeMediaResult(media=Image(path=snapshot.path, format=media_format), file_link=snapshot.link)
-                return _NativeMediaResult(media=Audio(path=snapshot.path, format=media_format), file_link=snapshot.link)
-        raise ValueError("fetch_media_file only accepts image or audio files; use download_file for other files")
+            mime_type, _ = mimetypes.guess_type(path.name)
+            if mime_type is not None:
+                media_type, _, media_format = mime_type.partition("/")
+                if media_type in {"image", "audio"}:
+                    snapshot = FileSnapshotStore.snapshot(
+                        path,
+                        display_name=path.name,
+                        description=f"Media exported from Serena project {self.project.project_name}",
+                        max_size=self._MAX_FILE_SIZE,
+                        version_display_name_by_content=True,
+                    )
+                    if media_type == "image":
+                        return _NativeMediaResult(media=Image(path=snapshot.path, format=media_format), file_link=snapshot.link)
+                    return _NativeMediaResult(media=Audio(path=snapshot.path, format=media_format), file_link=snapshot.link)
+        except OSError as error:
+            raise UserFacingError(f"Could not read media file: {error.strerror or error}") from None
+        raise UserFacingError("fetch_media_file only accepts image or audio files; use download_file for other files")
 
 
 class RenderPdfPageTool(_McpMediaTool):
@@ -362,59 +397,64 @@ class RenderPdfPageTool(_McpMediaTool):
         self.project.validate_relative_path(relative_path)
         path = Path(self.get_project_root(), relative_path)
         if not path.is_file():
-            raise FileNotFoundError(f"File does not exist: {relative_path}")
+            raise UserFacingError(f"File does not exist: {relative_path}")
         if path.suffix.lower() != ".pdf":
-            raise ValueError("render_pdf_page only accepts PDF files")
+            raise UserFacingError("render_pdf_page only accepts PDF files")
         if page < 1:
-            raise ValueError("page must be a 1-based positive integer")
+            raise UserFacingError("page must be a 1-based positive integer")
         if not self._MIN_DPI <= dpi <= self._MAX_DPI:
-            raise ValueError(f"dpi must be between {self._MIN_DPI} and {self._MAX_DPI}")
+            raise UserFacingError(f"dpi must be between {self._MIN_DPI} and {self._MAX_DPI}")
 
         renderer = shutil.which("pdftoppm")
         if renderer is None:
-            raise RuntimeError("PDF rendering requires 'pdftoppm' (Poppler) to be installed")
+            raise UserFacingError("PDF rendering requires 'pdftoppm' (Poppler) to be installed")
 
-        with tempfile.TemporaryDirectory(prefix="serena-pdf-") as tmp_dir:
-            output_prefix = Path(tmp_dir, "page")
-            try:
-                result = subprocess.run(
-                    [
-                        renderer,
-                        "-f",
-                        str(page),
-                        "-l",
-                        str(page),
-                        "-singlefile",
-                        "-png",
-                        "-r",
-                        str(dpi),
-                        str(path),
-                        str(output_prefix),
-                    ],
-                    stdin=subprocess.DEVNULL,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=self._RENDER_TIMEOUT_SECONDS,
+        try:
+            with tempfile.TemporaryDirectory(prefix="serena-pdf-") as tmp_dir:
+                output_prefix = Path(tmp_dir, "page")
+                try:
+                    result = subprocess.run(
+                        [
+                            renderer,
+                            "-f",
+                            str(page),
+                            "-l",
+                            str(page),
+                            "-singlefile",
+                            "-png",
+                            "-r",
+                            str(dpi),
+                            str(path),
+                            str(output_prefix),
+                        ],
+                        stdin=subprocess.DEVNULL,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=self._RENDER_TIMEOUT_SECONDS,
+                    )
+                except subprocess.TimeoutExpired:
+                    raise UserFacingError(f"PDF page rendering exceeded {self._RENDER_TIMEOUT_SECONDS:g} seconds") from None
+                except OSError as error:
+                    raise UserFacingError(f"Could not run PDF renderer: {error.strerror or error}") from None
+
+                if result.returncode != 0:
+                    detail = result.stderr.strip() or result.stdout.strip() or "unknown renderer error"
+                    raise UserFacingError(f"Failed to render PDF page: {detail}")
+
+                temporary_output = output_prefix.with_suffix(".png")
+                if not temporary_output.is_file():
+                    raise UserFacingError(f"PDF page {page} does not exist or could not be rendered")
+
+                display_name = f"{path.stem}-p{page}-{dpi}dpi.png"
+                snapshot = FileSnapshotStore.snapshot(
+                    temporary_output,
+                    display_name=display_name,
+                    description=f"PDF page rendered from Serena project {self.project.project_name}",
+                    max_size=self._MAX_RENDERED_FILE_SIZE,
+                    version_display_name_by_content=True,
                 )
-            except subprocess.TimeoutExpired as exc:
-                raise RuntimeError(f"PDF page rendering exceeded {self._RENDER_TIMEOUT_SECONDS:g} seconds") from exc
-
-            if result.returncode != 0:
-                detail = result.stderr.strip() or result.stdout.strip() or "unknown renderer error"
-                raise RuntimeError(f"Failed to render PDF page: {detail}")
-
-            temporary_output = output_prefix.with_suffix(".png")
-            if not temporary_output.is_file():
-                raise RuntimeError(f"PDF page {page} does not exist or could not be rendered")
-
-            display_name = f"{path.stem}-p{page}-{dpi}dpi.png"
-            snapshot = FileSnapshotStore.snapshot(
-                temporary_output,
-                display_name=display_name,
-                description=f"PDF page rendered from Serena project {self.project.project_name}",
-                max_size=self._MAX_RENDERED_FILE_SIZE,
-                version_display_name_by_content=True,
-            )
+        except OSError as error:
+            raise UserFacingError(f"Could not render PDF page: {error.strerror or error}") from None
 
         return _NativeMediaResult(media=Image(path=snapshot.path, format="png"), file_link=snapshot.link)

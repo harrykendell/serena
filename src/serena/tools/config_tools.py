@@ -11,13 +11,11 @@ class OpenDashboardTool(Tool, ToolMarkerDoesNotRequireActiveProject):
     """
 
     def apply(self) -> str:
-        """
-        Opens the Serena web dashboard in the default web browser.
-        """
+        """Opens the Serena web dashboard in the default web browser."""
+        url = self.agent.get_dashboard_url()
         if self.agent.open_dashboard():
-            return f"Serena web dashboard has been opened in the user's default web browser: {self.agent.get_dashboard_url()}"
-        else:
-            return f"Serena web dashboard could not be opened automatically; tell the user to open it via {self.agent.get_dashboard_url()}"
+            return f"Opened: {url}"
+        return f"Open manually: {url}"
 
 
 class ActivateProjectTool(Tool, ToolMarkerDoesNotRequireActiveProject):
@@ -40,9 +38,7 @@ class ActivateProjectTool(Tool, ToolMarkerDoesNotRequireActiveProject):
         """
         is_new_activation = self.agent.activate_project_from_path_or_name(project)
         mark_used(is_new_activation)
-        result = self.agent.get_project_activation_message(session_id)
-        result += "\nIMPORTANT: If you have not yet read the 'Serena Instructions Manual', do it now before continuing!"
-        return result
+        return self.agent.get_project_activation_message(session_id)
 
 
 class GetCurrentConfigTool(Tool):

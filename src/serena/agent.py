@@ -23,6 +23,7 @@ from serena import serena_version
 from serena.chatgpt_policy import CHATGPT_PRODUCT_PROMPT
 from serena.config.serena_config import SerenaConfig, SerenaPaths
 from serena.dashboard import DashboardServer, open_url_in_browser
+from serena.errors import UserFacingError
 from serena.execution import (
     ExecutionAccess,
     ProjectExecutionCoordinator,
@@ -54,10 +55,6 @@ log = logging.getLogger(__name__)
 TTool = TypeVar("TTool", bound="Tool")
 T = TypeVar("T")
 SUCCESS_RESULT = "OK"
-
-
-class ProjectNotFoundError(Exception):
-    pass
 
 
 class DashboardManager:
@@ -239,18 +236,10 @@ class SerenaAgent:
         output_id: str,
         max_answer_chars: int,
         *,
-        answer_chars: int,
-        retained_label: str,
         details: str | None = None,
     ) -> str:
-        """Render an identified bounded tail from an already retained tool output."""
-        return self._tool_output_store.render_tail(
-            output_id,
-            max_answer_chars,
-            answer_chars=answer_chars,
-            retained_label=retained_label,
-            details=details,
-        )
+        """Renders a compact identified tail from an already retained tool output."""
+        return self._tool_output_store.render_tail(output_id, max_answer_chars, details=details)
 
     def read_tool_execution_tail(self, execution_id: str, max_chars: int) -> ToolOutputPage | None:
         """Read the newest retained output tail for one exact tool execution."""
@@ -273,13 +262,13 @@ class SerenaAgent:
         return self._execution_store.set_session_display_name(session_id, display_name)
 
     def open_dashboard(self) -> bool:
-        """
-        Opens the Serena dashboard (for on-demand usage as triggered by the user, e.g. via a tool)
+        """Opens the Serena dashboard when browser launch is available.
 
-        :return: True if the dashboard was opened, False if it could not be opened
+        :return: ``True`` if a browser launch was attempted, otherwise ``False``
+        :raises UserFacingError: if the dashboard service is unavailable
         """
         if self._dashboard_manager is None:
-            raise Exception("Dashboard is not running.")
+            raise UserFacingError("Dashboard is not running")
 
         if not system_has_usable_display():
             log.warning("Not opening the Serena web dashboard because no usable display was detected.")
@@ -698,7 +687,7 @@ class SerenaAgent:
         If a project path has not yet been registered, Serena creates its project configuration first.
 
         :return: ``True`` if the session binding changed, otherwise ``False``
-        :raises ProjectNotFoundError: if the project can neither be found nor created
+        :raises UserFacingError: if the project can neither be found nor created
         """
         project_instance: Project | None = self.serena_config.get_project(project_root_or_name)
         if project_instance is not None:
@@ -708,7 +697,7 @@ class SerenaAgent:
             log.info("Added new project %s for path %s", project_instance.project_name, project_instance.project_root)
 
         if project_instance is None:
-            raise ProjectNotFoundError(
+            raise UserFacingError(
                 f"Project '{project_root_or_name}' not found: Not a valid project name or directory. "
                 f"Existing project names: {self.serena_config.project_names}"
             )

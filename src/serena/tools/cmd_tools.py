@@ -68,8 +68,6 @@ class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit):
             return self.agent.render_tool_output_tail(
                 output_writer.output_id,
                 effective_max_answer_chars,
-                answer_chars=len(result_json),
-                retained_label="Shell transcript",
                 details=details,
             )
         return self._limit_length(result_json, max_answer_chars)

@@ -42,7 +42,7 @@ def test_search_for_pattern_snippet_stage(tmp_path):
 
     # wide but overflowing cap: the snippet stage (line + matched text) is returned
     snippet = run(7000)
-    assert "The answer is too long" in snippet
+    assert snippet.startswith("truncated=true; total_chars=")
     assert '"text":' in snippet and "MATCHME item number 0000" in snippet
     assert "continue with semantic retrieval" in snippet
     assert "use read_file only when exact raw line context is needed" in snippet
@@ -91,10 +91,10 @@ def test_search_overflow_keeps_exact_result_recoverable(tmp_path) -> None:
             restrict_search_to_code_files=False,
             max_answer_chars=1_200,
         )
-        match = re.search(r"Full output retained as ([0-9a-f]{32})", response)
+        match = re.search(r"output_id=([0-9a-f]{32})", response)
         assert match is not None
         assert len(response) <= 1_200
-        assert "complete=false; truncated=true" in response
+        assert response.startswith("truncated=true; total_chars=")
 
         retained = store.read(match.group(1), offset=0, max_chars=100_000)
         assert retained.complete is True

@@ -259,12 +259,12 @@ class Tool(Component):
         max_answer_chars: int,
         shortened_result_factories: list[Callable[[], str]] | None = None,
     ) -> str:
-        """Limit a tool result while retaining the complete value for exact paging.
+        """Limits a tool result while retaining the complete value for exact paging.
 
         :param result: the full result string
         :param max_answer_chars: maximum allowed characters. -1 means use the configured default.
         :param shortened_result_factories: optional closures producing progressively shorter summaries;
-            the richest summary that fits is appended to the retained-output notice.
+            the richest summary that fits is appended to the retained-output metadata.
         :return: the original result when it fits, otherwise a bounded retained-output response
         """
         effective_max_answer_chars = self._effective_max_answer_chars(max_answer_chars)
@@ -272,23 +272,13 @@ class Tool(Component):
             return result
 
         output_id = self.agent.retain_tool_output(self.get_name(), result)
-        retained_msg = (
-            f"The answer is too long ({n_chars} characters). You can adjust your query or raise the max_answer_chars parameter.\n"
-            f"Full output retained as {output_id}.\n"
-            f"complete=false; truncated=true; total_chars={n_chars}\n"
-            f"Use read_tool_output(output_id='{output_id}', offset=<offset>) to read an exact page."
-        )
+        retained_msg = f"truncated=true; total_chars={n_chars}; output_id={output_id}"
         if shortened_result_factories is not None:
             for make_shorter in shortened_result_factories:
                 candidate = f"{retained_msg}\n{make_shorter()}"
                 if len(candidate) <= effective_max_answer_chars:
                     return candidate
-        return self.agent.render_tool_output_tail(
-            output_id,
-            effective_max_answer_chars,
-            answer_chars=n_chars,
-            retained_label="Full output",
-        )
+        return self.agent.render_tool_output_tail(output_id, effective_max_answer_chars)
 
     def is_active(self) -> bool:
         return self.agent.tool_is_active(self.get_name())

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from serena.agent import SerenaAgent
+from serena.errors import UserFacingError
 from serena.execution import bind_execution_id, reset_execution_id
 from serena.tool_output import ToolOutputStore
 from serena.tools.memory_tools import ReadMemoryTool
@@ -33,7 +34,7 @@ def _agent_with_store(store: ToolOutputStore) -> MagicMock:
 
 
 def _output_id(response: str) -> str:
-    match = re.search(r"Full output retained as ([0-9a-f]{32})", response)
+    match = re.search(r"output_id=([0-9a-f]{32})", response)
     assert match is not None
     return match.group(1)
 
@@ -51,23 +52,23 @@ def test_overflow_returns_identified_tail_and_full_output_can_be_paged() -> None
 
         assert len(response) <= 500
         assert "-useful-tail" in response
-        assert "Showing tail from character" in response
-        assert "complete=false; truncated=true" in response
-        assert f"read_tool_output(output_id='{output_id}'" in response
+        assert response.startswith(f"truncated=true; total_chars={len(content)}; output_id={output_id}\nshown_range=")
+        assert "read_tool_output" not in response
 
         first_page = json.loads(read_tool.apply(output_id=output_id, offset=0, max_chars=700))
-        assert first_page["output_id"] == output_id
-        assert first_page["offset"] == 0
-        assert first_page["end_offset"] == 700
-        assert first_page["next_offset"] == 700
-        assert first_page["complete"] is False
-        assert first_page["truncated"] is True
-        assert first_page["is_open"] is False
-        assert first_page["content"] == content[:700]
+        assert first_page == {
+            "output_id": output_id,
+            "total_chars": len(content),
+            "offset": 0,
+            "end_offset": 700,
+            "next_offset": 700,
+            "complete": False,
+            "content": content[:700],
+        }
 
         full_page = json.loads(read_tool.apply(output_id=output_id, offset=0, max_chars=len(content)))
         assert full_page["complete"] is True
-        assert full_page["truncated"] is False
+        assert full_page["content"] == content
     finally:
         store.close()
 
@@ -80,7 +81,7 @@ def test_implicit_budget_uses_approximate_tokens_with_canonical_retained_paging(
 
     try:
         retained_response = overflow_tool.apply(content, max_answer_chars=-1)
-        assert "Full output retained as" in retained_response
+        assert "truncated=true; total_chars=" in retained_response
         assert overflow_tool.apply(content, max_answer_chars=500) == content
     finally:
         store.close()
@@ -99,7 +100,7 @@ def test_read_memory_uses_retained_output_when_content_exceeds_budget() -> None:
         output_id = _output_id(response)
         retained = store.read(output_id, offset=0, max_chars=2_000)
 
-        assert "Full output retained as" in response
+        assert "truncated=true; total_chars=" in response
         assert retained.complete is True
         assert retained.content.startswith("memory-start-")
         assert retained.content.endswith("-memory-end")
@@ -141,7 +142,7 @@ def test_expired_output_id_fails_instead_of_returning_a_different_result() -> No
         expired_id = _output_id(overflow_tool.apply("old-" + "x" * 1_000, max_answer_chars=350))
         _output_id(overflow_tool.apply("new-" + "y" * 1_000, max_answer_chars=350))
 
-        with pytest.raises(ValueError, match="not available"):
+        with pytest.raises(UserFacingError, match="unavailable or expired"):
             read_tool.apply(output_id=expired_id)
     finally:
         store.close()
