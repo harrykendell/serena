@@ -63,7 +63,7 @@ class TestProjectConfigAutogenerate:
         python_file.write_text("def hello():\n    print('Hello, world!')\n")
 
         serena_config = deepcopy(self.serena_config)
-        serena_config.ls_priorities = {LanguageServerId.PYTHON_TY.value: 3}
+        serena_config.ls_priorities = {LanguageServerId.PYTHON.value: 3}
 
         # Run autogenerate
         config = ProjectConfig.autogenerate(self.project_path, serena_config, save_to_disk=False)

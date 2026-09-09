@@ -1,1 +1,0 @@
-def brokenFactory : Nat :=

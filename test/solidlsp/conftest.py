@@ -4,12 +4,7 @@ from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_types import SymbolKind, UnifiedSymbolInformation
 
-PYTHON_BACKEND_LANGUAGES = [
-    LanguageServerId.PYTHON,
-    LanguageServerId.PYTHON_TY,
-    LanguageServerId.PYTHON_PYREFLY,
-    LanguageServerId.PYTHON_BASEDPYRIGHT,
-]
+PYTHON_BACKEND_LANGUAGES = [LanguageServerId.PYTHON]
 
 
 def read_repo_file(language_server: SolidLanguageServer, relative_path: str) -> str:

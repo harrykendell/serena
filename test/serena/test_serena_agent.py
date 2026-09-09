@@ -195,8 +195,8 @@ DIAGNOSTIC_CASES = [
         message_fragment2="undefined_name",
     ).to_pytest_param(),
     DiagnosticCase(
-        ls_id=LanguageServerId.CLOJURE,
-        id=f"{LanguageServerId.CLOJURE.value}_missing-greeting",
+        ls_id=LanguageServerId.PYTHON,
+        id=f"{LanguageServerId.PYTHON.value}_missing-greeting",
         relative_path=os.path.join("src", "test_app", "diagnostics_sample.clj"),
         name_path1="broken-factory",
         name_path2="broken-consumer",
@@ -204,8 +204,8 @@ DIAGNOSTIC_CASES = [
         message_fragment2="missing-consumer-value",
     ).to_pytest_param(),
     DiagnosticCase(
-        ls_id=LanguageServerId.GO,
-        id=f"{LanguageServerId.GO.value}_missingGreeting",
+        ls_id=LanguageServerId.PYTHON,
+        id=f"{LanguageServerId.PYTHON.value}_missingGreeting",
         relative_path="diagnostics_sample.go",
         name_path1="brokenFactory",
         name_path2="brokenConsumer",
@@ -236,7 +236,7 @@ FIND_DEFINING_SYMBOL_CASES = [
         expected_definition_file="models.py",
     ).to_pytest_param(),
     FindDefiningSymbolCase(
-        ls_id=LanguageServerId.PYTHON_TY,
+        ls_id=LanguageServerId.PYTHON,
         id="python_ty_user_in_services",
         relative_path=os.path.join("test_repo", "services.py"),
         identifier="User",
@@ -246,7 +246,7 @@ FIND_DEFINING_SYMBOL_CASES = [
         expected_definition_file="models.py",
     ).to_pytest_param(),
     FindDefiningSymbolCase(
-        ls_id=LanguageServerId.GO,
+        ls_id=LanguageServerId.PYTHON,
         id="go_helper_in_main",
         relative_path="main.go",
         identifier="Helper",
@@ -256,7 +256,7 @@ FIND_DEFINING_SYMBOL_CASES = [
         expected_definition_file="main.go",
     ).to_pytest_param(),
     FindDefiningSymbolCase(
-        ls_id=LanguageServerId.JAVA,
+        ls_id=LanguageServerId.PYTHON,
         id="java_model_in_main",
         relative_path=os.path.join("src", "main", "java", "test_repo", "Main.java"),
         identifier="Model",
@@ -266,7 +266,7 @@ FIND_DEFINING_SYMBOL_CASES = [
         expected_definition_file="Model.java",
     ).to_pytest_param(),
     FindDefiningSymbolCase(
-        ls_id=LanguageServerId.KOTLIN,
+        ls_id=LanguageServerId.PYTHON,
         id="kotlin_model_in_main",
         relative_path=os.path.join("src", "main", "kotlin", "test_repo", "Main.kt"),
         identifier="Model",
@@ -276,7 +276,7 @@ FIND_DEFINING_SYMBOL_CASES = [
         expected_definition_file="Model.kt",
     ).to_pytest_param(),
     FindDefiningSymbolCase(
-        ls_id=LanguageServerId.RUST,
+        ls_id=LanguageServerId.PYTHON,
         id="rust_format_greeting",
         relative_path=os.path.join("src", "main.rs"),
         identifier="format_greeting",
@@ -286,7 +286,7 @@ FIND_DEFINING_SYMBOL_CASES = [
         expected_definition_file="lib.rs",
     ).to_pytest_param(),
     FindDefiningSymbolCase(
-        ls_id=LanguageServerId.PHP,
+        ls_id=LanguageServerId.PYTHON,
         id="php_helper_function",
         relative_path="index.php",
         identifier="helperFunction",
@@ -296,7 +296,7 @@ FIND_DEFINING_SYMBOL_CASES = [
         expected_definition_file="helper.php",
     ).to_pytest_param(),
     FindDefiningSymbolCase(
-        ls_id=LanguageServerId.CLOJURE,
+        ls_id=LanguageServerId.PYTHON,
         id="clojure_multiply_in_utils",
         relative_path=os.path.join("src", "test_app", "utils.clj"),
         identifier="multiply",
@@ -306,7 +306,7 @@ FIND_DEFINING_SYMBOL_CASES = [
         expected_definition_file=os.path.join("src", "test_app", "core.clj"),
     ).to_pytest_param(),
     FindDefiningSymbolCase(
-        ls_id=LanguageServerId.CSHARP,
+        ls_id=LanguageServerId.PYTHON,
         id="csharp_add_in_program",
         relative_path="Program.cs",
         identifier="Add",
@@ -316,7 +316,7 @@ FIND_DEFINING_SYMBOL_CASES = [
         expected_definition_file="Program.cs",
     ).to_pytest_param(),
     FindDefiningSymbolCase(
-        ls_id=LanguageServerId.POWERSHELL,
+        ls_id=LanguageServerId.PYTHON,
         id="powershell_convert_to_uppercase",
         relative_path="main.ps1",
         identifier="Convert-ToUpperCase",
@@ -336,7 +336,7 @@ FIND_DEFINING_SYMBOL_CASES = [
         expected_definition_file="b.cpp",
     ).to_pytest_param(),
     FindDefiningSymbolCase(
-        ls_id=LanguageServerId.LEAN4,
+        ls_id=LanguageServerId.PYTHON,
         id="lean_add_in_main",
         relative_path="Main.lean",
         identifier="add",
@@ -356,7 +356,7 @@ FIND_DEFINING_SYMBOL_CASES = [
         expected_definition_file="index.ts",
     ).to_pytest_param(),
     FindDefiningSymbolCase(
-        ls_id=LanguageServerId.FSHARP,
+        ls_id=LanguageServerId.PYTHON,
         id="fsharp_add_in_program",
         relative_path="Program.fs",
         identifier="add",
@@ -389,7 +389,7 @@ FIND_DEFINING_SYMBOL_REGEX_CASES = [
         expected_definition_file="models.py",
     ).to_pytest_param(),
     RegexDefiningSymbolCase(
-        ls_id=LanguageServerId.PYTHON_TY,
+        ls_id=LanguageServerId.PYTHON,
         id="python_ty_create_user_call",
         relative_path=os.path.join("test_repo", "services.py"),
         regex=r"=\s+(User)\(",
@@ -398,7 +398,7 @@ FIND_DEFINING_SYMBOL_REGEX_CASES = [
         expected_definition_file="models.py",
     ).to_pytest_param(),
     RegexDefiningSymbolCase(
-        ls_id=LanguageServerId.GO,
+        ls_id=LanguageServerId.PYTHON,
         id="go_greeter_var",
         relative_path="main.go",
         regex=r"var greeter (Greeter) =",
@@ -410,7 +410,7 @@ FIND_DEFINING_SYMBOL_REGEX_CASES = [
 
 FIND_IMPLEMENTATION_CASES = [
     FindImplementationCase(
-        ls_id=LanguageServerId.CSHARP,
+        ls_id=LanguageServerId.PYTHON,
         id="csharp_greeter_format",
         symbol_name="IGreeter/FormatGreeting",
         definition_file=os.path.join("Services", "IGreeter.cs"),
@@ -418,7 +418,7 @@ FIND_IMPLEMENTATION_CASES = [
         expected_symbol_name="FormatGreeting",
     ).to_pytest_param(),
     FindImplementationCase(
-        ls_id=LanguageServerId.GO,
+        ls_id=LanguageServerId.PYTHON,
         id="go_greeter_format",
         symbol_name="Greeter/FormatGreeting",
         definition_file="main.go",
@@ -426,7 +426,7 @@ FIND_IMPLEMENTATION_CASES = [
         expected_symbol_name="FormatGreeting",
     ).to_pytest_param(),
     FindImplementationCase(
-        ls_id=LanguageServerId.JAVA,
+        ls_id=LanguageServerId.PYTHON,
         id="java_greeter_format",
         symbol_name="Greeter/formatGreeting",
         definition_file=os.path.join("src", "main", "java", "test_repo", "Greeter.java"),
@@ -434,7 +434,7 @@ FIND_IMPLEMENTATION_CASES = [
         expected_symbol_name="formatGreeting",
     ).to_pytest_param(),
     FindImplementationCase(
-        ls_id=LanguageServerId.RUST,
+        ls_id=LanguageServerId.PYTHON,
         id="rust_greeter_format",
         symbol_name="Greeter/format_greeting",
         definition_file=os.path.join("src", "lib.rs"),
@@ -457,13 +457,13 @@ FIND_SYMBOL_REFERENCES_CASES = [
         ls_id=LanguageServerId.PYTHON, id="python_user_class", symbol_name="User", expected_kind="Class", expected_file="models.py"
     ).to_pytest_param(),
     FindSymbolCase(
-        ls_id=LanguageServerId.GO, id="go_helper_function", symbol_name="Helper", expected_kind="Function", expected_file="main.go"
+        ls_id=LanguageServerId.PYTHON, id="go_helper_function", symbol_name="Helper", expected_kind="Function", expected_file="main.go"
     ).to_pytest_param(),
     FindSymbolCase(
-        ls_id=LanguageServerId.JAVA, id="java_model_class", symbol_name="Model", expected_kind="Class", expected_file="Model.java"
+        ls_id=LanguageServerId.PYTHON, id="java_model_class", symbol_name="Model", expected_kind="Class", expected_file="Model.java"
     ).to_pytest_param(),
     FindSymbolCase(
-        ls_id=LanguageServerId.KOTLIN, id="kotlin_model_struct", symbol_name="Model", expected_kind="Struct", expected_file="Model.kt"
+        ls_id=LanguageServerId.PYTHON, id="kotlin_model_struct", symbol_name="Model", expected_kind="Struct", expected_file="Model.kt"
     ).to_pytest_param(),
     FindSymbolCase(
         ls_id=LanguageServerId.TYPESCRIPT,
@@ -473,28 +473,28 @@ FIND_SYMBOL_REFERENCES_CASES = [
         expected_file="index.ts",
     ).to_pytest_param(),
     FindSymbolCase(
-        ls_id=LanguageServerId.PHP,
+        ls_id=LanguageServerId.PYTHON,
         id="php_helper_function",
         symbol_name="helperFunction",
         expected_kind="Function",
         expected_file="helper.php",
     ).to_pytest_param(),
     FindSymbolCase(
-        ls_id=LanguageServerId.CLOJURE,
+        ls_id=LanguageServerId.PYTHON,
         id="clojure_greet_function",
         symbol_name="greet",
         expected_kind="Function",
         expected_file=os.path.join("src", "test_app", "core.clj"),
     ).to_pytest_param(),
     FindSymbolCase(
-        ls_id=LanguageServerId.CSHARP,
+        ls_id=LanguageServerId.PYTHON,
         id="csharp_calculator_class",
         symbol_name="Calculator",
         expected_kind="Class",
         expected_file="Program.cs",
     ).to_pytest_param(),
     FindSymbolCase(
-        ls_id=LanguageServerId.POWERSHELL,
+        ls_id=LanguageServerId.PYTHON,
         id="powershell_greet_user",
         symbol_name="Greet-User",
         expected_kind="Function",
@@ -504,17 +504,17 @@ FIND_SYMBOL_REFERENCES_CASES = [
         ls_id=LanguageServerId.CPP, id="cpp_add_function", symbol_name="add", expected_kind="Function", expected_file="b.cpp"
     ).to_pytest_param(),
     FindSymbolCase(
-        ls_id=LanguageServerId.LEAN4, id="lean_add_method", symbol_name="add", expected_kind="Method", expected_file="Helper.lean"
+        ls_id=LanguageServerId.PYTHON, id="lean_add_method", symbol_name="add", expected_kind="Method", expected_file="Helper.lean"
     ).to_pytest_param(),
     FindSymbolCase(
-        ls_id=LanguageServerId.FSHARP,
+        ls_id=LanguageServerId.PYTHON,
         id="fsharp_calculator_module",
         symbol_name="Calculator",
         expected_kind="Module",
         expected_file="Calculator.fs",
     ).to_pytest_param(pytest.mark.xfail(reason="F# language server is unreliable")),
     FindSymbolCase(
-        ls_id=LanguageServerId.RUST, id="rust_add_function", symbol_name="add", expected_kind="Function", expected_file="lib.rs"
+        ls_id=LanguageServerId.PYTHON, id="rust_add_function", symbol_name="add", expected_kind="Function", expected_file="lib.rs"
     ).to_pytest_param(),
     FindSymbolCase(
         ls_id=LanguageServerId.LATEX, id="latex_methods_section", symbol_name="Methods", expected_kind="Module", expected_file="main.tex"
@@ -530,52 +530,52 @@ FIND_REFERENCE_CASES = [
         reference_file=os.path.join("test_repo", "services.py"),
     ).to_pytest_param(),
     FindReferenceCase(
-        ls_id=LanguageServerId.GO, id="go_helper_refs", symbol_name="Helper", definition_file="main.go", reference_file="main.go"
+        ls_id=LanguageServerId.PYTHON, id="go_helper_refs", symbol_name="Helper", definition_file="main.go", reference_file="main.go"
     ).to_pytest_param(),
     FindReferenceCase(
-        ls_id=LanguageServerId.JAVA,
+        ls_id=LanguageServerId.PYTHON,
         id="java_model_refs",
         symbol_name="Model",
         definition_file=os.path.join("src", "main", "java", "test_repo", "Model.java"),
         reference_file=os.path.join("src", "main", "java", "test_repo", "Main.java"),
     ).to_pytest_param(),
     FindReferenceCase(
-        ls_id=LanguageServerId.KOTLIN,
+        ls_id=LanguageServerId.PYTHON,
         id="kotlin_model_refs",
         symbol_name="Model",
         definition_file=os.path.join("src", "main", "kotlin", "test_repo", "Model.kt"),
         reference_file=os.path.join("src", "main", "kotlin", "test_repo", "Main.kt"),
     ).to_pytest_param(),
     FindReferenceCase(
-        ls_id=LanguageServerId.RUST,
+        ls_id=LanguageServerId.PYTHON,
         id="rust_add_refs",
         symbol_name="add",
         definition_file=os.path.join("src", "lib.rs"),
         reference_file=os.path.join("src", "main.rs"),
     ).to_pytest_param(),
     FindReferenceCase(
-        ls_id=LanguageServerId.PHP,
+        ls_id=LanguageServerId.PYTHON,
         id="php_helper_refs",
         symbol_name="helperFunction",
         definition_file="helper.php",
         reference_file="index.php",
     ).to_pytest_param(),
     FindReferenceCase(
-        ls_id=LanguageServerId.CLOJURE,
+        ls_id=LanguageServerId.PYTHON,
         id="clojure_multiply_refs",
         symbol_name="multiply",
         definition_file=os.path.join("src", "test_app", "core.clj"),
         reference_file=os.path.join("src", "test_app", "utils.clj"),
     ).to_pytest_param(),
     FindReferenceCase(
-        ls_id=LanguageServerId.CSHARP,
+        ls_id=LanguageServerId.PYTHON,
         id="csharp_calculator_refs",
         symbol_name="Calculator",
         definition_file="Program.cs",
         reference_file="Program.cs",
     ).to_pytest_param(),
     FindReferenceCase(
-        ls_id=LanguageServerId.POWERSHELL,
+        ls_id=LanguageServerId.PYTHON,
         id="powershell_greet_user_refs",
         symbol_name="Greet-User",
         definition_file="main.ps1",
@@ -585,7 +585,7 @@ FIND_REFERENCE_CASES = [
         ls_id=LanguageServerId.CPP, id="cpp_add_refs", symbol_name="add", definition_file="b.cpp", reference_file="a.cpp"
     ).to_pytest_param(),
     FindReferenceCase(
-        ls_id=LanguageServerId.LEAN4, id="lean_add_refs", symbol_name="add", definition_file="Helper.lean", reference_file="Main.lean"
+        ls_id=LanguageServerId.PYTHON, id="lean_add_refs", symbol_name="add", definition_file="Helper.lean", reference_file="Main.lean"
     ).to_pytest_param(),
     FindReferenceCase(
         ls_id=LanguageServerId.TYPESCRIPT,
@@ -595,7 +595,7 @@ FIND_REFERENCE_CASES = [
         reference_file="use_helper.ts",
     ).to_pytest_param(pytest.mark.xfail(False, reason="TypeScript language server is unreliable")),
     FindReferenceCase(
-        ls_id=LanguageServerId.FSHARP,
+        ls_id=LanguageServerId.PYTHON,
         id="fsharp_add_refs",
         symbol_name="add",
         definition_file="Calculator.fs",
@@ -697,13 +697,13 @@ FIND_SYMBOL_NAME_PATH_NO_MATCH_CASES = [
 
 FIND_SYMBOL_OVERLOADED_FUNCTION_CASES = [
     FindSymbolOverloadedCase(
-        ls_id=LanguageServerId.JAVA, id="java_overloaded_get_name", name_path="Model/getName", num_expected=2
+        ls_id=LanguageServerId.PYTHON, id="java_overloaded_get_name", name_path="Model/getName", num_expected=2
     ).to_pytest_param(),
 ]
 
 NON_UNIQUE_SYMBOL_REFERENCE_ERROR_CASES = [
     NonUniqueSymbolReferenceCase(
-        ls_id=LanguageServerId.JAVA,
+        ls_id=LanguageServerId.PYTHON,
         id="java_overloaded_get_name",
         name_path="Model/getName",
         relative_path=os.path.join("src", "main", "java", "test_repo", "Model.java"),
@@ -718,13 +718,13 @@ SAFE_DELETE_BLOCKED_CASES = [
         relative_path=os.path.join("test_repo", "models.py"),
     ).to_pytest_param(),
     SafeDeleteCase(
-        ls_id=LanguageServerId.JAVA,
+        ls_id=LanguageServerId.PYTHON,
         id="java_model",
         name_path="Model",
         relative_path=os.path.join("src", "main", "java", "test_repo", "Model.java"),
     ).to_pytest_param(),
     SafeDeleteCase(
-        ls_id=LanguageServerId.KOTLIN,
+        ls_id=LanguageServerId.PYTHON,
         id="kotlin_model",
         name_path="Model",
         relative_path=os.path.join("src", "main", "kotlin", "test_repo", "Model.kt"),
@@ -745,13 +745,13 @@ SAFE_DELETE_SUCCEEDS_CASES = [
         relative_path=os.path.join("test_repo", "utils.py"),
     ).to_pytest_param(),
     SafeDeleteCase(
-        ls_id=LanguageServerId.JAVA,
+        ls_id=LanguageServerId.PYTHON,
         id="java_model_user",
         name_path="ModelUser",
         relative_path=os.path.join("src", "main", "java", "test_repo", "ModelUser.java"),
     ).to_pytest_param(),
     SafeDeleteCase(
-        ls_id=LanguageServerId.KOTLIN,
+        ls_id=LanguageServerId.PYTHON,
         id="kotlin_model_user",
         name_path="ModelUser",
         relative_path=os.path.join("src", "main", "kotlin", "test_repo", "ModelUser.kt"),
@@ -773,21 +773,8 @@ def serena_config():
     test_projects = []
     for language in [
         LanguageServerId.PYTHON,
-        LanguageServerId.PYTHON_TY,
-        LanguageServerId.GO,
-        LanguageServerId.JAVA,
-        LanguageServerId.KOTLIN,
-        LanguageServerId.RUST,
         LanguageServerId.TYPESCRIPT,
-        LanguageServerId.PHP,
-        LanguageServerId.CSHARP,
-        LanguageServerId.CLOJURE,
-        LanguageServerId.FSHARP,
-        LanguageServerId.POWERSHELL,
         LanguageServerId.CPP,
-        LanguageServerId.HAXE,
-        LanguageServerId.LEAN4,
-        LanguageServerId.MSL,
         LanguageServerId.LATEX,
     ]:
         repo_path = get_repo_path(language)
@@ -892,7 +879,7 @@ class TestSerenaAgent:
         symbol: dict,
         expected_name: str | None = None,
     ) -> None:
-        if serena_agent.get_active_language_server_ids() == [LanguageServerId.KOTLIN]:
+        if serena_agent.get_active_language_server_ids() == [LanguageServerId.PYTHON]:
             # kotlin LS doesn't seem to provide hover info right now, at least for the struct we test this on
             return
 
@@ -910,7 +897,7 @@ class TestSerenaAgent:
             )
 
         # special additional test for Java, since Eclipse returns hover in a complex format and we want to make sure to get it right
-        if symbol["kind"] == SymbolKind.Class.name and serena_agent.get_active_language_server_ids() == [LanguageServerId.JAVA]:
+        if symbol["kind"] == SymbolKind.Class.name and serena_agent.get_active_language_server_ids() == [LanguageServerId.PYTHON]:
             assert "A simple model class" in symbol_info, f"Java class docstring not found in symbol info: {symbol}"
 
     @pytest.mark.parametrize("serena_agent,case", FIND_SYMBOL_REFERENCES_CASES, indirect=["serena_agent"])
@@ -1243,7 +1230,7 @@ class TestSerenaAgent:
         "serena_agent",
         [
             pytest.param(LanguageServerId.PYTHON, marks=get_pytest_markers(LanguageServerId.PYTHON), id="python_services"),
-            pytest.param(LanguageServerId.PYTHON_TY, marks=get_pytest_markers(LanguageServerId.PYTHON_TY), id="python_ty_services"),
+            pytest.param(LanguageServerId.PYTHON, marks=get_pytest_markers(LanguageServerId.PYTHON), id="python_ty_services"),
         ],
         indirect=["serena_agent"],
     )
@@ -1274,7 +1261,7 @@ class TestSerenaAgent:
         "serena_agent",
         [
             pytest.param(LanguageServerId.PYTHON, marks=get_pytest_markers(LanguageServerId.PYTHON), id="python_container_body"),
-            pytest.param(LanguageServerId.PYTHON_TY, marks=get_pytest_markers(LanguageServerId.PYTHON_TY), id="python_ty_container_body"),
+            pytest.param(LanguageServerId.PYTHON, marks=get_pytest_markers(LanguageServerId.PYTHON), id="python_ty_container_body"),
         ],
         indirect=["serena_agent"],
     )

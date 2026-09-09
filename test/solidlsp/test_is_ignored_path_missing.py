@@ -49,7 +49,7 @@ class _IgnoredPathServer(SolidLanguageServer):
 
 def test_missing_lombok_class_under_target_is_ignored_not_raised(tmp_path: Path) -> None:
     """JDTLS-style missing build artifact under target/classes -- must be ignored, never raise."""
-    ls = _IgnoredPathServer(tmp_path, LanguageServerId.JAVA)
+    ls = _IgnoredPathServer(tmp_path, LanguageServerId.PYTHON)
     missing = "target/classes/test_repo/LombokModel$LombokModelBuilder.class"
 
     assert not (tmp_path / missing).exists()
@@ -134,7 +134,7 @@ def test_java_build_output_paths_never_raise(tmp_path: Path, rel: str) -> None:
     """Compiled-class paths classify as ignored via the unsupported-extension rule, present or not
     (build dirnames are deliberately not hard-ignored for Java).
     """
-    ls = _IgnoredPathServer(tmp_path, LanguageServerId.JAVA)
+    ls = _IgnoredPathServer(tmp_path, LanguageServerId.PYTHON)
     # neither present nor absent should raise
     assert ls.is_ignored_path(rel) is True
     p = tmp_path / rel
@@ -164,7 +164,7 @@ def _location_item(path: Path) -> dict:
 
 def test_location_at_missing_path_is_skipped(tmp_path: Path) -> None:
     """Locations whose absolute path is not on disk (e.g. LS-reported build artifacts) are dropped."""
-    ls = _IgnoredPathServer(tmp_path, LanguageServerId.JAVA)
+    ls = _IgnoredPathServer(tmp_path, LanguageServerId.PYTHON)
     missing = tmp_path / "target" / "classes" / "LombokModel$LombokModelBuilder.class"
     assert not missing.exists()
     assert _location_request(ls).convert_location_item(_location_item(missing)) is None

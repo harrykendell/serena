@@ -1,2 +1,0 @@
-{:paths ["src"]
- :deps {test-app/test-app {:local/root "../"}}}

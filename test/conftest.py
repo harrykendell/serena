@@ -29,10 +29,6 @@ from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.settings import SolidLSPSettings
 
-from .solidlsp.clojure import is_clojure_cli_available
-from .solidlsp.elixir import EXPERT_UNAVAILABLE
-from .solidlsp.erlang import ERLANG_LS_UNAVAILABLE
-
 PYTEST_LOG_LEVEL = logging.DEBUG
 
 logging.configure(level=PYTEST_LOG_LEVEL)
@@ -64,19 +60,9 @@ class LanguageParamRequest:
     param: LanguageServerId
 
 
-_LANGUAGE_REPO_ALIASES: dict[LanguageServerId, LanguageServerId] = {
-    LanguageServerId.CPP_CCLS: LanguageServerId.CPP,
-    LanguageServerId.PHP_PHPACTOR: LanguageServerId.PHP,
-    LanguageServerId.PHP_PHPANTOM: LanguageServerId.PHP,
-    LanguageServerId.PYTHON_JEDI: LanguageServerId.PYTHON,
-    LanguageServerId.PYTHON_BASEDPYRIGHT: LanguageServerId.PYTHON,
-    LanguageServerId.PYTHON_TY: LanguageServerId.PYTHON,
-    LanguageServerId.RUBY_SOLARGRAPH: LanguageServerId.RUBY,
-    LanguageServerId.PYTHON_TY: LanguageServerId.PYTHON,
-    LanguageServerId.PYTHON_PYREFLY: LanguageServerId.PYTHON,
-}
+_LANGUAGE_REPO_ALIASES: dict[LanguageServerId, LanguageServerId] = {}
 
-PYTHON_LANGUAGE_BACKENDS = [LanguageServerId.PYTHON, LanguageServerId.PYTHON_TY, LanguageServerId.PYTHON_BASEDPYRIGHT]
+PYTHON_LANGUAGE_BACKENDS = [LanguageServerId.PYTHON]
 
 
 def get_repo_path(language: LanguageServerId) -> Path:
@@ -296,35 +282,17 @@ is_linux = platform.system() == "Linux"
 
 
 _LANGUAGE_PYTEST_MARKERS: dict[LanguageServerId, list[MarkDecorator | Mark]] = {
-    LanguageServerId.ADA: [pytest.mark.ada],
-    LanguageServerId.CLOJURE: [pytest.mark.clojure],
-    LanguageServerId.CPP: [pytest.mark.cpp],
-    LanguageServerId.CPP_CCLS: [pytest.mark.cpp],
-    LanguageServerId.CUE: [pytest.mark.cue],
-    LanguageServerId.CSHARP: [pytest.mark.csharp],
-    LanguageServerId.DENO: [pytest.mark.deno],
-    LanguageServerId.FSHARP: [pytest.mark.fsharp],
-    LanguageServerId.GO: [pytest.mark.go],
-    LanguageServerId.HAXE: [pytest.mark.haxe],
-    LanguageServerId.JAVA: [pytest.mark.java],
-    LanguageServerId.KOTLIN: [pytest.mark.kotlin],
-    LanguageServerId.LEAN4: [pytest.mark.lean4],
-    LanguageServerId.LATEX: [pytest.mark.latex],
-    LanguageServerId.MSL: [pytest.mark.msl],
-    LanguageServerId.PHP: [pytest.mark.php],
-    LanguageServerId.PHP_PHPACTOR: [pytest.mark.php],
-    LanguageServerId.PHP_PHPANTOM: [pytest.mark.php],
-    LanguageServerId.POWERSHELL: [pytest.mark.powershell],
     LanguageServerId.PYTHON: [pytest.mark.python],
-    LanguageServerId.PYTHON_JEDI: [pytest.mark.python],
-    LanguageServerId.PYTHON_TY: [pytest.mark.python],
-    LanguageServerId.PYTHON_PYREFLY: [pytest.mark.python],
-    LanguageServerId.PYTHON_BASEDPYRIGHT: [pytest.mark.python],
-    LanguageServerId.RUST: [pytest.mark.rust],
     LanguageServerId.TYPESCRIPT: [pytest.mark.typescript],
-    LanguageServerId.BSL: [pytest.mark.bsl],
-    LanguageServerId.SVELTE: [pytest.mark.svelte],
-    LanguageServerId.ANGULAR: [pytest.mark.angular],
+    LanguageServerId.CPP: [pytest.mark.cpp],
+    LanguageServerId.BASH: [pytest.mark.bash],
+    LanguageServerId.NIX: [pytest.mark.nix],
+    LanguageServerId.MATLAB: [pytest.mark.matlab],
+    LanguageServerId.MARKDOWN: [pytest.mark.markdown],
+    LanguageServerId.LATEX: [pytest.mark.latex],
+    LanguageServerId.YAML: [pytest.mark.yaml],
+    LanguageServerId.JSON: [pytest.mark.json],
+    LanguageServerId.TOML: [pytest.mark.toml],
     LanguageServerId.HTML: [pytest.mark.html],
     LanguageServerId.SCSS: [pytest.mark.scss],
 }
@@ -343,22 +311,6 @@ def get_pytest_markers(ls_id: LanguageServerId) -> list[MarkDecorator | Mark]:
     ]
 
 
-def _is_perl_language_server_available() -> bool:
-    """
-    Whether Perl::LanguageServer is installed.
-
-    Perl itself ships with most base systems, so checking for the ``perl`` binary is not enough;
-    we verify that the ``Perl::LanguageServer`` module can be loaded -- which is exactly what the
-    Perl language server launcher requires to start.
-    """
-    if _sh.which("perl") is None:
-        return False
-    try:
-        return subprocess.run(["perl", "-MPerl::LanguageServer", "-e", "1"], capture_output=True, timeout=30, check=False).returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
-
-
 def _is_matlab_available() -> bool:
     """Whether a MATLAB installation can be located (env var or a known install path)."""
     if os.environ.get("MATLAB_PATH") is not None:
@@ -374,169 +326,15 @@ def _is_matlab_available() -> bool:
     )
 
 
-def _is_r_language_server_available() -> bool:
-    """Whether R *and* its ``languageserver`` package are installed.
-
-    The R binary alone is not enough -- the language server runs as ``R -e "languageserver::run()"``,
-    which fails (RuntimeError) if the package is missing -- so check the package, not just ``which("R")``.
-    """
-    if _sh.which("R") is None:
-        return False
-    try:
-        return (
-            subprocess.run(
-                ["R", "--vanilla", "-e", 'quit(status = as.integer(!requireNamespace("languageserver", quietly = TRUE)))'],
-                capture_output=True,
-                timeout=60,
-                check=False,
-            ).returncode
-            == 0
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-
-
-def _is_ocaml_lsp_available() -> bool:
-    """Whether opam *and* the ``ocaml-lsp-server`` (``ocamllsp``) are installed.
-
-    opam alone is not enough -- the language server is launched via ``opam exec -- ocamllsp`` and
-    raises if the package is missing -- so verify ocamllsp resolves in the active switch.
-    """
-    if _sh.which("opam") is None:
-        return False
-    try:
-        return (
-            subprocess.run(
-                ["opam", "exec", "--", "ocamllsp", "--version"],
-                capture_output=True,
-                timeout=60,
-                check=False,
-            ).returncode
-            == 0
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-
-
-def _is_ruby_language_server_available() -> bool:
-    """Whether Ruby and the ruby-lsp gem are already available without privileged installation."""
-    if _sh.which("ruby") is None or _sh.which("gem") is None:
-        return False
-    try:
-        return subprocess.run(["gem", "list", "-i", "ruby-lsp"], capture_output=True, timeout=30, check=False).returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
-
-
 def _determine_disabled_language_servers() -> list[LanguageServerId]:
-    """
-    Determine which language server tests are disabled in the current environment.
-
-    Every language falls into exactly ONE of the categories below; a language that is not appended
-    here is **category 4 (enabled everywhere)**, e.g. python, typescript, go, java, kotlin-locally.
-
-    1. ALWAYS DISABLED -- flaky/broken; not worth running anywhere.
-    2. DISABLED OFF-CI when a precondition (toolchain/LS) is missing, but EXPECTED ON CI -- guarded
-       with ``and not is_ci`` so a missing tool *on CI* fails loudly (catches a CI setup regression)
-       instead of silently skipping.
-    3. DISABLED WHEREVER the precondition is missing, INCLUDING on CI -- the precondition may or may
-       not be provided on CI (e.g. via the maximal container, see Dockerfile.maximal); if it isn't,
-       the tests just skip gracefully rather than fail.
-    4. ENABLED EVERYWHERE -- not listed in this function at all.
-    5. DISABLED ONLY ON CI (resource/stability reasons) even though the precondition holds locally.
-    """
+    """Determines retained language-server suites unavailable in this environment."""
     result: list[LanguageServerId] = []
-
-    # === 1. Always disabled (flaky / broken everywhere) ===
-    result.append(LanguageServerId.BSL)  # 1C:Enterprise; niche and the tests are slow and flaky
-    result.append(LanguageServerId.FSHARP)  # F# language server is currently unreliable
-
-    # === 2. Disabled off-CI if the precondition is missing; expected to be present on CI ===
-    if _sh.which("terraform") is None and not is_ci:
-        result.append(LanguageServerId.TERRAFORM)
-    if _sh.which("go") is None and not is_ci:
-        result.append(LanguageServerId.GO)
-    if _sh.which("dotnet") is None and not is_ci:
-        result.append(LanguageServerId.CSHARP)
-    if _sh.which("pwsh") is None and _sh.which("powershell") is None and not is_ci:
-        result.append(LanguageServerId.POWERSHELL)
-    if not _is_ruby_language_server_available() and not is_ci:
-        result.append(LanguageServerId.RUBY)
-    if (_sh.which("zig") is None or _sh.which("zls") is None) and not is_ci:
-        result.append(LanguageServerId.ZIG)
-    if _sh.which("regal") is None and not is_ci:
-        result.append(LanguageServerId.REGO)
-    if _sh.which("elm") is None and not is_ci:
-        result.append(LanguageServerId.ELM)
-    # qmlls is installed (standalone build; see pytest.yml) only on the Ubuntu other-langs CI batch. It is
-    # expected there, so a missing binary on Linux CI is NOT skipped here -- the test runs and fails loudly,
-    # catching a CI setup regression. On Windows/macOS CI (never installed) and off-CI without the binary it skips.
-    if (_sh.which("qmlls6") is None and _sh.which("qmlls") is None) and not (is_ci and is_linux):
-        result.append(LanguageServerId.QML)
-    # gleam is installed (see pytest.yml) on the Ubuntu other-langs CI batch. Same rationale as
-    # qmlls: a missing binary on Linux CI is NOT skipped (fails loudly on a CI setup regression);
-    # Windows/macOS CI and off-CI without the binary skip.
-    if _sh.which("gleam") is None and not (is_ci and is_linux):
-        result.append(LanguageServerId.GLEAM)
-
-    # === 3. Disabled wherever the precondition is missing (including on CI) ===
-    # 3a. Platform precondition: these language servers have no native Windows support.
-    if is_windows:
-        result.append(LanguageServerId.ANSIBLE)  # ansible-language-server has no native Windows support
-    if not is_macos:
-        result.append(LanguageServerId.SWIFT)  # swiftly toolchain is only set up on the macOS native batch
-    # 3b. Toolchain / language-server availability (the LS/compiler must be on PATH or installed).
     if _sh.which("clangd") is None:
         result.append(LanguageServerId.CPP)
-    if _sh.which("ccls") is None or is_windows:  # no recent ccls binary is available for Windows
-        result.append(LanguageServerId.CPP_CCLS)
-    if _sh.which("php") is None:
-        result.append(LanguageServerId.PHP_PHPACTOR)
-        result.append(LanguageServerId.PHP_PHPANTOM)
-    if not is_clojure_cli_available():
-        result.append(LanguageServerId.CLOJURE)
-    if _sh.which("verible-verilog-ls") is None:
-        result.append(LanguageServerId.SYSTEMVERILOG)
     if not _is_matlab_available():
         result.append(LanguageServerId.MATLAB)
-    if ERLANG_LS_UNAVAILABLE:  # no Erlang-OTP / no rebar3 / Windows -- see test/solidlsp/erlang
-        result.append(LanguageServerId.ERLANG)
-    if EXPERT_UNAVAILABLE:  # Elixir not installed -- see test/solidlsp/elixir
-        result.append(LanguageServerId.ELIXIR)
-    if _sh.which("lean") is None:
-        result.append(LanguageServerId.LEAN4)
-    if _sh.which("crystalline") is None:
-        result.append(LanguageServerId.CRYSTAL)
-    if _sh.which("julia") is None:  # LanguageServer.jl is auto-installed by the LS when julia is present
-        result.append(LanguageServerId.JULIA)
     if _sh.which("nixd") is None:
         result.append(LanguageServerId.NIX)
-    if _sh.which("haskell-language-server-wrapper") is None:
-        result.append(LanguageServerId.HASKELL)
-    if not _is_r_language_server_available():  # `which("R")` isn't enough -- needs the languageserver package
-        result.append(LanguageServerId.R)
-    if not _is_ocaml_lsp_available():  # opam alone isn't enough -- needs the ocaml-lsp-server package
-        result.append(LanguageServerId.OCAML)
-    if not _is_perl_language_server_available():  # perl ships with the OS; the LS module is the real signal
-        result.append(LanguageServerId.PERL)
-    if _sh.which("deno") is None:  # deno bundles the language server (`deno lsp`); skip where the CLI is absent
-        result.append(LanguageServerId.DENO)
-
-    # === 4. Enabled everywhere: every language NOT listed in this function (python, go, java, ...) ===
-
-    # === 5. Disabled only on CI (works locally; too unstable/costly on the CI runners) ===
-    if is_ci:
-        result.append(LanguageServerId.KOTLIN)  # IntelliJ-based Kotlin LSP crashes on JVM restart under CI memory limits
-
-    # Disable Wolfram tests if WolframKernel is not available (checked with the same
-    # discovery logic used by the language server itself)
-    from solidlsp.language_servers.wolfram_language_server import _find_wolfram_kernel
-
-    try:
-        _find_wolfram_kernel()
-    except FileNotFoundError:
-        result.append(LanguageServerId.WOLFRAM)
-
     return result
 
 
@@ -575,14 +373,7 @@ def language_servers_supporting_implementation(*languages: LanguageServerId) -> 
     return [language for language in languages if ls_supports_implementation(language)]
 
 
-_VERIFIED_IMPLEMENTATION_LANGUAGES = {
-    LanguageServerId.ANGULAR,
-    LanguageServerId.CSHARP,
-    LanguageServerId.GO,
-    LanguageServerId.JAVA,
-    LanguageServerId.RUST,
-    LanguageServerId.TYPESCRIPT,
-}
+_VERIFIED_IMPLEMENTATION_LANGUAGES = {LanguageServerId.TYPESCRIPT}
 
 
 def ls_has_verified_implementation_support(language: LanguageServerId) -> bool:

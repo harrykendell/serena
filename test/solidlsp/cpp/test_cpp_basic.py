@@ -20,11 +20,11 @@ from test.conftest import get_repo_path, language_server_tests_enabled, start_ls
 from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, request_all_symbols
 
 _cpp_servers: list[LanguageServerId] = [LanguageServerId.CPP]
-if language_server_tests_enabled(LanguageServerId.CPP_CCLS):
-    _cpp_servers.append(LanguageServerId.CPP_CCLS)
+if language_server_tests_enabled(LanguageServerId.CPP):
+    _cpp_servers.append(LanguageServerId.CPP)
 
 
-@pytest.mark.parametrize("language", [LanguageServerId.CPP, LanguageServerId.CPP_CCLS])
+@pytest.mark.parametrize("language", [LanguageServerId.CPP, LanguageServerId.CPP])
 def test_source_fn_matcher_includes_ino(language: LanguageServerId) -> None:
     """Arduino .ino sketches are C++ and must route to the C++ language server.
 

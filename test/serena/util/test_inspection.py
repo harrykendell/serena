@@ -27,25 +27,25 @@ class TestComputeLanguageServerSupportComposition:
         assert composition[LanguageServerId.PYTHON] == 100.0
 
     def test_mixed_language_percentages_relative_to_recognised_files(self, tmp_path: Path) -> None:
-        _touch(tmp_path, "a.py", "b.py", "c.py", "d.go")
+        _touch(tmp_path, "a.py", "b.py", "c.py", "d.ts")
         _touch(tmp_path, *[f"asset_{i}.dat" for i in range(50)])
 
         composition = compute_language_server_support_composition(str(tmp_path))
 
         assert composition[LanguageServerId.PYTHON] == 75.0
-        assert composition[LanguageServerId.GO] == 25.0
+        assert composition[LanguageServerId.TYPESCRIPT] == 25.0
 
     def test_overlapping_language_servers_assign_each_file_once(self, tmp_path: Path) -> None:
-        _touch(tmp_path, "app.ts", "component.svelte")
+        _touch(tmp_path, "app.ts", "component.html")
 
         composition = compute_language_server_support_composition(
             str(tmp_path),
-            [LanguageServerId.TYPESCRIPT, LanguageServerId.SVELTE, LanguageServerId.VUE],
+            [LanguageServerId.TYPESCRIPT, LanguageServerId.HTML],
         )
 
         assert composition == {
             LanguageServerId.TYPESCRIPT: 50.0,
-            LanguageServerId.SVELTE: 50.0,
+            LanguageServerId.HTML: 50.0,
         }
 
     def test_embedded_test_fixture_repositories_do_not_define_project_languages(self, tmp_path: Path) -> None:

@@ -523,7 +523,7 @@ def test_go_symbol_replacement_no_double_keyword(snapshot: SnapshotAssertion):
     range extension prevents the duplicated keyword.
     """
     test_case = GoDeclReplacementTest(
-        LanguageServerId.GO,
+        LanguageServerId.PYTHON,
         "symbol_body.go",
         "NamedInt",
         GO_DECL_REPLACEMENT,
@@ -617,7 +617,7 @@ NEW_VUE_HANDLER = """const handleDoubleClick = () => {
     [
         pytest.param(
             DeleteSymbolTest(
-                LanguageServerId.VUE,
+                LanguageServerId.TYPESCRIPT,
                 VUE_TEST_FILE,
                 "handleMouseEnter",
             ),
@@ -635,7 +635,7 @@ def test_delete_symbol_vue(test_case: DeleteSymbolTest, snapshot: SnapshotAssert
     [
         pytest.param(
             InsertInRelToSymbolTest(
-                LanguageServerId.VUE,
+                LanguageServerId.TYPESCRIPT,
                 VUE_TEST_FILE,
                 "handleClick",
                 NEW_VUE_HANDLER,
@@ -666,7 +666,7 @@ VUE_REPLACED_HANDLECLICK_BODY = """const handleClick = () => {
     [
         pytest.param(
             ReplaceBodyTest(
-                LanguageServerId.VUE,
+                LanguageServerId.TYPESCRIPT,
                 VUE_TEST_FILE,
                 "handleClick",
                 VUE_REPLACED_HANDLECLICK_BODY,
@@ -687,7 +687,7 @@ VUE_REPLACED_PRESSCOUNT_BODY = """const pressCount = ref(100)"""
     [
         pytest.param(
             ReplaceBodyTest(
-                LanguageServerId.VUE,
+                LanguageServerId.TYPESCRIPT,
                 VUE_TEST_FILE,
                 "pressCount",
                 VUE_REPLACED_PRESSCOUNT_BODY,
@@ -726,7 +726,7 @@ VUE_STORE_REPLACED_CLEAR_BODY = """function clear() {
     [
         pytest.param(
             ReplaceBodyTest(
-                LanguageServerId.VUE,
+                LanguageServerId.TYPESCRIPT,
                 VUE_STORE_FILE,
                 "clear",
                 VUE_STORE_REPLACED_CLEAR_BODY,

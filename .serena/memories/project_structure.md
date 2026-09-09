@@ -13,7 +13,7 @@ Serena is an MCP-based "IDE for coding agents": semantic code retrieval/editing/
   - `code_editor.py`, `symbol.py`, `ls_manager.py` — symbolic editing / LS lifecycle
   - `dashboard.py`, `custom_dashboard.py` — browser dashboard backend and Kendell dashboard
   - `prompt_factory.py` — fixed ChatGPT prompts and Serena-local sandboxed Jinja rendering
-- `src/solidlsp/` — LSP client framework; per-language servers under `language_servers/`
+- `src/solidlsp/` — generic LSP client framework; retained adapters are Python, TypeScript/JavaScript, C/C++, LaTeX, Bash, Nix, HTML, SCSS/CSS, MATLAB, JSON, YAML, TOML, and Markdown
 - `test/serena/`, `test/solidlsp/<lang>/` — pytest suites; per-language tests gated by pytest markers
 - `test/resources/repos/<lang>/` — fixture projects used by language-server tests
 - `scripts/` — utilities (tool overview, profiling, maintenance)
