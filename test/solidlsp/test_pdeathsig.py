@@ -102,7 +102,7 @@ def test_language_server_process_survives_a_short_lived_calling_thread() -> None
     PR_SET_PDEATHSIG (per prctl(2)) ties the registration to the specific calling *thread*, not
     the process: if that thread terminates while the rest of the process lives on, the kernel
     delivers the death signal right then, even though "Serena" (the process) never died. Starting
-    a language server is dispatched through TaskExecutor onto exactly such a short-lived thread, so
+    a language server can be started from Serena's short-lived runtime-initialisation thread, so
     a naive preexec_fn registration kills the language server itself within milliseconds of a normal
     startup, independent of any real SIGKILL scenario -- this is the CI-only regression this test
     guards against.

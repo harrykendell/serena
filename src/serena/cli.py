@@ -36,6 +36,7 @@ from serena.constants import (
     SERENAS_OWN_CONTEXT_YAMLS_DIR,
     SERENAS_OWN_MODE_YAMLS_DIR,
 )
+from serena.execution import ExecutionAccess
 from serena.prompt_factory import SerenaPromptFactory
 from serena.tools import ActivateProjectTool
 from serena.util.cli_util import AutoRegisteringGroup
@@ -999,7 +1000,7 @@ class ProjectCommands(AutoRegisteringGroup):
 
                 # Test 1: Get symbols overview
                 log.info("Testing GetSymbolsOverviewTool on file: %s", target_file)
-                overview_data = agent.execute_task(lambda: overview_tool.get_symbol_overview(target_file))
+                overview_data = agent.execute_task(lambda: overview_tool.get_symbol_overview(target_file), access=ExecutionAccess.READ)
                 log.info(f"GetSymbolsOverviewTool returned: {overview_data}")
 
                 if not overview_data:
@@ -1026,7 +1027,8 @@ class ProjectCommands(AutoRegisteringGroup):
                 log.info("Testing FindSymbolTool for symbol: %s", symbol_name)
                 with find_symbol_tool.symbol_dict_grouper.disabled_context():
                     find_symbol_result = agent.execute_task(
-                        lambda: find_symbol_tool.apply(symbol_name, relative_path=target_file, include_body=True)
+                        lambda: find_symbol_tool.apply(symbol_name, relative_path=target_file, include_body=True),
+                        access=ExecutionAccess.READ,
                     )
                 find_symbol_data = json.loads(find_symbol_result)
                 log.info("FindSymbolTool found %d matches for symbol %s", len(find_symbol_data), symbol_name)
@@ -1035,7 +1037,9 @@ class ProjectCommands(AutoRegisteringGroup):
                 log.info("Testing FindReferencingSymbolsTool for symbol: %s", symbol_name)
                 try:
                     with find_refs_tool.symbol_dict_grouper.disabled_context():
-                        find_refs_result = agent.execute_task(lambda: find_refs_tool.apply(symbol_name, relative_path=target_file))
+                        find_refs_result = agent.execute_task(
+                            lambda: find_refs_tool.apply(symbol_name, relative_path=target_file), access=ExecutionAccess.READ
+                        )
                         find_refs_data = json.loads(find_refs_result)
                         log.info("FindReferencingSymbolsTool found %d references for symbol %s", len(find_refs_data), symbol_name)
                 except Exception as e:

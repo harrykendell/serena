@@ -33,7 +33,7 @@ from serena.agent import (
 from serena.config.context_mode import SerenaAgentContext
 from serena.config.serena_config import LanguageBackend, ModeSelectionDefinition, SerenaConfig
 from serena.constants import DEFAULT_CONTEXT, SERENA_LOG_FORMAT
-from serena.execution import bind_execution_id, get_current_execution_id, reset_execution_id
+from serena.execution import ExecutionAccess, bind_execution_id, get_current_execution_id, reset_execution_id
 from serena.session import get_mcp_session_id
 from serena.tools import Tool, ToolCallError
 from serena.tools.media_tools import read_result_file_link, register_file_export_resource
@@ -157,6 +157,7 @@ class SerenaFastMCPTool(FastMCPTool):
         self._param_aliases = tool.get_param_aliases()
         self._activity_tracker = activity_tracker
         self._agent = tool.agent
+        self._execution_access = tool.get_execution_access()
         self._execution_store = activity_tracker.execution_store if activity_tracker is not None else tool.agent.execution_store
 
     async def run(
@@ -219,7 +220,7 @@ class SerenaFastMCPTool(FastMCPTool):
             if descriptor is not None:
                 execution_store.set_retained_output(execution_id, descriptor.output_id, descriptor.total_chars)
 
-        # propagate the execution identifier through asyncio.to_thread and the legacy dispatcher thread
+        # propagate the execution identifier through the FastMCP worker thread
         execution_token = bind_execution_id(execution_id)
         try:
             try:
@@ -229,7 +230,28 @@ class SerenaFastMCPTool(FastMCPTool):
                 if self.context_kwarg is not None:
                     arguments_parsed[self.context_kwarg] = context
 
-                result = await asyncio.to_thread(self.fn, **arguments_parsed)
+                if self._execution_access is ExecutionAccess.SESSION_CONTROL:
+                    worker_task = asyncio.create_task(asyncio.to_thread(self.fn, **arguments_parsed))
+                else:
+                    with self._agent.submission_project_context(session_id):
+                        worker_task = asyncio.create_task(asyncio.to_thread(self.fn, **arguments_parsed))
+                try:
+                    result = await asyncio.wait_for(
+                        asyncio.shield(worker_task),
+                        timeout=self._agent.serena_config.tool_timeout,
+                    )
+                except TimeoutError as exc:
+                    # keep the worker alive so its project permit is held until the operation really returns;
+                    # consume any eventual exception because the timed-out MCP request no longer awaits it.
+                    def consume_worker_result(completed: asyncio.Task[Any]) -> None:
+                        try:
+                            completed.result()
+                        except BaseException:
+                            pass
+
+                    worker_task.add_done_callback(consume_worker_result)
+                    raise TimeoutError(f"Tool execution timed out after {self._agent.serena_config.tool_timeout} seconds") from exc
+
                 activity_result = result
                 if convert_result:
                     result = self.fn_metadata.convert_result(result)

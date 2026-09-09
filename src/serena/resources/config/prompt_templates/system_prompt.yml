@@ -47,11 +47,11 @@ prompts:
     
     Line numbers returned by Serena's tools are 0-based!
 
-    Serena executes tool calls one at a time internally, even when you request several at once. So whenever you have
-    independent operations to perform, you can safely issue them as parallel tool calls in a single turn: they are applied
-    in the order issued and cannot race with or corrupt one another, and batching them this way saves round-trips. Every
-    separate round-trip re-sends the whole growing context, so maximizing parallel tool calls is the single biggest lever
-    on cost — err on the side of batching. Only call tools sequentially when one genuinely depends on the result of another.
+    Serena coordinates conflicting operations per project: independent reads may overlap, project mutations receive
+    writer-preferring exclusive access, and different project runtimes remain independent. Whenever operations are
+    independent, issue them as parallel tool calls in a single turn and let Serena coordinate any conflicts safely.
+    Batching also saves round-trips and avoids repeatedly sending the growing conversation context. Call tools sequentially
+    only when one operation genuinely depends on the result of another.
     
     The context and modes of operation are described below. These determine how to interact with your user
     and which kinds of interactions are expected of you.

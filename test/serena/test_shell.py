@@ -4,10 +4,13 @@ import os
 import re
 import shlex
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Lock
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+
+import pytest
 
 from serena.execution import bind_execution_id, reset_execution_id
 from serena.tool_output import ToolOutputStore
@@ -50,6 +53,18 @@ def test_execute_shell_command_streams_output_before_process_exit() -> None:
     assert sink.content == "FIRST\nSECOND\n"
 
 
+def test_execute_shell_command_timeout_terminates_descendants(tmp_path) -> None:
+    """A timed-out shell command must reap its child process group before releasing control."""
+    marker = tmp_path / "survived.txt"
+    command = f"(sleep 0.3; printf survived > {shlex.quote(str(marker))}) & wait"
+
+    with pytest.raises(TimeoutError, match="timed out"):
+        execute_shell_command(command, timeout=0.05)
+
+    time.sleep(0.4)
+    assert not marker.exists()
+
+
 def test_execute_shell_command_uses_user_shell_environment(monkeypatch, tmp_path) -> None:
     """Foreground commands resolve executables from the enriched user-shell PATH."""
     custom_bin = tmp_path / "bin"
@@ -74,6 +89,7 @@ def test_shell_tool_oversize_response_reuses_live_transcript_id(tmp_path) -> Non
     agent.get_active_project_or_raise.return_value = SimpleNamespace(project_root=str(tmp_path))
     agent.serena_config.default_max_tool_answer_chars = 400
     agent.serena_config.default_max_tool_answer_tokens = 100
+    agent.serena_config.tool_timeout = 30
     agent.open_tool_output.side_effect = store.open
     agent.render_tool_output_tail.side_effect = store.render_tail
     agent.tool_is_active.return_value = True

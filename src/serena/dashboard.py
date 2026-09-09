@@ -25,7 +25,8 @@ from serena.analytics import ToolUsageStats
 from serena.config.serena_config import SerenaConfig, SerenaPaths
 from serena.constants import SERENA_DASHBOARD_DIR, SerenaPorts
 from serena.custom_dashboard import CustomDashboard
-from serena.task_executor import TaskExecutor
+from serena.execution import ExecutionAccess
+from serena.execution_store import ExecutionRecord
 from serena.util.logging import MemoryLogHandler
 from serena.util.pypi import PyPIPackageInfo
 from serena.util.pywebview import WebViewWithTray
@@ -131,14 +132,20 @@ class QueuedExecution(BaseModel):
     finished_successfully: bool
     logged: bool
 
+    @staticmethod
+    def task_id_for_execution(execution_id: str) -> int:
+        """Returns a stable legacy dashboard identifier for an execution record."""
+        return int(execution_id[:13], 16)
+
     @classmethod
-    def from_task_info(cls, task_info: TaskExecutor.TaskInfo) -> Self:
+    def from_execution_record(cls, record: ExecutionRecord) -> Self:
+        """Builds the legacy queued-execution view from canonical execution state."""
         return cls(
-            task_id=task_info.task_id,
-            is_running=task_info.is_running,
-            name=task_info.name,
-            finished_successfully=task_info.finished_successfully(),
-            logged=task_info.logged,
+            task_id=cls.task_id_for_execution(record.execution_id),
+            is_running=record.status == "running",
+            name=record.tool_name,
+            finished_successfully=record.status == "succeeded",
+            logged=True,
         )
 
 
@@ -437,8 +444,8 @@ class SerenaDashboardAPI:
         @self._app.route("/queued_task_executions", methods=["GET"])
         def get_queued_executions() -> dict[str, Any]:
             try:
-                current_executions = self._agent.get_current_tasks()
-                response = [QueuedExecution.from_task_info(task_info).model_dump() for task_info in current_executions]
+                current_executions = [record for record in self._agent.execution_store.list_executions() if record.status == "running"]
+                response = [QueuedExecution.from_execution_record(record).model_dump() for record in current_executions]
                 return {"queued_executions": response, "status": "success"}
             except Exception as e:
                 return {"status": "error", "message": str(e)}
@@ -448,14 +455,17 @@ class SerenaDashboardAPI:
             request_data = request.get_json()
             try:
                 request_cancel_task = RequestCancelTaskExecution.model_validate(request_data)
-                for task in self._agent.get_current_tasks():
-                    if task.task_id == request_cancel_task.task_id:
-                        task.cancel()
-                        return {"status": "success", "was_cancelled": True}
+                for record in self._agent.execution_store.list_executions():
+                    if QueuedExecution.task_id_for_execution(record.execution_id) == request_cancel_task.task_id:
+                        return {
+                            "status": "success",
+                            "was_cancelled": False,
+                            "message": "In-process tool execution cannot be force-cancelled safely; the project permit is retained until it stops.",
+                        }
                 return {
                     "status": "success",
                     "was_cancelled": False,
-                    "message": f"Task with id {escape(request_data.get('task_id'))} not found, maybe execution was already finished",
+                    "message": f"Task with id {escape(str(request_data.get('task_id')))} not found, maybe execution was already finished",
                 }
             except Exception as e:
                 return {"status": "error", "message": str(e), "was_cancelled": False}
@@ -463,8 +473,8 @@ class SerenaDashboardAPI:
         @self._app.route("/last_execution", methods=["GET"])
         def get_last_execution() -> dict[str, Any]:
             try:
-                last_execution_info = self._agent.get_last_executed_task()
-                response = QueuedExecution.from_task_info(last_execution_info).model_dump() if last_execution_info is not None else None
+                completed = [record for record in self._agent.execution_store.list_executions() if record.status != "running"]
+                response = QueuedExecution.from_execution_record(completed[0]).model_dump() if completed else None
                 return {"last_execution": response, "status": "success"}
             except Exception as e:
                 return {"status": "error", "message": str(e)}
@@ -673,7 +683,7 @@ class SerenaDashboardAPI:
 
             return ResponseAvailableLanguages(languages=sorted(available_languages))
 
-        return self._agent.execute_task(run, logged=False)
+        return self._agent.execute_task(run, logged=False, access=ExecutionAccess.READ)
 
     def _get_memory(self, request_get_memory: RequestGetMemory) -> ResponseGetMemory:
         def run() -> ResponseGetMemory:
@@ -684,7 +694,7 @@ class SerenaDashboardAPI:
             content = project.memory_manager.load_memory(request_get_memory.memory_name)
             return ResponseGetMemory(content=content, memory_name=request_get_memory.memory_name)
 
-        return self._agent.execute_task(run, logged=False)
+        return self._agent.execute_task(run, logged=False, access=ExecutionAccess.READ)
 
     def _save_memory(self, request_save_memory: RequestSaveMemory) -> None:
         def run() -> None:
@@ -693,7 +703,7 @@ class SerenaDashboardAPI:
                 raise ValueError("No active project")
             project.memory_manager.save_memory(request_save_memory.memory_name, request_save_memory.content, is_tool_context=False)
 
-        self._agent.execute_task(run, logged=True, name="SaveMemory")
+        self._agent.execute_task(run, logged=True, name="SaveMemory", access=ExecutionAccess.WRITE)
 
     def _delete_memory(self, request_delete_memory: RequestDeleteMemory) -> None:
         def run() -> None:
@@ -702,7 +712,7 @@ class SerenaDashboardAPI:
                 raise ValueError("No active project")
             project.memory_manager.delete_memory(request_delete_memory.memory_name, is_tool_context=False)
 
-        self._agent.execute_task(run, logged=True, name="DeleteMemory")
+        self._agent.execute_task(run, logged=True, name="DeleteMemory", access=ExecutionAccess.WRITE)
 
     def _rename_memory(self, request_rename_memory: RequestRenameMemory) -> str:
         def run() -> str:
@@ -712,7 +722,7 @@ class SerenaDashboardAPI:
 
             return project.memory_manager.move_memory(request_rename_memory.old_name, request_rename_memory.new_name, is_tool_context=False)
 
-        return self._agent.execute_task(run, logged=True, name="RenameMemory")
+        return self._agent.execute_task(run, logged=True, name="RenameMemory", access=ExecutionAccess.WRITE)
 
     def _get_serena_config(self) -> ResponseGetSerenaConfig:
         config_path = self._agent.serena_config.config_file_path
@@ -733,7 +743,7 @@ class SerenaDashboardAPI:
             with open(config_path, "w", encoding="utf-8") as f:
                 f.write(request_save_config.content)
 
-        self._agent.execute_task(run, logged=True, name="SaveSerenaConfig")
+        self._agent.execute_task(run, logged=True, name="SaveSerenaConfig", access=ExecutionAccess.WRITE)
 
     # ===== Remote News Methods =====
 

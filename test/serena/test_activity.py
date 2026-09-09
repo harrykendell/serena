@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,8 @@ from serena.tools import Tool
 
 
 class _MockAgent:
+    serena_config = SimpleNamespace(tool_timeout=30)
+
     @staticmethod
     def get_context() -> SerenaAgentContext:
         return SerenaAgentContext.load_default()
@@ -26,6 +29,11 @@ class _MockAgent:
     @staticmethod
     def get_active_project_for_session(session_id: str):
         return None
+
+    @staticmethod
+    def submission_project_context(session_id: str):
+        del session_id
+        return nullcontext()
 
 
 class _EchoCommandTool(Tool):

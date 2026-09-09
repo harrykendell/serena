@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import RequestParams
 
 from serena.activity import ActivityTracker
@@ -133,8 +134,6 @@ def test_startup_project_sessions_share_serialization(tmp_path: Path, monkeypatc
                 catch_exceptions=False,
             )
             assert not second_entered.wait(timeout=0.25)
-            write_tasks = [task for task in agent.get_current_tasks() if "CreateTextFileTool" in task.name]
-            assert len(write_tasks) == 2
             release_first.set()
             first.result(timeout=5)
             second.result(timeout=5)
@@ -253,10 +252,6 @@ def test_project_runtime_initialization_is_independent_across_projects(
         release_project_a_init.set()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="F05 gives ProjectRuntime an explicit FAILED readiness state shared by all bound sessions.",
-)
 def test_runtime_initialization_failure_is_shared_by_bound_sessions(
     multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -379,10 +374,6 @@ def test_different_project_reads_can_interleave(
         assert second.result(timeout=5) == "beta"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="F05 replaces the per-project FIFO with a reader/writer coordinator so plain reads can overlap.",
-)
 def test_same_project_plain_reads_can_overlap(
     multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -585,10 +576,6 @@ def test_same_project_writes_are_serialized(
     assert (roots["project_a"] / "second.txt").read_text() == "second"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="F05 keeps the writer permit until the timed-out operation has actually stopped.",
-)
 def test_timed_out_writer_keeps_exclusion_until_operation_stops(
     multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -611,7 +598,6 @@ def test_timed_out_writer_keeps_exclusion_until_operation_stops(
         return original_apply(relative_path=relative_path, content=content)
 
     monkeypatch.setattr(tool, "apply", blocking_apply)
-    agent.serena_config.tool_timeout = 0.15
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         first = executor.submit(
@@ -622,10 +608,9 @@ def test_timed_out_writer_keeps_exclusion_until_operation_stops(
             catch_exceptions=False,
         )
         assert first_entered.wait(timeout=5)
-        with pytest.raises(ToolCallError, match="timed out"):
-            first.result(timeout=2)
+        with pytest.raises(TimeoutError):
+            first.result(timeout=0.15)
 
-        agent.serena_config.tool_timeout = 2
         second = executor.submit(
             tool.apply_ex,
             relative_path="second.txt",
@@ -637,7 +622,61 @@ def test_timed_out_writer_keeps_exclusion_until_operation_stops(
             assert not second_entered.wait(timeout=0.3)
         finally:
             release_first.set()
+        first.result(timeout=5)
         second.result(timeout=5)
+
+
+def test_mcp_timeout_returns_before_worker_without_releasing_write_exclusion(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "session-a", "project_a")
+    _activate(agent, "session-b", "project_a")
+
+    tool = agent.get_tool(CreateTextFileTool)
+    original_apply = tool.apply
+    first_entered = threading.Event()
+    second_entered = threading.Event()
+    release_first = threading.Event()
+
+    def blocking_apply(relative_path: str, content: str) -> str:
+        if relative_path == "first.txt":
+            first_entered.set()
+            assert release_first.wait(timeout=5)
+        elif relative_path == "second.txt":
+            second_entered.set()
+        return original_apply(relative_path=relative_path, content=content)
+
+    monkeypatch.setattr(tool, "apply", blocking_apply)
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(tool)
+
+    async def scenario() -> None:
+        agent.serena_config.tool_timeout = 0.15
+        first = asyncio.create_task(
+            mcp_tool.run(
+                {"relative_path": "first.txt", "content": "first"},
+                context=_mcp_context("session-a"),
+            )
+        )
+        assert await asyncio.to_thread(first_entered.wait, 5)
+        with pytest.raises(ToolError, match="timed out"):
+            await first
+
+        agent.serena_config.tool_timeout = 2
+        second = asyncio.create_task(
+            mcp_tool.run(
+                {"relative_path": "second.txt", "content": "second"},
+                context=_mcp_context("session-b"),
+            )
+        )
+        await asyncio.sleep(0.3)
+        assert not second_entered.is_set()
+
+        release_first.set()
+        await second
+        assert second_entered.is_set()
+
+    asyncio.run(scenario())
 
 
 def test_switching_one_session_does_not_shutdown_shared_project(
@@ -696,17 +735,18 @@ def test_queued_tool_remains_pinned_to_project_selected_at_submission(
         return original_activate(project=project, session_id=session_id)
 
     monkeypatch.setattr(activation_tool, "apply", blocking_activate)
+
     read_tool = agent.get_tool(ReadFileTool)
-    original_issue_task = agent.issue_task
-    read_submitted = threading.Event()
+    original_read = read_tool.apply
+    read_entered = threading.Event()
+    release_read = threading.Event()
 
-    def tracking_issue_task(*args: Any, **kwargs: Any):
-        task = original_issue_task(*args, **kwargs)
-        if kwargs.get("name") == "ReadFileTool":
-            read_submitted.set()
-        return task
+    def blocking_read(relative_path: str, start_line: int = 0, end_line: int | None = None, max_answer_chars: int = -1) -> str:
+        read_entered.set()
+        assert release_read.wait(timeout=5)
+        return original_read(relative_path, start_line, end_line, max_answer_chars)
 
-    monkeypatch.setattr(agent, "issue_task", tracking_issue_task)
+    monkeypatch.setattr(read_tool, "apply", blocking_read)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         activation = executor.submit(
@@ -717,19 +757,58 @@ def test_queued_tool_remains_pinned_to_project_selected_at_submission(
         )
         assert activation_entered.wait(timeout=5)
 
-        queued_read = executor.submit(
+        submitted_read = executor.submit(
             read_tool.apply_ex,
             relative_path="value.txt",
             mcp_ctx=_mcp_context("session-a"),
             catch_exceptions=False,
         )
-        assert read_submitted.wait(timeout=5)
+        assert read_entered.wait(timeout=5)
+
         release_activation.set()
-
         assert "project_b" in activation.result(timeout=5)
-        assert queued_read.result(timeout=5) == "alpha"
+        assert agent.get_active_project_for_session("session-a").project_name == "project_b"
 
-    assert agent.get_active_project_for_session("session-a").project_name == "project_b"
+        release_read.set()
+        assert submitted_read.result(timeout=5) == "alpha"
+
+
+def test_mcp_tool_pins_project_before_fastmcp_worker_starts(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, roots = multi_project_agent
+    (roots["project_a"] / "value.txt").write_text("alpha")
+    (roots["project_b"] / "value.txt").write_text("beta")
+    _activate(agent, "session-a", "project_a")
+
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(ReadFileTool))
+    original_to_thread = asyncio.to_thread
+    worker_scheduled = asyncio.Event()
+    release_worker = asyncio.Event()
+
+    async def delayed_to_thread(function, /, *args, **kwargs):
+        worker_scheduled.set()
+        await release_worker.wait()
+        return await original_to_thread(function, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", delayed_to_thread)
+
+    async def scenario() -> None:
+        submitted_read = asyncio.create_task(
+            mcp_tool.run(
+                {"relative_path": "value.txt"},
+                context=_mcp_context("session-a"),
+            )
+        )
+        await asyncio.wait_for(worker_scheduled.wait(), timeout=5)
+
+        _activate(agent, "session-a", "project_b")
+        assert agent.get_active_project_for_session("session-a").project_name == "project_b"
+
+        release_worker.set()
+        assert await asyncio.wait_for(submitted_read, timeout=5) == "alpha"
+
+    asyncio.run(scenario())
 
 
 def test_activation_message_embeds_memories_from_new_project(multi_project_agent: tuple[SerenaAgent, dict[str, Path]]) -> None:

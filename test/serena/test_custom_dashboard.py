@@ -10,7 +10,6 @@ from serena.custom_dashboard import DashboardExecutionHistory, DashboardJobOverv
 from serena.dashboard import SerenaDashboardAPI
 from serena.execution_store import ExecutionStore
 from serena.jobs import JobPersistenceInfo, JobRecord, JobRuntimeInfo, JobSnapshot, JobStatus
-from serena.task_executor import TaskExecutor
 from serena.tool_output import ToolOutputPage
 from solidlsp.ls_config import LanguageServerId
 
@@ -39,7 +38,6 @@ class _DashboardAgent:
         self.version = "0.0.0"
         self.callbacks = []
         self.project = project
-        self.current_tasks: list[TaskExecutor.TaskInfo] = []
         self.output_descriptor: object | None = None
         self.output_page: ToolOutputPage | None = None
         self.execution_store = ExecutionStore()
@@ -53,9 +51,6 @@ class _DashboardAgent:
     def get_default_project(self):
         return self.project
 
-    def get_current_tasks(self):
-        return list(self.current_tasks)
-
     def describe_tool_execution_output(self, execution_name: str):
         del execution_name
         return self.output_descriptor
@@ -63,9 +58,6 @@ class _DashboardAgent:
     def read_tool_execution_tail(self, execution_name: str, max_chars: int):
         del execution_name, max_chars
         return self.output_page
-
-    def get_last_executed_task(self):
-        return None
 
     def get_active_tool_names(self):
         return []

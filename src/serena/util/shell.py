@@ -7,7 +7,7 @@ from typing import Protocol
 from pydantic import BaseModel
 
 from mcp_runtime.shell_environment import user_shell_environment
-from solidlsp.util.subprocess_util import subprocess_kwargs
+from solidlsp.util.subprocess_util import subprocess_kwargs, terminate_process_tree_with_kill_fallback
 
 
 class ShellOutputSink(Protocol):
@@ -29,6 +29,7 @@ def execute_shell_command(
     cwd: str | None = None,
     capture_stderr: bool = False,
     output_sink: ShellOutputSink | None = None,
+    timeout: float | None = None,
 ) -> ShellCommandResult:
     """
     Execute a shell command and return the output.
@@ -37,10 +38,17 @@ def execute_shell_command(
     :param cwd: The working directory to execute the command in. If None, the current working directory will be used.
     :param capture_stderr: Whether to capture the stderr output.
     :param output_sink: Optional destination receiving decoded stdout/stderr chunks while the process is running.
+    :param timeout: Optional wall-clock timeout in seconds. Timed-out commands are terminated and reaped before returning.
     :return: The output of the command.
     """
     if cwd is None:
         cwd = os.getcwd()
+
+    # isolate the command in its own POSIX process group so timeout cleanup can terminate descendants safely
+    popen_kwargs = subprocess_kwargs()
+    process_group_id: int | None = None
+    if os.name == "posix":
+        popen_kwargs["start_new_session"] = True
 
     process = subprocess.Popen(
         command,
@@ -50,8 +58,10 @@ def execute_shell_command(
         stderr=subprocess.PIPE if capture_stderr else None,
         cwd=cwd,
         env=user_shell_environment(),
-        **subprocess_kwargs(),
+        **popen_kwargs,
     )
+    if os.name == "posix":
+        process_group_id = process.pid
     assert process.stdout is not None
 
     stdout_chunks: list[str] = []
@@ -81,10 +91,20 @@ def execute_shell_command(
         stderr_thread = Thread(target=consume_stream, args=(process.stderr, stderr_chunks), name="ShellStderrReader")
         stderr_thread.start()
 
-    process.wait()
-    stdout_thread.join()
-    if stderr_thread is not None:
-        stderr_thread.join()
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        terminate_process_tree_with_kill_fallback(
+            process,
+            terminate_timeout=2.0,
+            process_name="Shell command",
+            process_group_id=process_group_id,
+        )
+        raise TimeoutError(f"Shell command timed out after {timeout} seconds") from exc
+    finally:
+        stdout_thread.join()
+        if stderr_thread is not None:
+            stderr_thread.join()
 
     return ShellCommandResult(
         stdout="".join(stdout_chunks),

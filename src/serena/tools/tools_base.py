@@ -476,26 +476,21 @@ class Tool(Component):
 
             return result
 
-        # execute the tool in the agent's task executor, with timeout
-        # (task timeout bounds task execution in the dispatcher once it runs, result timeout limits the time we wait)
+        # execute directly in the existing FastMCP worker thread under the project coordinator.
+        # MCP-level timeout may stop waiting for this worker, but the coordinator permit remains
+        # held until ``task`` really returns.
         tool_call_error: ToolCallError
-        timeout = self.agent.serena_config.tool_timeout
         try:
-            task_exec = self.agent.issue_task(
+            return self.agent.execute_tool_call(
                 task,
-                name=self.__class__.__name__,
-                timeout=timeout,
+                access=self.get_execution_access(),
                 session_id=session_id,
                 execution_id=execution_id,
+                symbolic_read=isinstance(self, ToolMarkerSymbolicRead),
             )
-            return task_exec.result(timeout=timeout)
         except ToolCallError as e:
             tool_call_error = e
-        except TimeoutError:
-            msg = f"Tool execution timed out after {timeout} seconds. "
-            log.error(msg)
-            tool_call_error = ToolCallError(msg)
-        except Exception as e:  # unexpected errors (exceptions in the task itself are caught and forwarded as ToolCallError)
+        except Exception as e:  # unexpected errors in coordination or task execution
             msg = f"{e.__class__.__name__}: {e}"
             log.error(msg)
             tool_call_error = ToolCallError(msg)

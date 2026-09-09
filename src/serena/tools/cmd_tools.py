@@ -49,7 +49,13 @@ class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit):
 
         # stream a live transcript keyed to this exact model-visible execution
         with self.agent.open_tool_output(self.get_name(), execution_id=get_current_execution_id()) as output_writer:
-            result = execute_shell_command(command, cwd=_cwd, capture_stderr=capture_stderr, output_sink=output_writer)
+            result = execute_shell_command(
+                command,
+                cwd=_cwd,
+                capture_stderr=capture_stderr,
+                output_sink=output_writer,
+                timeout=self.agent.serena_config.tool_timeout,
+            )
         result_json = result.model_dump_json()
         if len(result_json) <= effective_max_answer_chars:
             return result_json

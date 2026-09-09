@@ -25,8 +25,8 @@ class _DummyAgent:
     def register_config_changed_callback(self, callback: Callable[[], None]) -> None:
         pass
 
-    def execute_task(self, func, *, logged: bool | None = None, name: str | None = None):
-        del logged, name
+    def execute_task(self, func, *, logged: bool | None = None, name: str | None = None, access=None):
+        del logged, name, access
         return func()
 
     def get_active_project(self):
