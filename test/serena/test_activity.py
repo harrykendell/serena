@@ -12,7 +12,6 @@ from mcp.types import CallToolResult, RequestParams, ResourceLink
 from pydantic import AnyUrl
 
 from serena.activity import ACTIVITY_RESOURCE_URI, ActivityTracker, get_mcp_session_id, register_activity_resource
-from serena.config.context_mode import SerenaAgentContext
 from serena.execution_store import ExecutionStore
 from serena.jobs import JobOutputChunk, JobRecord, JobRuntimeInfo, JobSnapshot, JobStatus
 from serena.mcp import SerenaMCPFactory
@@ -21,10 +20,6 @@ from serena.tools import Tool
 
 class _MockAgent:
     serena_config = SimpleNamespace(tool_timeout=30)
-
-    @staticmethod
-    def get_context() -> SerenaAgentContext:
-        return SerenaAgentContext.load_default()
 
     @staticmethod
     def get_active_project_for_session(session_id: str):
@@ -592,7 +587,7 @@ def test_activity_tools_expose_widget_and_private_polling_contract() -> None:
             return None
 
     async def inspect_tools() -> dict[str, object]:
-        factory = SerenaMCPFactory(transport="stdio", context="chatgpt")
+        factory = SerenaMCPFactory(transport="stdio")
         factory.agent = Agent()  # type: ignore[assignment]
         factory._activity_tracker = ActivityTracker(_FakeJobSource())
         mcp = FastMCP("activity-test")

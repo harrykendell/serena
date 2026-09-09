@@ -59,16 +59,13 @@ class DashboardSessionOverview:
             languages = [language.value for language in project.get_language_server_candidates()]
             memories = project.memory_manager.list_memories().get_full_list()
 
-        active_tools = self._agent.get_active_tool_names()
-        modes = self._agent.get_active_modes().get_modes(include_background_base_modes=False)
         return {
             "status": "success",
             "active_project": project_info,
             "languages": languages,
-            "context": self._agent.get_context().name,
-            "modes": [mode.name for mode in modes],
+            "runtime_policy": "ChatGPT",
             "serena_version": self._agent.version,
-            "active_tools": active_tools,
+            "active_tools": self._agent.get_active_tool_names(),
             "total_tools": len(self._agent.get_exposed_tool_instances()),
             "available_memories": memories,
         }

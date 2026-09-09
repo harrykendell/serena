@@ -799,7 +799,6 @@ def serena_config():
                     project_name=project_name,
                     language_servers=[language],
                     ignored_paths=[],
-                    excluded_tools=[],
                     read_only=False,
                     ignore_all_files_in_gitignore=True,
                     initial_prompt="",
@@ -1396,46 +1395,6 @@ class TestPromptProvision:
 
         result3 = self._call_tool(serena_agent, InitialInstructionsTool, session_id=session1)
         self._assert_activation_message(result3, project_name, present=False)
-
-    @pytest.mark.parametrize("serena_agent", [LanguageServerId.PYTHON], indirect=True)
-    def test_dynamically_activated_mode_is_scoped_to_session(self, serena_agent: SerenaAgent) -> None:
-        """
-        Tests that a project-specific mode activated in one MCP session does not leak into another session.
-        """
-        startup_project_name = "test_repo_python"
-        activated_project_name = "test_repo_java"
-        session1 = "session1"
-        session2 = "session2"
-
-        # the first session initially resolves to the startup project
-        result1 = self._call_tool(serena_agent, InitialInstructionsTool, session_id=session1)
-        self._assert_activation_message(result1, startup_project_name, present=True)
-
-        # activate another project which dynamically enables a new mode (no-onboarding) for session1
-        reg_project = serena_agent.serena_config.get_registered_project(activated_project_name)
-        reg_project.project_config.default_modes = ["no-onboarding"]
-        expected_new_mode_message = "The onboarding process is not applied."
-        result2 = self._call_tool(serena_agent, ActivateProjectTool, project=activated_project_name, session_id=session1)
-
-        # the new mode's prompt is included once at activation
-        self._assert_activation_message(result2, activated_project_name, present=True)
-        assert expected_new_mode_message in result2, (
-            f"Expected new mode message '{expected_new_mode_message}' not found in result:\n{result2}"
-        )
-
-        # subsequent instructions in the same session do not repeat that activation-only prompt
-        result3 = self._call_tool(serena_agent, InitialInstructionsTool, session_id=session1)
-        assert expected_new_mode_message not in result3, (
-            f"Expected new mode message '{expected_new_mode_message}' to not be included in subsequent calls, but it was found in result:\n{result3}"
-        )
-
-        # an unrelated session remains on the immutable startup project and does not inherit session1's mode
-        result4 = self._call_tool(serena_agent, InitialInstructionsTool, session_id=session2)
-        assert expected_new_mode_message not in result4, (
-            f"Expected session-local mode message '{expected_new_mode_message}' to be absent in a new session, but it was found in result:\n{result4}"
-        )
-        self._assert_activation_message(result4, startup_project_name, present=True)
-        self._assert_activation_message(result4, activated_project_name, present=False)
 
     @pytest.mark.parametrize("serena_agent", [LanguageServerId.PYTHON], indirect=True)
     def test_activate_project_tool_always_returns_activation_message(self, serena_agent: SerenaAgent) -> None:

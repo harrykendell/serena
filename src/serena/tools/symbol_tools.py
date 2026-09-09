@@ -16,13 +16,12 @@ from serena.tools import (
     ToolMarkerSymbolicEdit,
     ToolMarkerSymbolicRead,
 )
-from serena.tools.tools_base import ToolMarkerOptional
 from serena.util.ls_diagnostics import GroupedDiagnostics
 from serena.util.text_utils import find_text_coordinates
 from solidlsp.ls_types import SymbolKind
 
 
-class RestartLanguageServerTool(Tool, ToolMarkerOptional):
+class RestartLanguageServerTool(Tool):
     """Restarts the language server(s)."""
 
     def apply(self) -> str:
@@ -561,7 +560,7 @@ class GetDiagnosticsForFileTool(Tool, ToolMarkerSymbolicRead):
         return self._limit_length(result, max_answer_chars)
 
 
-class GetDiagnosticsForSymbolTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional):
+class GetDiagnosticsForSymbolTool(Tool, ToolMarkerSymbolicRead):
     """
     Gets diagnostics for a symbol and, optionally, for symbols that reference it.
     """

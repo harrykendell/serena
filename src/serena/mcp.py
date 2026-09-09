@@ -30,9 +30,9 @@ from serena.activity import ACTIVITY_RESOURCE_URI, ActivityMedia, ActivityTracke
 from serena.agent import (
     SerenaAgent,
 )
-from serena.config.context_mode import SerenaAgentContext
-from serena.config.serena_config import ModeSelectionDefinition, SerenaConfig
-from serena.constants import DEFAULT_CONTEXT, SERENA_LOG_FORMAT
+from serena.chatgpt_policy import CHATGPT_TOOL_DESCRIPTION_OVERRIDES
+from serena.config.serena_config import SerenaConfig
+from serena.constants import SERENA_LOG_FORMAT
 from serena.execution import ExecutionAccess, bind_execution_id, get_current_execution_id, reset_execution_id
 from serena.session import get_mcp_session_id
 from serena.tools import Tool, ToolCallError
@@ -91,8 +91,8 @@ class SerenaFastMCPTool(FastMCPTool):
 
         docstring = docstring_parser.parse(func_doc)
 
-        # mount the tool description from the docstring and return description
-        overridden_description = tool.agent.get_context().tool_description_overrides.get(func_name, None)
+        # mount the fixed ChatGPT tool description override, if any
+        overridden_description = CHATGPT_TOOL_DESCRIPTION_OVERRIDES.get(func_name)
 
         if overridden_description is not None:
             func_doc = overridden_description
@@ -325,18 +325,15 @@ class SerenaMCPFactory:
     def __init__(
         self,
         transport: Literal["stdio", "sse", "streamable-http"],
-        context: str = DEFAULT_CONTEXT,
         project: str | None = None,
     ):
         """
-        :param transport: The transport to use for the MCP server.
-        :param context: The context name or path to context file
-        :param project: Either an absolute path to the project directory or a name of an already registered project.
-            If the project passed here hasn't been registered yet, it will be registered automatically and can be activated by its name
-            afterward.
+        Creates the fixed ChatGPT Serena MCP runtime.
+
+        :param transport: transport to use for the MCP server
+        :param project: absolute project path or registered project name to activate at startup
         """
         self.transport = transport
-        self.context = SerenaAgentContext.load(context)
         self.project = project
         self.agent: SerenaAgent | None = None
         self._activity_tracker: ActivityTracker | None = None
@@ -523,8 +520,7 @@ class SerenaMCPFactory:
                     activity_tracker=self._activity_tracker,
                 )
                 mcp._tool_manager._tools[tool.get_name()] = mcp_tool
-            if self.context.name == "chatgpt":
-                self._register_activity_tools(mcp)
+            self._register_activity_tools(mcp)
             log.info(f"Starting MCP server with {len(mcp._tool_manager._tools)} tools: {list(mcp._tool_manager._tools.keys())}")
 
     def _register_activity_tools(self, mcp: FastMCP) -> None:
@@ -670,15 +666,12 @@ class SerenaMCPFactory:
     def _create_serena_agent(
         self,
         serena_config: SerenaConfig,
-        modes: ModeSelectionDefinition | None = None,
         project_activation_error: str | None = None,
         web_dashboard_port: int | None = None,
     ) -> SerenaAgent:
         return SerenaAgent(
             project=self.project,
             serena_config=serena_config,
-            context=self.context,
-            modes=modes,
             project_activation_error=project_activation_error,
             web_dashboard_port=web_dashboard_port,
         )
@@ -688,7 +681,6 @@ class SerenaMCPFactory:
         host: str = "127.0.0.1",
         port: int = 8000,
         streamable_http_path: str = "/mcp",
-        mode_selection_def: ModeSelectionDefinition | None = None,
         enable_web_dashboard: bool | None = None,
         web_dashboard_port: int | None = None,
         open_web_dashboard: bool | None = None,
@@ -698,52 +690,46 @@ class SerenaMCPFactory:
         project_activation_error: str | None = None,
     ) -> FastMCP:
         """
-        Create an MCP server with process-isolated SerenaAgent to prevent asyncio contamination.
+        Creates the fixed ChatGPT MCP server.
 
-        :param host: The host to bind to
-        :param port: The port to bind to
-        :param streamable_http_path: Streamable HTTP endpoint path exposed by the server.
-        :param mode_selection_def: the mode selection definition to apply
-        :param enable_web_dashboard: Whether to enable the web dashboard. If not specified, will take the value from the serena configuration.
-        :param web_dashboard_port: Exact dashboard port to bind. If omitted, secondary dashboard instances start searching at port 24283.
-        :param open_web_dashboard: Whether to open the web dashboard on launch.
-            If not specified, will take the value from the serena configuration.
-        :param log_level: Log level. If not specified, will take the value from the serena configuration.
-        :param trace_lsp_communication: Whether to trace the communication between Serena and the language servers.
-            This is useful for debugging language server issues.
-        :param tool_timeout: Timeout in seconds for tool execution. If not specified, will take the value from the serena configuration.
-        :param project_activation_error: an initial project activation error to report back to the client
+        :param host: host to bind to
+        :param port: port to bind to
+        :param streamable_http_path: streamable HTTP endpoint path
+        :param enable_web_dashboard: optional dashboard-enabled override
+        :param web_dashboard_port: optional exact dashboard port
+        :param open_web_dashboard: optional dashboard launch override
+        :param log_level: optional log-level override
+        :param trace_lsp_communication: optional LSP tracing override
+        :param tool_timeout: optional tool execution timeout override
+        :param project_activation_error: initial project activation error to report to the client
+        :return: configured FastMCP server
         """
         try:
             config = SerenaConfig.from_config_file()
 
-            # update configuration with the provided parameters
+            # apply runtime deployment overrides
             if enable_web_dashboard is not None:
                 config.web_dashboard = enable_web_dashboard
             if open_web_dashboard is not None:
                 config.web_dashboard_open_on_launch = open_web_dashboard
             if log_level is not None:
-                log_level = cast(Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], log_level.upper())
-                config.log_level = logging.getLevelNamesMapping()[log_level]
+                normalized_level = cast(Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], log_level.upper())
+                config.log_level = logging.getLevelNamesMapping()[normalized_level]
             if trace_lsp_communication is not None:
                 config.trace_lsp_communication = trace_lsp_communication
             if tool_timeout is not None:
                 config.tool_timeout = tool_timeout
             self.agent = self._create_serena_agent(
                 config,
-                modes=mode_selection_def,
                 project_activation_error=project_activation_error,
                 web_dashboard_port=web_dashboard_port,
             )
-            self._activity_tracker = ActivityTracker(execution_store=self.agent.execution_store) if self.context.name == "chatgpt" else None
-
+            self._activity_tracker = ActivityTracker(execution_store=self.agent.execution_store)
         except Exception as e:
             show_fatal_exception_safe(e)
             raise
 
-        # Override model_config to disable the use of `.env` files for reading settings, because user projects are likely to contain
-        # `.env` files (e.g. containing LOG_LEVEL) that are not supposed to override the MCP settings;
-        # retain only FASTMCP_ prefix for already set environment variables.
+        # isolate FastMCP settings from project-local .env files
         Settings.model_config = SettingsConfigDict(env_prefix="FASTMCP_")
         instructions = self._get_initial_instructions()
         log.info("MCP server initial instructions:\n%s", instructions)
@@ -758,29 +744,22 @@ class SerenaMCPFactory:
             instructions=instructions,
         )
         register_file_export_resource(mcp)
-        if self.context.name == "chatgpt":
-            register_activity_resource(mcp)
+        register_activity_resource(mcp)
         return mcp
 
     @asynccontextmanager
     async def server_lifespan(self, mcp_server: FastMCP) -> AsyncIterator[None]:
         """
-        Manages the lifespan of MCP server instances and performs necessary setup and teardown.
-        For stdio transport, there is a single server instance.
-        For other transports, this is called once per connection!
+        Configures one fixed ChatGPT tool surface for the MCP connection lifetime.
 
-        :param mcp_server: the MCP server instance to configure
+        :param mcp_server: MCP server instance to configure
         """
-        openai_tool_compatible = self.context.name == "chatgpt"
         assert self.agent is not None
-        context = self.agent.get_context()
-        self._set_mcp_tools(mcp_server, openai_tool_compatible=openai_tool_compatible, structured_output=context.structured_tool_output)
+        self._set_mcp_tools(mcp_server, openai_tool_compatible=True, structured_output=None)
         log.info("MCP server lifetime setup complete")
         try:
             yield
         finally:
-            # Shut down the server if we are running in stdio mode.
-            # For other transports, we do nothing; the singleton agent instance remains active.
             if self.transport == "stdio":
                 log.info("MCP server shutting down")
                 if self.agent is not None:

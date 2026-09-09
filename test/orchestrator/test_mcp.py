@@ -54,7 +54,7 @@ def orchestrator_config(tmp_path: Path) -> OrchestratorConfig:
 @pytest.fixture
 def side_by_side_servers(monkeypatch: pytest.MonkeyPatch, orchestrator_config: OrchestratorConfig):
     """Provides independently constructed Serena and Orchestrator MCP servers."""
-    serena_factory = SerenaMCPFactory(transport="stdio", context="chatgpt")
+    serena_factory = SerenaMCPFactory(transport="stdio")
     monkeypatch.setattr("serena.mcp.SerenaConfig.from_config_file", lambda: MagicMock())
     monkeypatch.setattr(serena_factory, "_create_serena_agent", lambda *args, **kwargs: MagicMock())
     monkeypatch.setattr(serena_factory, "_get_initial_instructions", lambda: "")
@@ -158,7 +158,7 @@ def test_recreating_either_server_preserves_orchestrator_state(
     state_probe = orchestrator_config.delegates_dir / "persistence-probe.json"
     state_probe.write_text('{"delegate":"reserved-for-o03"}', encoding="utf-8")
 
-    serena_factory = SerenaMCPFactory(transport="stdio", context="chatgpt")
+    serena_factory = SerenaMCPFactory(transport="stdio")
     monkeypatch.setattr("serena.mcp.SerenaConfig.from_config_file", lambda: MagicMock())
     monkeypatch.setattr(serena_factory, "_create_serena_agent", lambda *args, **kwargs: MagicMock())
     monkeypatch.setattr(serena_factory, "_get_initial_instructions", lambda: "")

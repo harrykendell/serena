@@ -41,7 +41,6 @@ def make_agent() -> SerenaAgent:
             project_name="demo_serena_repo",
             language_servers=[LanguageServerId.PYTHON],
             ignored_paths=[],
-            excluded_tools=[],
             read_only=False,
             ignore_all_files_in_gitignore=True,
             initial_prompt="",

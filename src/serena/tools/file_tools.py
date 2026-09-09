@@ -12,7 +12,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Literal
 
-from serena.tools import SUCCESS_RESULT, EditedFileContext, EditingToolWithDiagnostics, Tool, ToolMarkerOptional
+from serena.tools import SUCCESS_RESULT, EditedFileContext, EditingToolWithDiagnostics, Tool
 from serena.util.file_system import scan_directory
 from serena.util.text_utils import (
     ContentReplacer,
@@ -458,7 +458,7 @@ class ReplaceInFilesTool(EditingToolWithDiagnostics):
             return diagnostics_context.format_result(summary)
 
 
-class DeleteLinesTool(EditingToolWithDiagnostics, ToolMarkerOptional):
+class DeleteLinesTool(EditingToolWithDiagnostics):
     """
     Deletes a range of lines within a file.
     """
@@ -484,7 +484,7 @@ class DeleteLinesTool(EditingToolWithDiagnostics, ToolMarkerOptional):
             return diagnostics_context.format_result(SUCCESS_RESULT)
 
 
-class ReplaceLinesTool(EditingToolWithDiagnostics, ToolMarkerOptional):
+class ReplaceLinesTool(EditingToolWithDiagnostics):
     """
     Replaces a range of lines within a file with new content.
     """
@@ -518,7 +518,7 @@ class ReplaceLinesTool(EditingToolWithDiagnostics, ToolMarkerOptional):
             return diagnostics_context.format_result(SUCCESS_RESULT)
 
 
-class InsertAtLineTool(EditingToolWithDiagnostics, ToolMarkerOptional):
+class InsertAtLineTool(EditingToolWithDiagnostics):
     """
     Inserts content at a given line in a file.
     """

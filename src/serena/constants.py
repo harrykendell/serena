@@ -10,19 +10,11 @@ SERENA_MANAGED_DIR_NAME = ".serena"
 REPO_ROOT = str(_repo_root_path)
 RESOURCES_DIR = str(_resources_path)
 PROMPT_TEMPLATES_DIR_INTERNAL = str(_resources_path / "config" / "prompt_templates")
-SERENAS_OWN_CONTEXT_YAMLS_DIR = str(_resources_path / "config" / "contexts")
-"""The contexts that are shipped with the Serena package, i.e. the default contexts."""
-SERENAS_OWN_MODE_YAMLS_DIR = str(_resources_path / "config" / "modes")
-"""The modes that are shipped with the Serena package, i.e. the default modes."""
-INTERNAL_MODE_YAMLS_DIR = str(_resources_path / "config" / "internal_modes")
-"""Internal modes, never overridden by user modes."""
 SERENA_DASHBOARD_DIR = str(_resources_path / "dashboard")
 SERENA_ICON_DIR = str(_resources_path / "icons")
 
 DEFAULT_SOURCE_FILE_ENCODING = "utf-8"
 """The default encoding assumed for project source files."""
-DEFAULT_CONTEXT = "chatgpt"
-
 SERENA_FILE_ENCODING = "utf-8"
 """The encoding used for Serena's own files, such as configuration files and memories."""
 

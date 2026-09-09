@@ -190,7 +190,7 @@ function renderOverview(session) {
   setText("project-name", project.name, "No active project");
   setText("project-path", project.path, "—");
   setText("languages", (session.languages || []).join(" · "), "None");
-  setText("context-name", session.context, "—");
+  setText("runtime-policy", session.runtime_policy, "ChatGPT");
   setText("version", session.serena_version, "—");
 
   const activeTools = session.active_tools || [];

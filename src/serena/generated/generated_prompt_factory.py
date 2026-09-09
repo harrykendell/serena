@@ -28,14 +28,5 @@ class PromptFactory(PromptFactoryBase):
     def get_system_prompt_template_string(self) -> str:
         return self.get_prompt_template_string("system_prompt")
 
-    def create_system_prompt(
-        self,
-        *,
-        available_markers: Any,
-        available_tools: Any,
-        context_system_prompt: Any,
-        global_memories_list: Any,
-        mode_system_prompts: Any,
-        tool_names: Any,
-    ) -> str:
+    def create_system_prompt(self, *, chatgpt_product_prompt: Any, global_memories_list: Any) -> str:
         return self._render_prompt("system_prompt", locals())

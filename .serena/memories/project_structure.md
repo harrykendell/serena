@@ -8,8 +8,8 @@ Serena is an MCP-based "IDE for coding agents": semantic code retrieval/editing/
   - `agent.py`, `mcp.py`, `cli.py`, `hooks.py` — entrypoints/wiring
   - `tools/` — tool implementations (memory_tools, symbol_tools, file_tools, workflow_tools, config_tools, cmd_tools)
   - `tools/tools_base.py` — base classes for all tools
-  - `config/` — `serena_config.py`, `context_mode.py`
-  - `resources/config/contexts/chatgpt.yml`, `resources/config/modes/*.yml` — hosted ChatGPT context and mode definitions
+  - `config/serena_config.py` — global/project configuration; the runtime has no context/mode configuration layer
+  - `chatgpt_policy.py` + `tools/MCP_TOOL_CLASSES` — fixed ChatGPT product instructions, tool-description overrides, and explicit MCP tool catalogue
   - `code_editor.py`, `symbol.py`, `ls_manager.py` — symbolic editing / LS lifecycle
   - `dashboard.py`, `custom_dashboard.py` — browser dashboard backend and Kendell dashboard
   - `prompt_factory.py` + `generated/generated_prompt_factory.py` — prompts (regenerate with `scripts/gen_prompt_factory.py`)

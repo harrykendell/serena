@@ -7,7 +7,7 @@ import os
 import re
 import shutil
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -64,42 +64,12 @@ class SerenaPaths:
         else:
             home_dir = home_dir.strip()
         self.resources_dir: str = RESOURCES_DIR
-        """
-        the resources directory (within the `serena` package) 
-        """
         self.serena_user_home_dir: str = home_dir
-        """
-        the path to the Serena home directory, where the user's configuration/data is stored.
-        This is ~/.serena by default, but it can be overridden via the SERENA_HOME environment variable.
-        """
         self.user_prompt_templates_dir: str = os.path.join(self.serena_user_home_dir, "prompt_templates")
-        """
-        directory containing prompt templates defined by the user.
-        Prompts defined by the user take precedence over Serena's built-in prompt templates.
-        """
-        self.user_contexts_dir: str = os.path.join(self.serena_user_home_dir, "contexts")
-        """
-        directory containing contexts defined by the user. 
-        If a name of a context matches a name of a context in SERENAS_OWN_CONTEXT_YAMLS_DIR, 
-        the user context will override the default context definition.
-        """
-        self.user_modes_dir: str = os.path.join(self.serena_user_home_dir, "modes")
-        """
-        directory containing modes defined by the user.
-        If a name of a mode matches a name of a mode in SERENAS_OWN_MODES_YAML_DIR,
-        the user mode will override the default mode definition.
-        """
         global_memories_path = Path(os.path.join(self.serena_user_home_dir, "memories", "global"))
         global_memories_path.mkdir(parents=True, exist_ok=True)
         self.global_memories_path = global_memories_path
-        """
-        directory where global memories are stored, i.e. memories that are available across all projects
-        """
         self.last_returned_log_file_path: str | None = None
-        """
-        the path to the last log file returned by `get_next_log_file_path`. If this is not None, the logs
-        are currently being written to this file
-        """
 
     def get_next_log_file_path(self, prefix: str) -> str:
         """
@@ -115,62 +85,6 @@ class SerenaPaths:
         return Path(os.path.join(self.resources_dir, *path_elems))
 
     # TODO: Paths from constants.py should be moved here
-
-
-@dataclass
-class ToolInclusionDefinition:
-    """
-    Defines which tools to include/exclude in Serena's operation.
-    This can mean either
-      * defining exclusions/inclusions to apply to an existing set of tools [incremental mode], or
-      * defining a fixed set of tools to use [fixed mode].
-    """
-
-    excluded_tools: Sequence[str] = ()
-    """
-    the names of tools to exclude from use [incremental mode]
-    """
-    included_optional_tools: Sequence[str] = ()
-    """
-    the names of optional tools to include [incremental mode]
-    """
-    fixed_tools: Sequence[str] = ()
-    """
-    the names of tools to use as a fixed set of tools [fixed mode]
-    """
-
-    def is_fixed_tool_set(self) -> bool:
-        num_fixed = len(self.fixed_tools)
-        num_incremental = len(self.excluded_tools) + len(self.included_optional_tools)
-        if num_fixed > 0 and num_incremental > 0:
-            raise ValueError("Cannot use both fixed_tools and excluded_tools/included_optional_tools at the same time.")
-        return num_fixed > 0
-
-
-@dataclass
-class NamedToolInclusionDefinition(ToolInclusionDefinition):
-    name: str | None = None
-
-    def __str__(self) -> str:
-        return f"ToolInclusionDefinition[{self.name}]"
-
-
-@dataclass
-class ModeSelectionDefinition:
-    default_modes: Sequence[str] | None = None
-
-
-@dataclass
-class ModeSelectionDefinitionWithBaseModes(ModeSelectionDefinition):
-    base_modes: Sequence[str] | None = ("interactive", "editing")
-    """
-    the base modes to use, which are always guaranteed to be included
-    """
-
-
-@dataclass
-class ModeSelectionDefinitionWithAddedModes(ModeSelectionDefinition):
-    added_modes: Sequence[str] | None = None
 
 
 class LineEnding(Enum):
@@ -203,10 +117,10 @@ class LineEnding(Enum):
 
 
 @dataclass
-class SharedConfig(ToolInclusionDefinition, ToStringMixin):
-    """Shared between SerenaConfig and ProjectConfig, the latter used to override values in the form
-    (same as in ModeSelectionDefinition).
-    The defaults here shall be none and should be set to the global default values in SerenaConfig.
+class SharedConfig(ToStringMixin):
+    """Settings shared by global and project configuration.
+
+    Project-level ``None`` values inherit the corresponding global setting.
     """
 
     symbol_info_budget: float | None = None
@@ -214,7 +128,7 @@ class SharedConfig(ToolInclusionDefinition, ToStringMixin):
     read_only_memory_patterns: list[str] = field(default_factory=list)
     ignored_memory_patterns: list[str] = field(default_factory=list)
     ls_specific_settings: dict = field(default_factory=dict)
-    """Advanced configuration option allowing to configure language server implementation specific options, see SolidLSPSettings for more info."""
+    """Advanced language-server implementation settings passed to SolidLSP."""
 
 
 class SerenaConfigError(Exception):
@@ -248,7 +162,7 @@ class ProjectConfigAutoGenerationMode(Enum):
 
 
 @dataclass(kw_only=True)
-class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
+class ProjectConfig(SharedConfig):
     project_name: str
     language_servers: list[LanguageServerId]
     auto_detect_language_servers: bool = True
@@ -457,6 +371,19 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
                 del data[old_key]
                 was_complete = False
 
+        # remove configuration surfaces that no longer exist in the fixed ChatGPT runtime
+        for obsolete_key in (
+            "excluded_tools",
+            "included_optional_tools",
+            "fixed_tools",
+            "base_modes",
+            "default_modes",
+            "added_modes",
+        ):
+            if obsolete_key in data:
+                del data[obsolete_key]
+                was_complete = False
+
         # apply defaults
         if apply_defaults:
             for field_info in dataclasses.fields(cls):
@@ -524,15 +451,9 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
         line_ending_value = data.get("line_ending")
         line_ending = LineEnding.from_str(line_ending_value) if line_ending_value else None
 
-        # gracefully handle user errors: incorrect use of None/empty where a list is required
+        # normalize list-valued project settings
         ignored_paths = data["ignored_paths"] or []
-        fixed_tools = data["fixed_tools"] or []
-        excluded_tools = data["excluded_tools"] or []
-        included_optional_tools = data["included_optional_tools"] or []
         additional_workspace_folders = data.get("ls_additional_workspace_folders") or []
-
-        if "base_modes" in data and data["base_modes"] is not None:
-            log.warning("The base_modes setting in project.yml is deprecated and will be ignored.")
 
         return cls(
             project_name=data["project_name"],
@@ -541,9 +462,6 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
             ignored_paths=ignored_paths,
             ls_workspace_folders=data["ls_workspace_folders"],
             ls_additional_workspace_folders=additional_workspace_folders,
-            excluded_tools=excluded_tools,
-            fixed_tools=fixed_tools,
-            included_optional_tools=included_optional_tools,
             read_only=data["read_only"],
             read_only_memory_patterns=data.get("read_only_memory_patterns", []),
             ignored_memory_patterns=data.get("ignored_memory_patterns", []),
@@ -551,8 +469,6 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
             initial_prompt=data["initial_prompt"],
             encoding=data["encoding"],
             line_ending=line_ending,
-            added_modes=data["added_modes"],
-            default_modes=data["default_modes"],
             symbol_info_budget=symbol_info_budget,
             ls_specific_settings=data.get("ls_specific_settings", {}),
             activation_command=data.get("activation_command"),
@@ -767,7 +683,7 @@ class RegisteredProject(ToStringMixin):
 
 
 @dataclass(kw_only=True)
-class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
+class SerenaConfig(SharedConfig):
     """
     Holds the Serena agent configuration, which is typically loaded from a YAML configuration file
     (when instantiated via :method:`from_config_file`), which is updated when projects are added or removed.
@@ -1009,8 +925,18 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
                 instance.read_only_memory_patterns.append("global/.*")
             del loaded_commented_yaml["edit_global_memories"]
 
-        # remove obsolete standalone-client and analytics settings
-        for obsolete_field in ("gui_log_window", "web_dashboard_interface", "token_count_estimator"):
+        # remove obsolete standalone-client, analytics, mode, and tool-composition settings
+        for obsolete_field in (
+            "gui_log_window",
+            "web_dashboard_interface",
+            "token_count_estimator",
+            "excluded_tools",
+            "included_optional_tools",
+            "fixed_tools",
+            "base_modes",
+            "default_modes",
+            "added_modes",
+        ):
             if obsolete_field in loaded_commented_yaml:
                 del loaded_commented_yaml[obsolete_field]
                 num_migrations += 1

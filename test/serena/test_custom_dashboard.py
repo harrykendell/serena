@@ -30,12 +30,6 @@ class _DashboardAgent:
     def get_active_tool_names(self):
         return []
 
-    def get_active_modes(self):
-        return SimpleNamespace(get_modes=lambda include_background_base_modes=False: [])
-
-    def get_context(self):
-        return SimpleNamespace(name="chatgpt")
-
     def get_exposed_tool_instances(self):
         return []
 
@@ -97,7 +91,7 @@ def test_dashboard_serves_kendell_frontend_and_session_api(tmp_path: Path, monke
     assert state["orchestrator"] == {"status": "success", "panels": []}
     assert orchestrator == {"status": "success", "panels": []}
     assert session["status"] == "success"
-    assert session["context"] == "chatgpt"
+    assert session["runtime_policy"] == "ChatGPT"
 
 
 def test_custom_dashboard_can_name_retained_serena_conversation_before_first_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

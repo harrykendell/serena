@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from logging import Logger
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -18,21 +18,15 @@ from sensai.util.string import dict_string
 from tqdm import tqdm
 
 from serena import serena_version
-from serena.config.context_mode import SerenaAgentContext, SerenaAgentMode
 from serena.config.serena_config import (
-    ModeSelectionDefinition,
-    ModeSelectionDefinitionWithAddedModes,
     ProjectConfig,
     RegisteredProject,
     SerenaConfig,
     SerenaPaths,
 )
 from serena.constants import (
-    DEFAULT_CONTEXT,
     PROMPT_TEMPLATES_DIR_INTERNAL,
     SERENA_LOG_FORMAT,
-    SERENAS_OWN_CONTEXT_YAMLS_DIR,
-    SERENAS_OWN_MODE_YAMLS_DIR,
 )
 from serena.execution import ExecutionAccess
 from serena.prompt_factory import SerenaPromptFactory
@@ -48,17 +42,6 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _MAX_CONTENT_WIDTH = 200
-_MODES_EXPLANATION = """\b\nBuilt-in mode names or paths to custom mode YAMLs with which to 
-override the default_modes defined in the global Serena configuration or 
-the active project.
-For details on mode configuration, see 
-  https://oraios.github.io/serena/02-usage/050_configuration.html#modes.
-"""
-_ADD_MODES_EXPLANATION = """\b\nMode names or paths to custom mode YAMLs which shall
-be added on top of the other modes specified by the global/project configuration.
-For details on mode configuration, see 
-  https://oraios.github.io/serena/02-usage/050_configuration.html#modes.
-"""
 
 
 def find_project_root(root: str | Path | None = None) -> str | None:
@@ -183,27 +166,6 @@ class TopLevelCommands(AutoRegisteringGroup):
     @click.option("--project-file", "project", type=PROJECT_TYPE, default=None, help="[DEPRECATED] Use --project instead.")
     @click.argument("project_file_arg", type=PROJECT_TYPE, required=False, default=None, metavar="")
     @click.option(
-        "--context", type=str, default=DEFAULT_CONTEXT, show_default=True, help="Built-in context name or path to custom context YAML."
-    )
-    @click.option(
-        "--mode",
-        "default_modes",
-        type=str,
-        multiple=True,
-        default=(),
-        show_default=False,
-        help=_MODES_EXPLANATION,
-    )
-    @click.option(
-        "--add-mode",
-        "added_modes",
-        type=str,
-        multiple=True,
-        default=(),
-        show_default=False,
-        help=_ADD_MODES_EXPLANATION,
-    )
-    @click.option(
         "--transport",
         type=click.Choice(["stdio", "sse", "streamable-http"]),
         default="stdio",
@@ -232,9 +194,7 @@ class TopLevelCommands(AutoRegisteringGroup):
         type=bool,
         is_flag=False,
         default=None,
-        help="Enable the web dashboard (overriding the setting in Serena's config). "
-        "It is recommended to always enable the dashboard. If you don't want the browser to open on startup, set open-web-dashboard to False. "
-        "For more information, see\nhttps://oraios.github.io/serena/02-usage/060_dashboard.html",
+        help="Enable the web dashboard, overriding Serena's config.",
     )
     @click.option(
         "--web-dashboard-port",
@@ -247,7 +207,7 @@ class TopLevelCommands(AutoRegisteringGroup):
         type=bool,
         is_flag=False,
         default=None,
-        help="Open Serena's dashboard in your browser after MCP server startup (overriding the setting in Serena's config).",
+        help="Open Serena's dashboard in your browser after MCP server startup, overriding Serena's config.",
     )
     @click.option(
         "--log-level",
@@ -261,15 +221,12 @@ class TopLevelCommands(AutoRegisteringGroup):
         "--project-from-cwd",
         is_flag=True,
         default=False,
-        help="Auto-detect project from current working directory (nearest ancestor containing .serena/project.yml or .git). If none is found, no project is activated. Intended for CLI-based agents like Claude Code, Gemini and Codex.",
+        help="Auto-detect project from current working directory (nearest ancestor containing .serena/project.yml or .git).",
     )
     def start_mcp_server(
         project: str | None,
         project_file_arg: str | None,
         project_from_cwd: bool | None,
-        context: str,
-        default_modes: Sequence[str],
-        added_modes: Sequence[str],
         transport: Literal["stdio", "sse", "streamable-http"],
         host: str,
         port: int,
@@ -283,10 +240,7 @@ class TopLevelCommands(AutoRegisteringGroup):
     ) -> None:
         from serena.mcp import SerenaMCPFactory
 
-        # initialize logging, using INFO level initially (later adjusted by SerenaAgent according to the config)
-        #   * stream handler for stderr (for direct console output, which will also be captured by clients)
-        #   * file handler
-        # (Note that stdout must never be used for logging, as it is used by the MCP server to communicate with the client.)
+        # initialise logging before Serena loads its runtime configuration
         Logger.root.setLevel(logging.INFO)
         formatter = logging.Formatter(SERENA_LOG_FORMAT)
         stderr_handler = logging.StreamHandler(stream=sys.stderr)
@@ -300,7 +254,6 @@ class TopLevelCommands(AutoRegisteringGroup):
         log.info("Initializing Serena MCP server")
         log.info("Storing logs in %s", log_path)
 
-        # Handle --project-from-cwd flag
         project_activation_error: str | None = None
         if project_from_cwd:
             if project is not None or project_file_arg is not None:
@@ -317,17 +270,11 @@ class TopLevelCommands(AutoRegisteringGroup):
                 log.warning(project_activation_error)
 
         project_file = project_file_arg or project
-
-        mode_selection_def: ModeSelectionDefinition | None = None
-        if default_modes or added_modes:
-            mode_selection_def = ModeSelectionDefinitionWithAddedModes(default_modes=default_modes or None, added_modes=added_modes or None)
-
-        factory = SerenaMCPFactory(transport=transport, context=context, project=project_file)
+        factory = SerenaMCPFactory(transport=transport, project=project_file)
         server = factory.create_mcp_server(
             host=host,
             port=port,
             streamable_http_path=streamable_http_path,
-            mode_selection_def=mode_selection_def,
             enable_web_dashboard=enable_web_dashboard,
             web_dashboard_port=web_dashboard_port,
             open_web_dashboard=open_web_dashboard,
@@ -337,207 +284,34 @@ class TopLevelCommands(AutoRegisteringGroup):
             project_activation_error=project_activation_error,
         )
         if project_file_arg:
-            log.warning(
-                "Positional project arg is deprecated; use --project instead. Used: %s",
-                project_file,
-            )
+            log.warning("Positional project arg is deprecated; use --project instead. Used: %s", project_file)
         log.info("Starting MCP server …")
         server.run(transport=transport)
 
     @staticmethod
     @click.command(
-        "print-system-prompt", help="Print the system prompt for a project.", context_settings={"max_content_width": _MAX_CONTENT_WIDTH}
+        "print-system-prompt",
+        help="Print the fixed ChatGPT instruction prompt for a project.",
+        context_settings={"max_content_width": _MAX_CONTENT_WIDTH},
     )
     @click.argument("project", type=click.Path(exists=True), default=None, required=False)
     @click.option("--only-instructions", is_flag=True, help="Print only the initial instructions, without prefix/postfix.")
-    @click.option(
-        "--context", type=str, default=DEFAULT_CONTEXT, show_default=True, help="Built-in context name or path to custom context YAML."
-    )
-    @click.option(
-        "--mode",
-        "modes",
-        type=str,
-        multiple=True,
-        default=(),
-        show_default=False,
-        help=_MODES_EXPLANATION,
-    )
-    def print_system_prompt(project: str | None, only_instructions: bool, context: str, modes: Sequence[str] | None = None) -> None:
+    def print_system_prompt(project: str | None, only_instructions: bool) -> None:
         from serena.agent import SerenaAgent
 
         prefix = "You will receive access to Serena's symbolic tools. Below are instructions for using them, take them into account."
         postfix = "You begin by acknowledging that you understood the above instructions and are ready to receive tasks."
 
-        context_instance = SerenaAgentContext.load(context)
-        modes_selection_def: ModeSelectionDefinition | None = None
-        if modes:
-            modes_selection_def = ModeSelectionDefinition(default_modes=modes)
         serena_config = SerenaConfig.from_config_file().with_headless_mode_overrides()
         agent = SerenaAgent(
             project=os.path.abspath(project) if project is not None else None,
             serena_config=serena_config,
-            context=context_instance,
-            modes=modes_selection_def,
         )
         instr = agent.create_system_prompt()
         if only_instructions:
             print(instr)
         else:
             print(f"{prefix}\n{instr}\n{postfix}")
-
-
-class ModeCommands(AutoRegisteringGroup):
-    """Group for 'mode' subcommands."""
-
-    def __init__(self) -> None:
-        super().__init__(name="mode", help="Manage Serena modes. You can run `mode <command> --help` for more info on each command.")
-
-    @staticmethod
-    @click.command("list", help="List available modes.", context_settings={"max_content_width": _MAX_CONTENT_WIDTH})
-    def list() -> None:
-        mode_names = SerenaAgentMode.list_registered_mode_names()
-        max_len_name = max(len(name) for name in mode_names) if mode_names else 20
-        for name in mode_names:
-            mode_yml_path = SerenaAgentMode.get_path(name)
-            is_internal = Path(mode_yml_path).is_relative_to(SERENAS_OWN_MODE_YAMLS_DIR)
-            descriptor = "(internal)" if is_internal else f"(at {mode_yml_path})"
-            name_descr_string = f"{name:<{max_len_name + 4}}{descriptor}"
-            click.echo(name_descr_string)
-
-    @staticmethod
-    @click.command("create", help="Create a new mode or copy an internal one.", context_settings={"max_content_width": _MAX_CONTENT_WIDTH})
-    @click.option(
-        "--name",
-        "-n",
-        type=str,
-        default=None,
-        help="Name for the new mode. If --from-internal is passed may be left empty to create a mode of the same name, which will then override the internal mode.",
-    )
-    @click.option("--from-internal", "from_internal", type=str, default=None, help="Copy from an internal mode.")
-    def create(name: str, from_internal: str) -> None:
-        if not (name or from_internal):
-            raise click.UsageError("Provide at least one of --name or --from-internal.")
-        mode_name = name or from_internal
-        dest = os.path.join(SerenaPaths().user_modes_dir, f"{mode_name}.yml")
-        src = (
-            os.path.join(SERENAS_OWN_MODE_YAMLS_DIR, f"{from_internal}.yml")
-            if from_internal
-            else os.path.join(SERENAS_OWN_MODE_YAMLS_DIR, "mode.template.yml")
-        )
-        if not os.path.exists(src):
-            raise FileNotFoundError(
-                f"Internal mode '{from_internal}' not found in {SERENAS_OWN_MODE_YAMLS_DIR}. Available modes: {SerenaAgentMode.list_registered_mode_names()}"
-            )
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        shutil.copyfile(src, dest)
-        click.echo(f"Created mode '{mode_name}' at {dest}")
-        _open_in_editor(dest)
-
-    @staticmethod
-    @click.command("edit", help="Edit a custom mode YAML file.", context_settings={"max_content_width": _MAX_CONTENT_WIDTH})
-    @click.argument("mode_name")
-    def edit(mode_name: str) -> None:
-        path = os.path.join(SerenaPaths().user_modes_dir, f"{mode_name}.yml")
-        if not os.path.exists(path):
-            if mode_name in SerenaAgentMode.list_registered_mode_names(include_user_modes=False):
-                click.echo(
-                    f"Mode '{mode_name}' is an internal mode and cannot be edited directly. "
-                    f"Use 'mode create --from-internal {mode_name}' to create a custom mode that overrides it before editing."
-                )
-            else:
-                click.echo(f"Custom mode '{mode_name}' not found. Create it with: mode create --name {mode_name}.")
-            return
-        _open_in_editor(path)
-
-    @staticmethod
-    @click.command("delete", help="Delete a custom mode file.", context_settings={"max_content_width": _MAX_CONTENT_WIDTH})
-    @click.argument("mode_name")
-    def delete(mode_name: str) -> None:
-        path = os.path.join(SerenaPaths().user_modes_dir, f"{mode_name}.yml")
-        if not os.path.exists(path):
-            click.echo(f"Custom mode '{mode_name}' not found.")
-            return
-        os.remove(path)
-        click.echo(f"Deleted custom mode '{mode_name}'.")
-
-
-class ContextCommands(AutoRegisteringGroup):
-    """Group for 'context' subcommands."""
-
-    def __init__(self) -> None:
-        super().__init__(
-            name="context", help="Manage Serena contexts. You can run `context <command> --help` for more info on each command."
-        )
-
-    @staticmethod
-    @click.command("list", help="List available contexts.", context_settings={"max_content_width": _MAX_CONTENT_WIDTH})
-    def list() -> None:
-        context_names = SerenaAgentContext.list_registered_context_names()
-        max_len_name = max(len(name) for name in context_names) if context_names else 20
-        for name in context_names:
-            context_yml_path = SerenaAgentContext.get_path(name)
-            is_internal = Path(context_yml_path).is_relative_to(SERENAS_OWN_CONTEXT_YAMLS_DIR)
-            descriptor = "(internal)" if is_internal else f"(at {context_yml_path})"
-            name_descr_string = f"{name:<{max_len_name + 4}}{descriptor}"
-            click.echo(name_descr_string)
-
-    @staticmethod
-    @click.command(
-        "create", help="Create a new context or copy an internal one.", context_settings={"max_content_width": _MAX_CONTENT_WIDTH}
-    )
-    @click.option(
-        "--name",
-        "-n",
-        type=str,
-        default=None,
-        help="Name for the new context. If --from-internal is passed may be left empty to create a context of the same name, which will then override the internal context",
-    )
-    @click.option("--from-internal", "from_internal", type=str, default=None, help="Copy from an internal context.")
-    def create(name: str, from_internal: str) -> None:
-        if not (name or from_internal):
-            raise click.UsageError("Provide at least one of --name or --from-internal.")
-        ctx_name = name or from_internal
-        dest = os.path.join(SerenaPaths().user_contexts_dir, f"{ctx_name}.yml")
-        src = (
-            os.path.join(SERENAS_OWN_CONTEXT_YAMLS_DIR, f"{from_internal}.yml")
-            if from_internal
-            else os.path.join(SERENAS_OWN_CONTEXT_YAMLS_DIR, "context.template.yml")
-        )
-        if not os.path.exists(src):
-            raise FileNotFoundError(
-                f"Internal context '{from_internal}' not found in {SERENAS_OWN_CONTEXT_YAMLS_DIR}. Available contexts: {SerenaAgentContext.list_registered_context_names()}"
-            )
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        shutil.copyfile(src, dest)
-        click.echo(f"Created context '{ctx_name}' at {dest}")
-        _open_in_editor(dest)
-
-    @staticmethod
-    @click.command("edit", help="Edit a custom context YAML file.", context_settings={"max_content_width": _MAX_CONTENT_WIDTH})
-    @click.argument("context_name")
-    def edit(context_name: str) -> None:
-        path = os.path.join(SerenaPaths().user_contexts_dir, f"{context_name}.yml")
-        if not os.path.exists(path):
-            if context_name in SerenaAgentContext.list_registered_context_names(include_user_contexts=False):
-                click.echo(
-                    f"Context '{context_name}' is an internal context and cannot be edited directly. "
-                    f"Use 'context create --from-internal {context_name}' to create a custom context that overrides it before editing."
-                )
-            else:
-                click.echo(f"Custom context '{context_name}' not found. Create it with: context create --name {context_name}.")
-            return
-        _open_in_editor(path)
-
-    @staticmethod
-    @click.command("delete", help="Delete a custom context file.", context_settings={"max_content_width": _MAX_CONTENT_WIDTH})
-    @click.argument("context_name")
-    def delete(context_name: str) -> None:
-        path = os.path.join(SerenaPaths().user_contexts_dir, f"{context_name}.yml")
-        if not os.path.exists(path):
-            click.echo(f"Custom context '{context_name}' not found.")
-            return
-        os.remove(path)
-        click.echo(f"Deleted custom context '{context_name}'.")
 
 
 class SerenaConfigCommands(AutoRegisteringGroup):
@@ -941,49 +715,34 @@ class ToolCommands(AutoRegisteringGroup):
     @staticmethod
     @click.command(
         "list",
-        help="Prints an overview of the tools that are active by default (not just the active ones for your project). For viewing all tools, pass `--all / -a`",
+        help="Prints the fixed ChatGPT MCP tool catalogue.",
         context_settings={"max_content_width": _MAX_CONTENT_WIDTH},
     )
     @click.option("--quiet", "-q", is_flag=True)
-    @click.option("--all", "-a", "include_optional", is_flag=True, help="List all tools, including those not enabled by default.")
-    @click.option("--only-optional", is_flag=True, help="List only optional tools (those not enabled by default).")
-    def list(quiet: bool = False, include_optional: bool = False, only_optional: bool = False) -> None:
+    def list(quiet: bool = False) -> None:
         from serena.tools import ToolRegistry
 
-        tool_registry = ToolRegistry()
+        registry = ToolRegistry()
         if quiet:
-            if only_optional:
-                tool_names = tool_registry.get_tool_names_optional()
-            elif include_optional:
-                tool_names = tool_registry.get_tool_names()
-            else:
-                tool_names = tool_registry.get_tool_names_default_enabled()
-            for tool_name in tool_names:
+            for tool_name in registry.get_tool_names():
                 click.echo(tool_name)
         else:
-            ToolRegistry().print_tool_overview(include_optional=include_optional, only_optional=only_optional)
+            registry.print_tool_overview()
 
     @staticmethod
     @click.command(
         "description",
-        help="Print the description of a tool, optionally with a specific context (the latter may modify the default description).",
+        help="Prints the fixed ChatGPT description of a tool.",
         context_settings={"max_content_width": _MAX_CONTENT_WIDTH},
     )
     @click.argument("tool_name", type=str)
-    @click.option("--context", type=str, default=None, help="Context name or path to context file.")
-    def description(tool_name: str, context: str | None = None) -> None:
+    def description(tool_name: str) -> None:
         from serena.agent import SerenaAgent
         from serena.mcp import SerenaMCPFactory
-
-        # Load the context
-        serena_context = None
-        if context:
-            serena_context = SerenaAgentContext.load(context)
 
         agent = SerenaAgent(
             project=None,
             serena_config=SerenaConfig(log_level=logging.INFO).with_headless_mode_overrides(),
-            context=serena_context,
         )
         tool = agent.get_tool_by_name(tool_name)
         mcp_tool = SerenaMCPFactory.make_mcp_tool(tool)
@@ -1262,7 +1021,7 @@ class MemoryCommands(AutoRegisteringGroup):
 
 class PromptCommands(AutoRegisteringGroup):
     def __init__(self) -> None:
-        super().__init__(name="prompts", help="Commands related to Serena's prompts that are outside of contexts and modes.")
+        super().__init__(name="prompts", help="Commands related to Serena's prompt templates.")
 
     @staticmethod
     def _get_user_prompt_yaml_path(prompt_yaml_name: str) -> str:
@@ -1376,8 +1135,6 @@ class PromptCommands(AutoRegisteringGroup):
         click.echo(SerenaPromptFactory().get_prompt_template_string(prompt_name))
 
 
-_mode = ModeCommands()
-_context = ContextCommands()
 _project = ProjectCommands()
 _config = SerenaConfigCommands()
 _tools = ToolCommands()
@@ -1388,5 +1145,5 @@ _memories = MemoryCommands()
 top_level = TopLevelCommands()
 
 # needed for the help script to work - register all subcommands to the top-level group
-for subgroup in (_mode, _context, _project, _config, _tools, _prompts, _memories):
+for subgroup in (_project, _config, _tools, _prompts, _memories):
     top_level.add_command(subgroup)

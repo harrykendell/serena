@@ -1,10 +1,10 @@
 from sensai.util.helper import mark_used
 
 from serena.execution import ExecutionAccess
-from serena.tools import Tool, ToolMarkerDoesNotRequireActiveProject, ToolMarkerOptional
+from serena.tools import Tool, ToolMarkerDoesNotRequireActiveProject
 
 
-class OpenDashboardTool(Tool, ToolMarkerOptional, ToolMarkerDoesNotRequireActiveProject):
+class OpenDashboardTool(Tool, ToolMarkerDoesNotRequireActiveProject):
     """
     Opens the Serena web dashboard in the default web browser.
     The dashboard provides logs, session information, and tool usage statistics.
@@ -45,7 +45,7 @@ class ActivateProjectTool(Tool, ToolMarkerDoesNotRequireActiveProject):
         return result
 
 
-class RemoveProjectTool(Tool, ToolMarkerDoesNotRequireActiveProject, ToolMarkerOptional):
+class RemoveProjectTool(Tool, ToolMarkerDoesNotRequireActiveProject):
     """
     Removes a project from the Serena configuration.
     """
@@ -61,13 +61,11 @@ class RemoveProjectTool(Tool, ToolMarkerDoesNotRequireActiveProject, ToolMarkerO
 
 
 class GetCurrentConfigTool(Tool):
-    """
-    Prints the current configuration of the agent, including the active and available projects, tools, contexts, and modes.
-    """
+    """Prints Serena's current fixed-runtime configuration and project/tool state."""
 
     def apply(self, max_answer_chars: int = -1) -> str:
         """
-        Print the current configuration of the agent, including the active and available projects, tools, contexts, and modes.
+        Print Serena's current runtime configuration, active project, and tool state.
 
         :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget
         :return: current configuration, using retained-output paging when the response exceeds the budget

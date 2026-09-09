@@ -14,7 +14,7 @@ from serena.config.serena_config import (
     SerenaConfig,
     SerenaConfigError,
 )
-from serena.constants import PROJECT_TEMPLATE_FILE, SERENA_MANAGED_DIR_NAME
+from serena.constants import PROJECT_TEMPLATE_FILE, SERENA_CONFIG_TEMPLATE_FILE, SERENA_MANAGED_DIR_NAME
 from serena.project import MemoryManager, Project
 from solidlsp.ls_config import LanguageServerId
 from test.conftest import create_default_serena_config
@@ -157,6 +157,32 @@ class TestProjectConfig:
     def test_template_is_complete(self):
         _, is_complete = ProjectConfig._load_yaml_dict(PROJECT_TEMPLATE_FILE)
         assert is_complete, "Project template YAML is incomplete; all fields must be present (with descriptions)."
+
+    def test_legacy_mode_and_tool_keys_are_migrated_out(self, tmp_path: Path):
+        legacy_config = tmp_path / "project.yml"
+        legacy_config.write_text(
+            Path(PROJECT_TEMPLATE_FILE).read_text()
+            + "\nexcluded_tools: [read_file]\n"
+            + "included_optional_tools: [start_job]\n"
+            + "fixed_tools: [find_symbol]\n"
+            + "base_modes: [editing]\n"
+            + "default_modes: [interactive]\n"
+            + "added_modes: [planning]\n"
+        )
+
+        data, is_complete = ProjectConfig._load_yaml_dict(legacy_config)
+
+        assert not is_complete
+        for key in (
+            "excluded_tools",
+            "included_optional_tools",
+            "fixed_tools",
+            "base_modes",
+            "default_modes",
+            "added_modes",
+        ):
+            assert key not in data
+        ProjectConfig._from_dict(data, [])
 
 
 class TestGetConfiguredProjectSerenaFolder:
@@ -348,6 +374,31 @@ class TestSerenaConfigLoadSave:
         for p in project_paths:
             body_lines.append(f"  - {p}")
         self.master_config_path.write_text("\n".join(body_lines) + "\n")
+
+    def test_legacy_mode_and_tool_keys_are_removed_from_master_config(self) -> None:
+        self.master_config_path.write_text(
+            Path(SERENA_CONFIG_TEMPLATE_FILE).read_text()
+            + "\nexcluded_tools: [read_file]\n"
+            + "included_optional_tools: [start_job]\n"
+            + "fixed_tools: [find_symbol]\n"
+            + "base_modes: [editing]\n"
+            + "default_modes: [interactive]\n"
+            + "added_modes: [planning]\n"
+        )
+
+        config = SerenaConfig.from_config_file()
+
+        assert not hasattr(config, "base_modes")
+        persisted_config = self.master_config_path.read_text()
+        for key in (
+            "excluded_tools:",
+            "included_optional_tools:",
+            "fixed_tools:",
+            "base_modes:",
+            "default_modes:",
+            "added_modes:",
+        ):
+            assert key not in persisted_config
 
     def test_empty_projects_key_is_treated_as_empty_list(self):
         """A bare ``projects:`` key should not abort config loading."""

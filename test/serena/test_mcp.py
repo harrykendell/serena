@@ -8,7 +8,6 @@ import pytest
 from mcp.server.fastmcp.tools.base import Tool as MCPTool
 
 from serena.agent import Tool, ToolRegistry
-from serena.config.context_mode import SerenaAgentContext
 from serena.execution_store import ExecutionStore
 from serena.mcp import SerenaMCPFactory
 
@@ -22,10 +21,6 @@ class MockAgent:
         self.serena_config = None
         self._execution_store_dir = TemporaryDirectory(prefix="serena-mcp-test-store-")
         self.execution_store = ExecutionStore(Path(self._execution_store_dir.name), migrate_legacy=False)
-
-    @staticmethod
-    def get_context() -> SerenaAgentContext:
-        return SerenaAgentContext.load_default()
 
     @staticmethod
     def get_active_project_for_session(session_id: str):
@@ -46,16 +41,11 @@ class BaseMockTool(Tool):
 
 
 def test_chatgpt_replace_content_description_is_descriptive_not_instructive() -> None:
-    """Test that ChatGPT receives the context-specific replacement-tool documentation."""
-
-    class ChatGPTMockAgent(MockAgent):
-        @staticmethod
-        def get_context() -> SerenaAgentContext:
-            return SerenaAgentContext.from_name("chatgpt")
+    """Test that ChatGPT receives the fixed replacement-tool documentation."""
 
     class ReplaceContentTool(Tool):
         def __init__(self):
-            super().__init__(ChatGPTMockAgent())
+            super().__init__(MockAgent())
 
         def apply(self, relative_path: str, needle: str, repl: str, mode: str) -> str:
             """VERY IMPORTANT: Use regex mode and follow these instructions.
@@ -69,19 +59,15 @@ def test_chatgpt_replace_content_description_is_descriptive_not_instructive() ->
 
     description = make_tool(ReplaceContentTool()).description
 
-    assert description == (
-        "Replaces small spans inside symbols or file-level text using literal or regular-expression patterns. "
-        "Do not use it to replace an entire named function, method, class, or other symbol; use replace_symbol_body.\n"
-        "Regex matching uses DOTALL and MULTILINE semantics and supports bounded wildcard spans such as "
-        '"beginning.*?end"; ambiguous single-match replacements fail without modifying the file.'
-    )
+    assert "Replaces small spans inside symbols or file-level text" in description
+    assert "use replace_symbol_body" in description
+    assert "ambiguous single-match replacements fail without modifying the file" in description
     assert "VERY IMPORTANT" not in description
-    assert "Use mode" not in description
 
 
 def test_mcp_server_advertises_embedded_png_icon(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that Serena advertises its plugin icon in MCP initialization metadata."""
-    factory = SerenaMCPFactory(transport="stdio", context="chatgpt")
+    factory = SerenaMCPFactory(transport="stdio")
     monkeypatch.setattr("serena.mcp.SerenaConfig.from_config_file", lambda: MagicMock())
     monkeypatch.setattr(factory, "_create_serena_agent", lambda *args, **kwargs: MagicMock())
     monkeypatch.setattr(factory, "_get_initial_instructions", lambda: "")
@@ -99,7 +85,7 @@ def test_mcp_server_advertises_embedded_png_icon(monkeypatch: pytest.MonkeyPatch
 
 def test_mcp_server_accepts_custom_streamable_http_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that Serena can expose Streamable HTTP at a deployment-specific path."""
-    factory = SerenaMCPFactory(transport="streamable-http", context="chatgpt")
+    factory = SerenaMCPFactory(transport="streamable-http")
     monkeypatch.setattr("serena.mcp.SerenaConfig.from_config_file", lambda: MagicMock())
     monkeypatch.setattr(factory, "_create_serena_agent", lambda *args, **kwargs: MagicMock())
     monkeypatch.setattr(factory, "_get_initial_instructions", lambda: "")

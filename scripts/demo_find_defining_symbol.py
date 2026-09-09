@@ -30,7 +30,6 @@ def make_agent(project_root: Path, language: LanguageServerId, project_name: str
             project_name=project_name,
             language_servers=[language],
             ignored_paths=[],
-            excluded_tools=[],
             read_only=False,
             ignore_all_files_in_gitignore=True,
             initial_prompt="",

@@ -19,7 +19,6 @@ from serena.project import Project
 from serena.prompt_factory import PromptFactory
 from serena.session import get_mcp_session_id
 from serena.util.class_decorators import singleton
-from serena.util.inspection import iter_subclasses
 from serena.util.ls_diagnostics import DiagnosticsDiff, EditedFilePath, PublishedDiagnosticsSnapshot
 from solidlsp.ls_exceptions import SolidLSPException
 
@@ -85,12 +84,6 @@ class ToolMarkerDoesNotRequireActiveProject(ToolMarker):
     pass
 
 
-class ToolMarkerOptional(ToolMarker):
-    """
-    Marker class for optional tools that are disabled by default.
-    """
-
-
 class ToolMarkerSymbolicRead(ToolMarker):
     """
     Marker class for tools that perform symbol read operations.
@@ -100,12 +93,6 @@ class ToolMarkerSymbolicRead(ToolMarker):
 class ToolMarkerSymbolicEdit(ToolMarkerCanEdit):
     """
     Marker class for tools that perform symbolic edit operations.
-    """
-
-
-class ToolMarkerBeta(ToolMarker):
-    """
-    Marker for tools that are considered beta features (may not be fully robust)
     """
 
 
@@ -647,20 +634,15 @@ class EditedFileContext:
 
 @dataclass(kw_only=True)
 class RegisteredTool:
+    """One tool in Serena's explicit ChatGPT MCP catalogue."""
+
     tool_class: type[Tool]
-    is_optional: bool
-    is_beta: bool
     tool_name: str
 
     @property
     def class_docstring(self) -> str:
-        """
-        :return: the tool description (high-level class docstring)
-        """
+        """:return: the tool description (high-level class docstring)"""
         return self.tool_class.get_tool_description()
-
-
-tool_packages = ["serena.tools"]
 
 
 @singleton
@@ -675,17 +657,14 @@ class ToolRegistry:
     ]
 
     def __init__(self) -> None:
+        from serena.tools import MCP_TOOL_CLASSES
+
         self._tool_dict: dict[str, RegisteredTool] = {}
-        inclusion_predicate = lambda c: "apply" in c.__dict__  # include only concrete tool classes that implement apply
-        for cls in iter_subclasses(Tool, inclusion_predicate=inclusion_predicate):
-            if not any(cls.__module__.startswith(pkg) for pkg in tool_packages):
-                continue
-            is_optional = issubclass(cls, ToolMarkerOptional)
-            is_beta = issubclass(cls, ToolMarkerBeta)
-            name = cls.get_name_from_cls()
+        for tool_class in MCP_TOOL_CLASSES:
+            name = tool_class.get_name_from_cls()
             if name in self._tool_dict:
                 raise ValueError(f"Duplicate tool name found: {name}. Tool classes must have unique names.")
-            self._tool_dict[name] = RegisteredTool(tool_class=cls, is_optional=is_optional, tool_name=name, is_beta=is_beta)
+            self._tool_dict[name] = RegisteredTool(tool_class=tool_class, tool_name=name)
 
     def get_registered_tools_by_module(self) -> dict[str, list[RegisteredTool]]:
         """
@@ -710,56 +689,19 @@ class ToolRegistry:
     def get_all_tool_classes(self) -> list[type[Tool]]:
         return list(t.tool_class for t in self._tool_dict.values())
 
-    def get_tool_classes_default_enabled(self) -> list[type[Tool]]:
-        """
-        :return: the list of tool classes that are enabled by default (i.e. non-optional tools).
-        """
-        return [t.tool_class for t in self._tool_dict.values() if not t.is_optional]
-
-    def get_tool_classes_optional(self) -> list[type[Tool]]:
-        """
-        :return: the list of tool classes that are optional (i.e. disabled by default).
-        """
-        return [t.tool_class for t in self._tool_dict.values() if t.is_optional]
-
-    def get_tool_names_default_enabled(self) -> list[str]:
-        """
-        :return: the list of tool names that are enabled by default (i.e. non-optional tools).
-        """
-        return [t.tool_name for t in self._tool_dict.values() if not t.is_optional]
-
-    def get_tool_names_optional(self) -> list[str]:
-        """
-        :return: the list of tool names that are optional (i.e. disabled by default).
-        """
-        return [t.tool_name for t in self._tool_dict.values() if t.is_optional]
-
     def get_tool_names(self) -> list[str]:
         """
         :return: the list of all tool names.
         """
         return list(self._tool_dict.keys())
 
-    def print_tool_overview(
-        self, tools: Iterable[type[Tool] | Tool] | None = None, include_optional: bool = False, only_optional: bool = False
-    ) -> None:
-        """
-        Print a summary of the tools. If no tools are passed, a summary of the selection of tools (all, default or only optional) is printed.
-        """
-        if tools is None:
-            if only_optional:
-                tools = self.get_tool_classes_optional()
-            elif include_optional:
-                tools = self.get_all_tool_classes()
-            else:
-                tools = self.get_tool_classes_default_enabled()
-
-        tool_dict: dict[str, type[Tool] | Tool] = {}
-        for tool_class in tools:
-            tool_dict[tool_class.get_name_from_cls()] = tool_class
-        for tool_name in sorted(tool_dict.keys()):
-            tool_class = tool_dict[tool_name]
-            print(f" * `{tool_name}`: {tool_class.get_tool_description().strip()}")
+    def print_tool_overview(self, tools: Iterable[type[Tool] | Tool] | None = None) -> None:
+        """Prints a summary of the fixed ChatGPT tool catalogue or the supplied tools."""
+        selected_tools = self.get_all_tool_classes() if tools is None else tools
+        tool_dict = {tool.get_name_from_cls(): tool for tool in selected_tools}
+        for tool_name in sorted(tool_dict):
+            tool = tool_dict[tool_name]
+            print(f" * `{tool_name}`: {tool.get_tool_description().strip()}")
 
     def is_valid_tool_name(self, tool_name: str) -> bool:
         return tool_name in self._tool_dict

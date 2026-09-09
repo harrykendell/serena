@@ -2,10 +2,10 @@
 
 import json
 
-from serena.tools.tools_base import Tool, ToolMarkerDoesNotRequireActiveProject, ToolMarkerOptional
+from serena.tools.tools_base import Tool, ToolMarkerDoesNotRequireActiveProject
 
 
-class ReadToolOutputTool(Tool, ToolMarkerDoesNotRequireActiveProject, ToolMarkerOptional):
+class ReadToolOutputTool(Tool, ToolMarkerDoesNotRequireActiveProject):
     """Reads one page from a retained oversized tool result."""
 
     _MAX_PAGE_CHARS = 20_000

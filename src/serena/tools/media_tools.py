@@ -23,7 +23,7 @@ from mcp.types import CallToolResult, ContentBlock, ResourceLink, TextContent
 from pydantic import AnyUrl, BaseModel, ConfigDict
 
 from serena.execution_store import ExecutionStore
-from serena.tools.tools_base import Tool, ToolMarkerCanEdit, ToolMarkerOptional
+from serena.tools.tools_base import Tool, ToolMarkerCanEdit
 
 _FILE_RESOURCE_URI_TEMPLATE = "serena-file://export/{token}"
 _FILE_EXPORT_MAX_SIZE = 100 * 1024 * 1024
@@ -284,7 +284,7 @@ def read_result_file_link(link: ResourceLink) -> bytes:
     return _FileSnapshotStore.read(uri.removeprefix(prefix))
 
 
-class _McpMediaTool(Tool, ToolMarkerOptional):
+class _McpMediaTool(Tool):
     """Base for tools returning native media for direct user-visible presentation."""
 
     @classmethod
@@ -323,7 +323,7 @@ class _McpMediaTool(Tool, ToolMarkerOptional):
         return CallToolResult(content=content)
 
 
-class DownloadFileTool(Tool, ToolMarkerOptional):
+class DownloadFileTool(Tool):
     """Transfers a project file into ChatGPT's native file store."""
 
     @classmethod
@@ -351,7 +351,7 @@ class DownloadFileTool(Tool, ToolMarkerOptional):
         return CallToolResult(content=[result])
 
 
-class UploadFileTool(Tool, ToolMarkerCanEdit, ToolMarkerOptional):
+class UploadFileTool(Tool, ToolMarkerCanEdit):
     """Uploads one ChatGPT file into the active Serena project."""
 
     _MAX_REDIRECTS = 4

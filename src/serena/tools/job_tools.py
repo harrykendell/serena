@@ -15,10 +15,10 @@ from serena.jobs import (
     JobSnapshot,
     JobStatus,
 )
-from serena.tools.tools_base import Tool, ToolMarkerCanEdit, ToolMarkerDoesNotRequireActiveProject, ToolMarkerOptional
+from serena.tools.tools_base import Tool, ToolMarkerCanEdit, ToolMarkerDoesNotRequireActiveProject
 
 
-class _JobTool(Tool, ToolMarkerOptional):
+class _JobTool(Tool):
     """Shared access to the persistent Serena job manager."""
 
     def __init__(self, agent):

@@ -2,7 +2,6 @@ import logging
 
 from serena.config.serena_config import SerenaConfig
 from serena.mcp import SerenaMCPFactory
-from serena.tools.tools_base import ToolRegistry
 
 
 def test_all_tool_parameters_have_type():
@@ -11,9 +10,7 @@ def test_all_tool_parameters_have_type():
     Open‑AI schema contains a ``type`` entry for each parameter.
     """
     cfg = SerenaConfig(log_level=logging.ERROR).with_headless_mode_overrides()
-    registry = ToolRegistry()
-    cfg.included_optional_tools = tuple(registry.get_tool_names_optional())
-    factory = SerenaMCPFactory(transport="stdio", context="chatgpt")
+    factory = SerenaMCPFactory(transport="stdio")
     # Initialize the agent so that the tools are available
     factory.agent = factory._create_serena_agent(cfg)
     tools = list(factory._iter_tools())
