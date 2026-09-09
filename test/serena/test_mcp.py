@@ -108,12 +108,7 @@ class BasicTool(BaseMockTool):
         """
         return f"Hello {name}, you are {age} years old!"
 
-    def apply_ex(
-        self,
-        log_call: bool = True,
-        catch_exceptions: bool = True,
-        **kwargs,
-    ) -> str:
+    def apply_ex(self, **kwargs) -> str:
         """Mock implementation of apply_ex."""
         return self.apply(**kwargs)
 

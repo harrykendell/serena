@@ -534,7 +534,7 @@ class ActivityTracker:
                 session_id=session_id,
                 project_name=effective_project,
                 tool_name=tool_name,
-                arguments=self._serialize_value(arguments),
+                arguments=self._execution_store.serialize_value(arguments),
             )
         self._execution_store.append_execution_to_current_run(
             session_id,
@@ -548,6 +548,7 @@ class ActivityTracker:
         call_id: str | None,
         succeeded: bool,
         result: object | None = None,
+        error: str | None = None,
         project_name: str | None = None,
     ) -> None:
         """Marks one execution terminal and updates activity-run job references."""
@@ -557,14 +558,13 @@ class ActivityTracker:
         if record is None:
             return
 
-        media = ActivityMedia.from_result(result) if result is not None else None
-        serialized_result = self._serialize_value(result) if result is not None and media is None else None
-        error = serialized_result if not succeeded and serialized_result else None
-        job_id, _ = self._extract_job_identity(result)
+        media = ActivityMedia.from_result(result) if succeeded and result is not None else None
+        serialized_result = self._execution_store.serialize_value(result) if succeeded and result is not None and media is None else None
+        job_id, _ = self._extract_job_identity(result) if succeeded else (None, None)
         self._execution_store.finish_execution(
             call_id,
             succeeded=succeeded,
-            result=None if not succeeded else serialized_result,
+            result=serialized_result,
             error=error,
             project_name=project_name,
             media=media.storage_dict() if media is not None else None,
@@ -841,17 +841,6 @@ class ActivityTracker:
             job_id if isinstance(job_id, str) and job_id else None,
             label if isinstance(label, str) and label else None,
         )
-
-    @staticmethod
-    def _serialize_value(value: object) -> str:
-        """Serializes bounded execution detail without coupling persistence to presentation formatting."""
-        try:
-            text = json.dumps(value, ensure_ascii=False, indent=2, default=str)
-        except (TypeError, ValueError):
-            text = str(value)
-        if len(text) <= 8000:
-            return text
-        return f"{text[:3900]}\n... detail omitted ...\n{text[-3900:]}"
 
     @staticmethod
     def _summarize_arguments(tool_name: str, arguments: dict[str, Any]) -> ActivitySummary:

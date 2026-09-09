@@ -11,8 +11,8 @@ from mcp import Implementation
 from mcp.server.fastmcp import Context
 from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata, func_metadata
 from sensai.util import logging
-from sensai.util.string import dict_string
 
+from serena.errors import UserFacingError
 from serena.execution import ExecutionAccess
 from serena.memories.memory_manager import MemoryManager
 from serena.project import Project
@@ -101,19 +101,6 @@ class ApplyMethodProtocol(Protocol):
 
     def __call__(self, *args: Any, **kwargs: Any) -> str:
         pass
-
-
-class ToolCallError(Exception):
-    """
-    Represents an error raised during a tool call execution
-    """
-
-    def __init__(self, error_message: str):
-        super().__init__(error_message)
-        self._error_message = error_message
-
-    def get_error_message(self) -> str:
-        return self._error_message
 
 
 class Tool(Component):
@@ -257,20 +244,6 @@ class Tool(Component):
 
         return func_metadata(apply_fn, skip_names=["self", "cls", cls.SESSION_ID_PARAM_NAME], structured_output=structured_output)
 
-    def _log_tool_application(self, frame: Any, session_id: str) -> None:
-        params = {}
-        ignored_params = {"self", "log_call", "catch_exceptions", "args", "apply_fn"}
-        for param, value in frame.f_locals.items():
-            if param in ignored_params:
-                continue
-            if param == "kwargs":
-                params.update(value)
-            else:
-                params[param] = value
-        project = self.agent.get_active_project()
-        project_name = project.project_name if project is not None else ""
-        log.info(f"{self.get_name_from_cls()}: {dict_string(params)}; project: {project_name}; session_id: {session_id}")
-
     def _effective_max_answer_chars(self, max_answer_chars: int) -> int:
         """Resolve one response budget while preserving explicit character overrides."""
         effective_max_answer_chars = (
@@ -351,7 +324,7 @@ class Tool(Component):
             access = self.get_execution_access()
             if affected_language is None:
                 if access is ExecutionAccess.WRITE:
-                    raise ToolCallError(
+                    raise UserFacingError(
                         f"Language server terminated while executing mutating tool '{self.get_name()}'. "
                         "Serena did not replay the operation because it may have partially changed project state, and the affected "
                         "language server could not be identified for automatic recovery. Re-inspect the affected state before "
@@ -364,7 +337,7 @@ class Tool(Component):
                 self.agent.get_language_server_manager_or_raise().restart_language_server(affected_language)
             except Exception as recovery_error:
                 if access is ExecutionAccess.WRITE:
-                    raise ToolCallError(
+                    raise UserFacingError(
                         f"Language server '{affected_language.value}' terminated while executing mutating tool '{self.get_name()}'. "
                         "Serena did not replay the operation because it may have partially changed project state. Automatic "
                         f"language-server recovery also failed: {recovery_error}. Re-inspect the affected state before attempting "
@@ -382,7 +355,7 @@ class Tool(Component):
                 return apply_fn(**apply_kwargs)
 
             if access is ExecutionAccess.WRITE:
-                raise ToolCallError(
+                raise UserFacingError(
                     f"Language server '{affected_language.value}' terminated while executing mutating tool '{self.get_name()}'. "
                     "Serena restarted the language server but did not replay the operation because it may have partially changed "
                     "project state. Re-inspect the affected state before attempting the edit again."
@@ -392,20 +365,11 @@ class Tool(Component):
 
     def apply_ex(
         self,
-        log_call: bool = True,
-        catch_exceptions: bool = True,
         mcp_ctx: Context | None = None,
         execution_id: str | None = None,
         **kwargs,
     ) -> Any:
-        """
-        Applies the tool with logging and exception handling, using the given keyword arguments.
-        This method either returns a string result or raises a ToolCallError in case of an error during tool application
-        (but if `catch_exception is enabled, it will return the error message as a string instead of raising the exception).
-
-        :param log_call: whether to log the tool call and its result
-        :param catch_exceptions: whether to catch exceptions and return their messages as strings, instead of raising a ToolCallError
-        """
+        """Applies the tool in the execution runtime selected for the current session."""
         # obtain session ID and client info
         session_id = get_mcp_session_id(mcp_ctx)
         if mcp_ctx is not None:
@@ -417,78 +381,51 @@ class Tool(Component):
                     if client_str != self.get_last_tool_call_client_str():
                         log.debug(f"Updating client info: {client_info}")
                         self.set_last_tool_call_client_str(client_str)
-            except Exception as e:
-                log.info(f"Failed to get client info: {e}.")
+            except Exception as error:
+                log.info(f"Failed to get client info: {error}.")
 
         def task() -> Any:
             apply_fn = self.get_apply_fn()
 
-            try:
-                if not self.is_active():
-                    raise ToolCallError(
-                        f"Tool '{self.get_name_from_cls()}' is not active. Active tools: {self.agent.get_active_tool_names()}"
-                    )
+            if not self.is_active():
+                raise UserFacingError(
+                    f"Tool '{self.get_name_from_cls()}' is not active. Active tools: {self.agent.get_active_tool_names()}"
+                )
 
-                if log_call:
-                    self._log_tool_application(inspect.currentframe(), session_id)
+            # check whether the tool requires an active project and language server
+            if not isinstance(self, ToolMarkerDoesNotRequireActiveProject) and self.agent.get_active_project() is None:
+                raise UserFacingError(
+                    "No active project. Ask the user to provide the project path or to select a project from this list of known "
+                    f"projects: {self.agent.serena_config.project_names}"
+                )
 
-                # check whether the tool requires an active project and language server
-                if not isinstance(self, ToolMarkerDoesNotRequireActiveProject):
-                    if self.agent.get_active_project() is None:
-                        raise ToolCallError(
-                            "No active project. Ask the user to provide the project path or to select a project from this list of known projects: "
-                            + f"{self.agent.serena_config.project_names}"
-                        )
+            # construct apply kwargs, adding session_id if the tool is session-aware
+            apply_kwargs = dict(kwargs)
+            if self._is_session_aware:
+                apply_kwargs["session_id"] = session_id
 
-                # construct apply kwargs, adding session_id if the tool is session-aware
-                apply_kwargs = dict(kwargs)
-                if self._is_session_aware:
-                    apply_kwargs["session_id"] = session_id
-
-                # apply the actual tool with side-effect-aware language-server recovery
-                result = self._apply_with_lsp_recovery(apply_fn, apply_kwargs)
-
-            except ToolCallError:
-                raise
-            except Exception as e:
-                msg = f"{e.__class__.__name__}: {e}"
-                log.error(msg, exc_info=e)
-                raise ToolCallError(msg)
-
-            if log_call:
-                log.info(f"Result: {result}")
+            # apply the actual tool with side-effect-aware language-server recovery
+            result = self._apply_with_lsp_recovery(apply_fn, apply_kwargs)
 
             try:
                 ls_manager = self.agent.get_language_server_manager()
                 if ls_manager is not None:
                     ls_manager.save_all_caches()
-            except Exception as e:
-                log.error(f"Error saving language server cache: {e}")
+            except Exception as error:
+                log.error(f"Error saving language server cache: {error}")
 
             return result
 
         # execute directly in the existing FastMCP worker thread under the project coordinator.
         # MCP-level timeout may stop waiting for this worker, but the coordinator permit remains
         # held until ``task`` really returns.
-        tool_call_error: ToolCallError
-        try:
-            return self.agent.execute_tool_call(
-                task,
-                access=self.get_execution_access(),
-                session_id=session_id,
-                execution_id=execution_id,
-                symbolic_read=isinstance(self, ToolMarkerSymbolicRead),
-            )
-        except ToolCallError as e:
-            tool_call_error = e
-        except Exception as e:  # unexpected errors in coordination or task execution
-            msg = f"{e.__class__.__name__}: {e}"
-            log.error(msg)
-            tool_call_error = ToolCallError(msg)
-        if catch_exceptions:
-            return tool_call_error.get_error_message()
-        else:
-            raise tool_call_error
+        return self.agent.execute_tool_call(
+            task,
+            access=self.get_execution_access(),
+            session_id=session_id,
+            execution_id=execution_id,
+            symbolic_read=isinstance(self, ToolMarkerSymbolicRead),
+        )
 
     @staticmethod
     def _to_json(x: Any) -> str:

@@ -21,7 +21,7 @@ from mcp.server.session import ServerSessionT
 from mcp.shared.context import LifespanContextT, RequestT
 from mcp.shared.exceptions import UrlElicitationRequiredError
 from mcp.types import AudioContent, CallToolResult, Icon, ImageContent, ResourceLink, ToolAnnotations
-from pydantic import AnyUrl
+from pydantic import AnyUrl, ValidationError
 from pydantic_settings import SettingsConfigDict
 from sensai.util import logging
 
@@ -32,9 +32,10 @@ from serena.agent import (
 from serena.chatgpt_policy import CHATGPT_TOOL_DESCRIPTION_OVERRIDES
 from serena.config.serena_config import SerenaConfig
 from serena.constants import SERENA_LOG_FORMAT
+from serena.errors import UserFacingError
 from serena.execution import ExecutionAccess, bind_execution_id, get_current_execution_id, reset_execution_id
 from serena.session import get_mcp_session_id
-from serena.tools import Tool, ToolCallError
+from serena.tools import Tool
 from serena.tools.media_tools import read_result_file_link, register_file_export_resource
 from serena.util.exception import show_fatal_exception_safe
 
@@ -59,6 +60,35 @@ def configure_logging(*args, **kwargs) -> None:
 
 # patch the logging configuration function in fastmcp, because it's hard-coded and broken
 server.configure_logging = configure_logging  # type: ignore
+
+
+_MAX_EXTERNAL_ERROR_CHARS = 4000
+
+
+def _bound_external_error(text: str) -> str:
+    """Bounds one model-visible error string without changing its semantic content."""
+    message = text.strip()
+    if len(message) <= _MAX_EXTERNAL_ERROR_CHARS:
+        return message
+    return f"{message[: _MAX_EXTERNAL_ERROR_CHARS - 3]}..."
+
+
+def _format_validation_error(error: ValidationError) -> str:
+    """Formats Pydantic validation entries as one compact agent-recovery message."""
+    details: list[str] = []
+    for entry in error.errors(include_url=False, include_input=False):
+        location = ".".join(str(part) for part in entry.get("loc", ())) or "arguments"
+        message = str(entry.get("msg", "invalid value")).strip()
+        details.append(f"{location} {message}")
+    return _bound_external_error(f"Invalid arguments: {'; '.join(details)}.")
+
+
+def _format_unexpected_error(error: Exception) -> str:
+    """Formats one bounded internal failure without traceback or wrapper nesting."""
+    first_line = next((line.strip() for line in str(error).splitlines() if line.strip()), "")
+    if first_line:
+        return _bound_external_error(f"{error.__class__.__name__}: {first_line}")
+    return error.__class__.__name__
 
 
 class SerenaFastMCPTool(FastMCPTool):
@@ -113,16 +143,7 @@ class SerenaFastMCPTool(FastMCPTool):
             execution_id = get_current_execution_id()
             if execution_id is not None:
                 kwargs["execution_id"] = execution_id
-            try:
-                return tool.prepare_mcp_result(
-                    tool.apply_ex(
-                        log_call=True,
-                        catch_exceptions=False,
-                        **kwargs,
-                    )
-                )
-            except ToolCallError as e:
-                raise ToolError(e.get_error_message()) from e
+            return tool.prepare_mcp_result(tool.apply_ex(**kwargs))
 
         # derive a readable title and MCP capability hints
         tool_title = " ".join(word.capitalize() for word in func_name.split("_"))
@@ -188,22 +209,29 @@ class SerenaFastMCPTool(FastMCPTool):
                 execution_id=execution_id,
             )
 
-        def finish_execution(*, succeeded: bool, result: object | None = None, project_name: str | None = None) -> None:
+        def finish_execution(
+            *,
+            succeeded: bool,
+            result: object | None = None,
+            error: str | None = None,
+            project_name: str | None = None,
+        ) -> None:
             if self._activity_tracker is not None:
                 self._activity_tracker.finish_tool(
                     execution_id,
                     succeeded=succeeded,
                     result=result,
+                    error=error,
                     project_name=project_name,
                 )
             else:
-                media = ActivityMedia.from_result(result) if result is not None else None
-                serialized = execution_store.serialize_value(result) if result is not None and media is None else None
+                media = ActivityMedia.from_result(result) if succeeded and result is not None else None
+                serialized = execution_store.serialize_value(result) if succeeded and result is not None and media is None else None
                 execution_store.finish_execution(
                     execution_id,
                     succeeded=succeeded,
-                    result=serialized if succeeded else None,
-                    error=serialized if not succeeded else None,
+                    result=serialized,
+                    error=error,
                     project_name=project_name,
                     media=media.storage_dict() if media is not None else None,
                 )
@@ -220,12 +248,15 @@ class SerenaFastMCPTool(FastMCPTool):
                 self._activity_tracker.update_project(session_id, current_project_name)
             return current_project_name if self.name == "activate_project" else submission_project_name
 
-        def detach_worker(worker_task: asyncio.Task[Any], request_error: BaseException) -> None:
+        def finish_unexpected(error: Exception, *, project_name: str) -> str:
+            message = _format_unexpected_error(error)
+            log.error("Unexpected error executing tool %s: %s", self.name, error, exc_info=error)
+            finish_execution(succeeded=False, error=message, project_name=project_name)
+            return message
+
+        def detach_worker(worker_task: asyncio.Task[Any], request_error: str) -> None:
             """Keeps execution live until an abandoned request's worker actually stops."""
-            execution_store.mark_request_abandoned(
-                execution_id,
-                error=execution_store.serialize_value(request_error),
-            )
+            execution_store.mark_request_abandoned(execution_id, error=request_error)
 
             def finalize_detached_worker(completed: asyncio.Task[Any]) -> None:
                 try:
@@ -239,7 +270,7 @@ class SerenaFastMCPTool(FastMCPTool):
                     )
                 finish_execution(
                     succeeded=False,
-                    result=request_error,
+                    error=request_error,
                     project_name=completed_project_name(),
                 )
 
@@ -260,12 +291,23 @@ class SerenaFastMCPTool(FastMCPTool):
                 else:
                     with self._agent.submission_project_context(session_id):
                         worker_task = asyncio.create_task(asyncio.to_thread(self.fn, **arguments_parsed))
+            except ValidationError as error:
+                message = _format_validation_error(error)
+                finish_execution(succeeded=False, error=message, project_name=submission_project_name)
+                raise ToolError(message) from None
             except UrlElicitationRequiredError:
                 finish_execution(succeeded=False, project_name=submission_project_name)
                 raise
+            except ToolError as error:
+                finish_execution(succeeded=False, error=str(error), project_name=submission_project_name)
+                raise
+            except UserFacingError as error:
+                message = str(error)
+                finish_execution(succeeded=False, error=message, project_name=submission_project_name)
+                raise ToolError(message) from None
             except Exception as error:
-                finish_execution(succeeded=False, result=error, project_name=submission_project_name)
-                raise ToolError(f"Error executing tool {self.name}: {error}") from error
+                message = finish_unexpected(error, project_name=submission_project_name)
+                raise ToolError(message) from None
             except BaseException:
                 finish_execution(succeeded=False, project_name=submission_project_name)
                 raise
@@ -275,20 +317,27 @@ class SerenaFastMCPTool(FastMCPTool):
                     asyncio.shield(worker_task),
                     timeout=self._agent.serena_config.tool_timeout,
                 )
-            except TimeoutError as error:
-                request_error = TimeoutError(f"Tool execution timed out after {self._agent.serena_config.tool_timeout} seconds")
-                detach_worker(worker_task, request_error)
-                raise ToolError(f"Error executing tool {self.name}: {request_error}") from error
+            except TimeoutError:
+                message = f"Tool execution timed out after {self._agent.serena_config.tool_timeout} seconds."
+                detach_worker(worker_task, message)
+                raise ToolError(message) from None
             except asyncio.CancelledError:
-                request_error = RuntimeError("MCP request was cancelled while the tool worker was still running.")
-                detach_worker(worker_task, request_error)
+                message = "MCP request was cancelled while the tool worker was still running."
+                detach_worker(worker_task, message)
                 raise
             except UrlElicitationRequiredError:
                 finish_execution(succeeded=False, project_name=submission_project_name)
                 raise
+            except ToolError as error:
+                finish_execution(succeeded=False, error=str(error), project_name=submission_project_name)
+                raise
+            except UserFacingError as error:
+                message = str(error)
+                finish_execution(succeeded=False, error=message, project_name=submission_project_name)
+                raise ToolError(message) from None
             except Exception as error:
-                finish_execution(succeeded=False, result=error, project_name=submission_project_name)
-                raise ToolError(f"Error executing tool {self.name}: {error}") from error
+                message = finish_unexpected(error, project_name=submission_project_name)
+                raise ToolError(message) from None
             except BaseException:
                 finish_execution(succeeded=False, project_name=submission_project_name)
                 raise
@@ -298,8 +347,8 @@ class SerenaFastMCPTool(FastMCPTool):
                 if convert_result:
                     result = self.fn_metadata.convert_result(result)
             except Exception as error:
-                finish_execution(succeeded=False, result=error, project_name=completed_project_name())
-                raise ToolError(f"Error executing tool {self.name}: {error}") from error
+                message = finish_unexpected(error, project_name=completed_project_name())
+                raise ToolError(message) from None
 
             finish_execution(
                 succeeded=True,

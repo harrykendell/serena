@@ -972,7 +972,7 @@ class TestPromptProvision:
 
     @classmethod
     def _call_tool(cls, agent: SerenaAgent, tool_class: type[Tool], session_id: str = "global", **kwargs) -> str:
-        result = agent.get_tool(tool_class).apply_ex(mcp_ctx=cls.MockContext(session_id), catch_exceptions=False, **kwargs)
+        result = agent.get_tool(tool_class).apply_ex(mcp_ctx=cls.MockContext(session_id), **kwargs)
         return result
 
     @staticmethod

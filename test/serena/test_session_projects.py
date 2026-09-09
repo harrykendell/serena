@@ -13,6 +13,7 @@ from mcp.types import RequestParams
 from serena.activity import ActivityTracker
 from serena.agent import SerenaAgent
 from serena.config.serena_config import ProjectConfig, RegisteredProject, SerenaConfig
+from serena.errors import UserFacingError
 from serena.execution import ExecutionAccess
 from serena.mcp import SerenaMCPFactory
 from serena.project import Project
@@ -25,7 +26,6 @@ from serena.tools import (
     ReadMemoryTool,
     RenameSymbolTool,
     ReplaceContentTool,
-    ToolCallError,
     WriteMemoryTool,
 )
 from solidlsp.ls_config import LanguageServerId
@@ -77,7 +77,6 @@ def _activate(agent: SerenaAgent, session_id: str, project_name: str) -> str:
         tool.apply_ex(
             project=project_name,
             mcp_ctx=_mcp_context(session_id),
-            catch_exceptions=False,
         ),
     )
 
@@ -122,7 +121,6 @@ def test_lsp_termination_restarts_and_replays_read_once(
     result = tool.apply_ex(
         name_path_pattern="Example",
         mcp_ctx=_mcp_context("session-a"),
-        catch_exceptions=False,
     )
 
     assert result == "recovered"
@@ -155,13 +153,12 @@ def test_lsp_termination_restarts_but_does_not_replay_write(
         lambda: SimpleNamespace(restart_language_server=restarted_languages.append),
     )
 
-    with pytest.raises(ToolCallError, match="Re-inspect the affected state"):
+    with pytest.raises(UserFacingError, match="Re-inspect the affected state"):
         tool.apply_ex(
             name_path="Example",
             relative_path="example.py",
             new_name="Renamed",
             mcp_ctx=_mcp_context("session-a"),
-            catch_exceptions=False,
         )
 
     assert apply_calls == 1
@@ -193,11 +190,10 @@ def test_lsp_termination_replays_read_at_most_once(
         lambda: SimpleNamespace(restart_language_server=restarted_languages.append),
     )
 
-    with pytest.raises(ToolCallError, match="SolidLSPException"):
+    with pytest.raises(SolidLSPException, match="language server stopped"):
         tool.apply_ex(
             name_path_pattern="Example",
             mcp_ctx=_mcp_context("session-a"),
-            catch_exceptions=False,
         )
 
     assert apply_calls == 2
@@ -239,7 +235,6 @@ def test_startup_project_sessions_share_serialization(tmp_path: Path, monkeypatc
                 relative_path="first.txt",
                 content="first",
                 mcp_ctx=_mcp_context("session-a"),
-                catch_exceptions=False,
             )
             assert first_entered.wait(timeout=5)
             second = executor.submit(
@@ -247,7 +242,6 @@ def test_startup_project_sessions_share_serialization(tmp_path: Path, monkeypatc
                 relative_path="second.txt",
                 content="second",
                 mcp_ctx=_mcp_context("session-b"),
-                catch_exceptions=False,
             )
             assert not second_entered.wait(timeout=0.25)
             release_first.set()
@@ -323,7 +317,6 @@ def test_new_runtime_initializes_once_before_first_project_tool(
             read_tool.apply_ex,
             relative_path="value.txt",
             mcp_ctx=_mcp_context("session-b"),
-            catch_exceptions=False,
         )
         assert not read_entered.wait(timeout=0.25)
         release_init.set()
@@ -360,7 +353,6 @@ def test_project_runtime_initialization_is_independent_across_projects(
             read_tool.apply_ex(
                 relative_path="value.txt",
                 mcp_ctx=_mcp_context("session-b"),
-                catch_exceptions=False,
             )
             == "beta"
         )
@@ -392,19 +384,18 @@ def test_runtime_initialization_failure_is_shared_by_bound_sessions(
     assert init_failed.wait(timeout=5)
 
     read_tool = agent.get_tool(ReadFileTool)
-    errors: list[ToolCallError] = []
+    errors: list[RuntimeError] = []
     for session_id in ("session-a", "session-b"):
         try:
             read_tool.apply_ex(
                 relative_path="value.txt",
                 mcp_ctx=_mcp_context(session_id),
-                catch_exceptions=False,
             )
-        except ToolCallError as exc:
+        except RuntimeError as exc:
             errors.append(exc)
 
     assert len(errors) == 2
-    assert all("runtime initialization failed" in error.get_error_message() for error in errors)
+    assert all("runtime initialization failed" in str(error) for error in errors)
 
 
 def test_sessions_bind_projects_independently(multi_project_agent: tuple[SerenaAgent, dict[str, Path]]) -> None:
@@ -437,11 +428,95 @@ def test_replace_content_works_without_language_server(multi_project_agent: tupl
         repl='href="new"',
         mode="literal",
         mcp_ctx=_mcp_context("session-a"),
-        catch_exceptions=False,
     )
 
     assert result == "OK"
     assert target.read_text() == '<a href="new">dashboard</a>'
+
+
+def test_replace_content_mcp_failure_is_single_line_and_persisted(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
+) -> None:
+    agent, roots = multi_project_agent
+    target = roots["project_a"] / "index.html"
+    target.write_text('<a href="old">dashboard</a>')
+    _activate(agent, "session-a", "project_a")
+
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(ReplaceContentTool))
+
+    async def scenario() -> None:
+        with pytest.raises(ToolError) as exc_info:
+            await mcp_tool.run(
+                {
+                    "relative_path": "index.html",
+                    "needle": 'href="missing"',
+                    "repl": 'href="new"',
+                    "mode": "literal",
+                },
+                context=_mcp_context("session-a"),
+            )
+
+        message = str(exc_info.value)
+        assert "No matches of search expression found." in message
+        assert "\n" not in message
+        assert "Error executing tool" not in message
+        assert "Traceback" not in message
+
+        record = agent.execution_store.list_session_executions("session-a")[-1]
+        assert record.status == "failed"
+        assert record.error == message
+
+    asyncio.run(scenario())
+
+
+def test_mcp_validation_failure_is_compact_and_persisted(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "session-a", "project_a")
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(ReadFileTool))
+
+    async def scenario() -> None:
+        with pytest.raises(ToolError) as exc_info:
+            await mcp_tool.run({}, context=_mcp_context("session-a"))
+
+        message = str(exc_info.value)
+        assert message.startswith("Invalid arguments:")
+        assert "relative_path" in message
+        assert "\n" not in message
+        assert "https://" not in message
+
+        record = agent.execution_store.list_session_executions("session-a")[-1]
+        assert record.status == "failed"
+        assert record.error == message
+
+    asyncio.run(scenario())
+
+
+def test_mcp_user_facing_failure_has_no_additional_wrapper(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, roots = multi_project_agent
+    (roots["project_a"] / "value.txt").write_text("alpha")
+    _activate(agent, "session-a", "project_a")
+    tool = agent.get_tool(ReadFileTool)
+
+    def expected_failure(**kwargs: Any) -> str:
+        del kwargs
+        raise UserFacingError("Expected request failure.")
+
+    monkeypatch.setattr(tool, "apply", expected_failure)
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(tool)
+
+    async def scenario() -> None:
+        with pytest.raises(ToolError) as exc_info:
+            await mcp_tool.run({"relative_path": "value.txt"}, context=_mcp_context("session-a"))
+
+        assert str(exc_info.value) == "Expected request failure."
+        record = agent.execution_store.list_session_executions("session-a")[-1]
+        assert record.error == "Expected request failure."
+
+    asyncio.run(scenario())
 
 
 def test_different_project_reads_can_interleave(
@@ -475,14 +550,12 @@ def test_different_project_reads_can_interleave(
             tool.apply_ex,
             relative_path="value.txt",
             mcp_ctx=_mcp_context("session-a"),
-            catch_exceptions=False,
         )
         assert first_entered.wait(timeout=5)
         second = executor.submit(
             tool.apply_ex,
             relative_path="value.txt",
             mcp_ctx=_mcp_context("session-b"),
-            catch_exceptions=False,
         )
         assert second_entered.wait(timeout=1)
         release_first.set()
@@ -521,14 +594,12 @@ def test_same_project_plain_reads_can_overlap(
             tool.apply_ex,
             relative_path="first.txt",
             mcp_ctx=_mcp_context("session-a"),
-            catch_exceptions=False,
         )
         assert first_entered.wait(timeout=5)
         second = executor.submit(
             tool.apply_ex,
             relative_path="second.txt",
             mcp_ctx=_mcp_context("session-b"),
-            catch_exceptions=False,
         )
         try:
             assert second_entered.wait(timeout=1)
@@ -571,7 +642,6 @@ def test_same_project_write_waits_for_active_read(
             read_tool.apply_ex,
             relative_path="value.txt",
             mcp_ctx=_mcp_context("session-read"),
-            catch_exceptions=False,
         )
         assert read_entered.wait(timeout=5)
         write_future = executor.submit(
@@ -579,7 +649,6 @@ def test_same_project_write_waits_for_active_read(
             relative_path="written.txt",
             content="written",
             mcp_ctx=_mcp_context("session-write"),
-            catch_exceptions=False,
         )
         assert not write_entered.wait(timeout=0.25)
         release_read.set()
@@ -620,7 +689,6 @@ def test_different_project_writes_can_overlap(
             relative_path="first.txt",
             content="first",
             mcp_ctx=_mcp_context("session-a"),
-            catch_exceptions=False,
         )
         assert first_entered.wait(timeout=5)
 
@@ -629,7 +697,6 @@ def test_different_project_writes_can_overlap(
             relative_path="second.txt",
             content="second",
             mcp_ctx=_mcp_context("session-b"),
-            catch_exceptions=False,
         )
         assert second_entered.wait(timeout=1)
         assert (roots["project_b"] / "second.txt").read_text() == "second"
@@ -670,7 +737,6 @@ def test_same_project_writes_are_serialized(
             relative_path="first.txt",
             content="first",
             mcp_ctx=_mcp_context("session-a"),
-            catch_exceptions=False,
         )
         assert first_entered.wait(timeout=5)
 
@@ -679,7 +745,6 @@ def test_same_project_writes_are_serialized(
             relative_path="second.txt",
             content="second",
             mcp_ctx=_mcp_context("session-b"),
-            catch_exceptions=False,
         )
         assert not second_entered.wait(timeout=0.25)
 
@@ -721,7 +786,6 @@ def test_timed_out_writer_keeps_exclusion_until_operation_stops(
             relative_path="first.txt",
             content="first",
             mcp_ctx=_mcp_context("session-a"),
-            catch_exceptions=False,
         )
         assert first_entered.wait(timeout=5)
         with pytest.raises(TimeoutError):
@@ -732,7 +796,6 @@ def test_timed_out_writer_keeps_exclusion_until_operation_stops(
             relative_path="second.txt",
             content="second",
             mcp_ctx=_mcp_context("session-b"),
-            catch_exceptions=False,
         )
         try:
             assert not second_entered.wait(timeout=0.3)
@@ -809,6 +872,7 @@ def test_mcp_timeout_returns_before_worker_without_releasing_write_exclusion(
         assert first_record.finished_at is not None
         assert first_record.request_finished_at is not None
         assert first_record.finished_at >= first_record.request_finished_at
+        assert first_record.error == first_record.request_error
 
     asyncio.run(scenario())
 
@@ -878,6 +942,7 @@ def test_mcp_cancellation_keeps_execution_live_until_worker_stops(
         assert first_record.finished_at is not None
         assert first_record.request_finished_at is not None
         assert first_record.finished_at >= first_record.request_finished_at
+        assert first_record.error == first_record.request_error
 
     asyncio.run(scenario())
 
@@ -929,7 +994,6 @@ def test_switching_one_session_does_not_redirect_another(multi_project_agent: tu
         relative_path="still-a.txt",
         content="a",
         mcp_ctx=_mcp_context("session-b"),
-        catch_exceptions=False,
     )
     assert (roots["project_a"] / "still-a.txt").read_text() == "a"
     assert not (roots["project_b"] / "still-a.txt").exists()
@@ -973,7 +1037,6 @@ def test_queued_tool_remains_pinned_to_project_selected_at_submission(
             activation_tool.apply_ex,
             project="project_b",
             mcp_ctx=_mcp_context("session-a"),
-            catch_exceptions=False,
         )
         assert activation_entered.wait(timeout=5)
 
@@ -981,7 +1044,6 @@ def test_queued_tool_remains_pinned_to_project_selected_at_submission(
             read_tool.apply_ex,
             relative_path="value.txt",
             mcp_ctx=_mcp_context("session-a"),
-            catch_exceptions=False,
         )
         assert read_entered.wait(timeout=5)
 
