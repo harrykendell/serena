@@ -9,7 +9,6 @@ SERENA_MANAGED_DIR_NAME = ".serena"
 # TODO: Path-related constants should be moved to SerenaPaths; don't add further constants here.
 REPO_ROOT = str(_repo_root_path)
 RESOURCES_DIR = str(_resources_path)
-PROMPT_TEMPLATES_DIR_INTERNAL = str(_resources_path / "config" / "prompt_templates")
 SERENA_DASHBOARD_DIR = str(_resources_path / "dashboard")
 SERENA_ICON_DIR = str(_resources_path / "icons")
 

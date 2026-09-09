@@ -153,36 +153,20 @@ You can manage modes using the `mode` command,
     serena mode delete <mode-name>
 
 (prompt-templates)=
-## Prompt Templates
+## Project Prompt Templates
 
-All prompts that Serena provides to the LLM are [Jinja2](https://jinja.palletsprojects.com/) templates.
-Templating applies to
+Serena's runtime instruction manual is fixed for the ChatGPT product. Project-specific `initial_prompt` content in `project.yml` remains a Jinja2 template so it can incorporate live project/session information.
 
- * **Serena's system prompt** (the "Serena Instructions Manual"), which is defined in the prompt template `system_prompt`
-   (see [Custom Prompts](custom-prompts) for how to override it),
- * **context and mode prompts**, i.e. the `prompt` field in context and mode definition files, and
- * **the project prompt**, i.e. `initial_prompt` in `project.yml`, which is provided to the LLM upon project activation.
+The following values are available while rendering a project prompt:
 
-Templating allows prompts to adapt to the active configuration; for instance, a mode prompt can mention a tool
-only if that tool is actually available in the current session.
+| Value | Description |
+|-------|-------------|
+| `available_tools` | names of the tools exposed to ChatGPT |
+| `available_markers` | names of tool categories represented by the exposed tools |
+| `tool_names` | mapping from canonical tool names to their effective exposed names |
+| `embed_memory(name)` | embeds a project memory wrapped in a `<memory name="...">` tag; failures are logged and render as empty text |
 
-### Variables and Functions
-
-The following variables can be used in all of the above templates:
-
-| Variable            | Description                                                                                                                                                                                                                                                                                                                                                |
-|---------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `available_tools`   | the list of names of the tools that are currently exposed to the LLM. Use it to include content conditionally, e.g. `{% if 'replace_content' in available_tools %}…{% endif %}`.                                                                                                                                                                           |
-| `available_markers` | the list of names of the tool markers (tool categories, e.g. `ToolMarkerSymbolicRead`) for which at least one tool is exposed; useful for conditioning on entire groups of tools.                                                                                                                                                                          |
-| `tool_names`        | a mapping from canonical tool names to effective tool names, including legacy tool renames. Prefer `{{ tool_names['find_symbol'] }}` over hard-coded names. |
-
-Context, mode and project prompts (but not Serena's system prompt) additionally support the following function:
-
-| Function             | Description                                                                                                                                                                                                                                                                       |
-|----------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `embed_memory(name)` | embeds the content of the memory with the given name, wrapped in a tag `<memory name="...">`. Use this to inline knowledge that shall always be provided to the LLM rather than being loaded on demand. If the memory cannot be loaded, an error is logged and nothing is rendered. |
-
-For example, a project can inline its coding conventions from a memory into the project prompt:
+For example, a project can inline its coding conventions from a memory:
 
 ```yaml
 initial_prompt: |
@@ -1298,25 +1282,6 @@ Supported settings:
 | `ls_path` | managed install | Override the `yaml-language-server` executable path. |
 | `yaml_language_server_version` | `1.19.2` | Override the npm package version Serena installs when `ls_path` is not set. |
 | `npm_registry` | `null` | Override the npm registry Serena uses for the managed install. |
-
-(custom-prompts)=
-### Custom Prompts
-
-All of Serena's prompts can be fully customized.
-We define prompt as jinja templates in yaml files, and you can inspect our default prompts [here](https://github.com/oraios/serena/tree/main/src/serena/resources/config/prompt_templates).
-
-To override a prompt, simply add a .yml file to the `prompt_templates` folder in your Serena data directory
-which defines the prompt with the same name as the default prompt you want to override.
-For example, to override the `system_prompt`, you could create a file `~/.serena/prompt_templates/system_prompt.yml` (assuming default Serena data folder location) 
-with content like:
-
-```yaml
-prompts:
-  system_prompt: |
-    Whatever you want ...
-```
-
-It is advisable to use the default prompt as a starting point and modify it to suit your needs.
 
 ### Usage Reporting
 

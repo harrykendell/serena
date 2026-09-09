@@ -108,25 +108,6 @@ To set up the Serena MCP server for Claude Code, you can simply run this command
 
 Find manual setup instructions as well as workarounds for Claude Code's recent regressions pertaining to (external) tool use below.
 
-:::{attention}
-Recent updates to Claude Code (CC) and to the Opus line of models resulted in drastically reduced
-adherence to instructions pertaining to Serena's tools.
-
-After extensive analysis, we identified part of the reason to be very long and detailed
-tool descriptions for built-in tools and parts of the default system prompt. 
-The descriptions of CC's system tools take almost 16k tokens, cannot be adjusted by the user,
-and introduce a very strong bias towards internal tools, making it almost impossible to convince Opus 4.7 to use Serena.
-
-As a workaround, we crafted a system prompt that counteracts this bias.
-When using Serena, we highly recommend that you start CC as 
-
-```shell
-claude --system-prompt="$(serena prompts print-cc-system-prompt-override)"
-```
-
-You can also consider adding the content of `serena cc-system-prompt-override` to your `CLAUDE.md` files,
-but the effect be insufficient for counteracting Claude Code's bias towards internal tools.
-:::
 
 **Global Configuration**. To add the Serena MCP server for all your projects, use the user-level configuration of claude code and the `--project-from-cwd` flag:
 

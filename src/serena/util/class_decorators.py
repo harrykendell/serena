@@ -1,8 +1,6 @@
 from typing import Any
 
 
-# duplicate of interprompt.class_decorators
-# We don't want to depend on interprompt for this in serena, so we duplicate it here
 def singleton(cls: type[Any]) -> Any:
     instance = None
 

@@ -20,7 +20,6 @@ from sensai.util.helper import mark_used
 from sensai.util.logging import LogTime
 from sensai.util.string import dict_string
 
-from interprompt.jinja_template import JinjaTemplate
 from serena import serena_version
 from serena.chatgpt_policy import CHATGPT_PRODUCT_PROMPT
 from serena.config.serena_config import SerenaConfig, SerenaPaths
@@ -490,8 +489,8 @@ class SerenaAgent:
                 log.error("Tried to embed memory '%s' but failed to load it: %s", memory_name, e)
                 return ""
 
-        template = JinjaTemplate(prompt_template)
-        text = template.render(
+        text = self.prompt_factory.render_template(
+            prompt_template,
             available_tools=self._exposed_tools.tool_names,
             available_markers=self._exposed_tools.tool_marker_names,
             tool_names=self._prompt_tool_names_mapping,

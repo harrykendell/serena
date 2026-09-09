@@ -95,7 +95,7 @@ dev = [
 Homepage = "https://github.com/oraios/serena"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/serena", "src/orchestrator", "src/mcp_runtime", "src/interprompt", "src/solidlsp"]
+packages = ["src/serena", "src/orchestrator", "src/mcp_runtime", "src/solidlsp"]
 
 [tool.doc8]
 max-line-length = 1000

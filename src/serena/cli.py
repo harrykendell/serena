@@ -1,8 +1,6 @@
 import collections
-import glob
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -24,12 +22,8 @@ from serena.config.serena_config import (
     SerenaConfig,
     SerenaPaths,
 )
-from serena.constants import (
-    PROMPT_TEMPLATES_DIR_INTERNAL,
-    SERENA_LOG_FORMAT,
-)
+from serena.constants import SERENA_LOG_FORMAT
 from serena.execution import ExecutionAccess
-from serena.prompt_factory import SerenaPromptFactory
 from serena.tools import ActivateProjectTool
 from serena.util.cli_util import AutoRegisteringGroup
 from solidlsp.ls_config import LanguageServerId
@@ -1019,131 +1013,14 @@ class MemoryCommands(AutoRegisteringGroup):
         click.echo(report.format())
 
 
-class PromptCommands(AutoRegisteringGroup):
-    def __init__(self) -> None:
-        super().__init__(name="prompts", help="Commands related to Serena's prompt templates.")
-
-    @staticmethod
-    def _get_user_prompt_yaml_path(prompt_yaml_name: str) -> str:
-        templates_dir = SerenaPaths().user_prompt_templates_dir
-        os.makedirs(templates_dir, exist_ok=True)
-        return os.path.join(templates_dir, prompt_yaml_name)
-
-    @staticmethod
-    @click.command(
-        "list", help="Lists prompt names and YAML files that can be overridden.", context_settings={"max_content_width": _MAX_CONTENT_WIDTH}
-    )
-    def list() -> None:
-        # list prompt names
-        click.echo("Prompts:")
-        factory = SerenaPromptFactory()
-        for key in factory.get_prompt_names():
-            template = factory.get_prompt_template(key)
-            is_overridden = not template.path.startswith(PROMPT_TEMPLATES_DIR_INTERNAL)
-            click.echo(f" * '{key}' ({template.path if is_overridden else 'default'})")
-
-        # list prompts files
-        click.echo("\nPrompt files (which you can override with the create-override command):")
-        serena_prompt_yaml_names = [os.path.basename(f) for f in glob.glob(PROMPT_TEMPLATES_DIR_INTERNAL + "/*.yml")]
-        for prompt_yaml_name in serena_prompt_yaml_names:
-            user_prompt_yaml_path = PromptCommands._get_user_prompt_yaml_path(prompt_yaml_name)
-            if os.path.exists(user_prompt_yaml_path):
-                click.echo(f" * {user_prompt_yaml_path} merged with default prompts in {prompt_yaml_name}")
-            else:
-                click.echo(f" * {prompt_yaml_name}")
-
-    @staticmethod
-    @click.command(
-        "create-override",
-        help="Create an override of an internal prompts yaml for customizing Serena's prompts",
-        context_settings={"max_content_width": _MAX_CONTENT_WIDTH},
-    )
-    @click.argument("prompt_yaml_name")
-    def create_override(prompt_yaml_name: str) -> None:
-        """
-        :param prompt_yaml_name: The yaml name of the prompt you want to override. Call the `list` command for discovering valid prompt yaml names.
-        :return:
-        """
-        # for convenience, we can pass names without .yml
-        if not prompt_yaml_name.endswith(".yml"):
-            prompt_yaml_name = prompt_yaml_name + ".yml"
-        user_prompt_yaml_path = PromptCommands._get_user_prompt_yaml_path(prompt_yaml_name)
-        if os.path.exists(user_prompt_yaml_path):
-            raise FileExistsError(f"{user_prompt_yaml_path} already exists.")
-        serena_prompt_yaml_path = os.path.join(PROMPT_TEMPLATES_DIR_INTERNAL, prompt_yaml_name)
-        shutil.copyfile(serena_prompt_yaml_path, user_prompt_yaml_path)
-        _open_in_editor(user_prompt_yaml_path)
-
-    @staticmethod
-    @click.command(
-        "edit-override", help="Edit an existing prompt override file", context_settings={"max_content_width": _MAX_CONTENT_WIDTH}
-    )
-    @click.argument("prompt_yaml_name")
-    def edit_override(prompt_yaml_name: str) -> None:
-        """
-        :param prompt_yaml_name: The yaml name of the prompt override to edit.
-        :return:
-        """
-        # for convenience, we can pass names without .yml
-        if not prompt_yaml_name.endswith(".yml"):
-            prompt_yaml_name = prompt_yaml_name + ".yml"
-        user_prompt_yaml_path = PromptCommands._get_user_prompt_yaml_path(prompt_yaml_name)
-        if not os.path.exists(user_prompt_yaml_path):
-            click.echo(f"Override file '{prompt_yaml_name}' not found. Create it with: prompts create-override {prompt_yaml_name}")
-            return
-        _open_in_editor(user_prompt_yaml_path)
-
-    @staticmethod
-    @click.command("list-overrides", help="List existing prompt override files", context_settings={"max_content_width": _MAX_CONTENT_WIDTH})
-    def list_overrides() -> None:
-        user_templates_dir = SerenaPaths().user_prompt_templates_dir
-        os.makedirs(user_templates_dir, exist_ok=True)
-        serena_prompt_yaml_names = [os.path.basename(f) for f in glob.glob(PROMPT_TEMPLATES_DIR_INTERNAL + "/*.yml")]
-        override_files = glob.glob(os.path.join(user_templates_dir, "*.yml"))
-        for file_path in override_files:
-            if os.path.basename(file_path) in serena_prompt_yaml_names:
-                click.echo(file_path)
-
-    @staticmethod
-    @click.command("delete-override", help="Delete a prompt override file", context_settings={"max_content_width": _MAX_CONTENT_WIDTH})
-    @click.argument("prompt_yaml_name")
-    def delete_override(prompt_yaml_name: str) -> None:
-        """
-
-        :param prompt_yaml_name:  The yaml name of the prompt override to delete."
-        :return:
-        """
-        # for convenience, we can pass names without .yml
-        if not prompt_yaml_name.endswith(".yml"):
-            prompt_yaml_name = prompt_yaml_name + ".yml"
-        user_prompt_yaml_path = PromptCommands._get_user_prompt_yaml_path(prompt_yaml_name)
-        if not os.path.exists(user_prompt_yaml_path):
-            click.echo(f"Override file '{prompt_yaml_name}' not found.")
-            return
-        os.remove(user_prompt_yaml_path)
-        click.echo(f"Deleted override file '{prompt_yaml_name}'.")
-
-    @staticmethod
-    @click.command(
-        "print-prompt-template",
-        help="prints the (unrendered) template for the corresponding prompt name. "
-        "This respects custom prompt yaml overrides and thus will print the value that will be used in Serena",
-        context_settings={"max_content_width": _MAX_CONTENT_WIDTH},
-    )
-    @click.argument("prompt_name", type=str)
-    def print_prompt_template(prompt_name: str) -> None:
-        click.echo(SerenaPromptFactory().get_prompt_template_string(prompt_name))
-
-
 _project = ProjectCommands()
 _config = SerenaConfigCommands()
 _tools = ToolCommands()
-_prompts = PromptCommands()
 _memories = MemoryCommands()
 
 # Expose so we can use this as an entrypoint
 top_level = TopLevelCommands()
 
 # needed for the help script to work - register all subcommands to the top-level group
-for subgroup in (_project, _config, _tools, _prompts, _memories):
+for subgroup in (_project, _config, _tools, _memories):
     top_level.add_command(subgroup)

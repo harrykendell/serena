@@ -65,7 +65,6 @@ class SerenaPaths:
             home_dir = home_dir.strip()
         self.resources_dir: str = RESOURCES_DIR
         self.serena_user_home_dir: str = home_dir
-        self.user_prompt_templates_dir: str = os.path.join(self.serena_user_home_dir, "prompt_templates")
         global_memories_path = Path(os.path.join(self.serena_user_home_dir, "memories", "global"))
         global_memories_path.mkdir(parents=True, exist_ok=True)
         self.global_memories_path = global_memories_path

@@ -12,16 +12,15 @@ Serena is an MCP-based "IDE for coding agents": semantic code retrieval/editing/
   - `chatgpt_policy.py` + `tools/MCP_TOOL_CLASSES` — fixed ChatGPT product instructions, tool-description overrides, and explicit MCP tool catalogue
   - `code_editor.py`, `symbol.py`, `ls_manager.py` — symbolic editing / LS lifecycle
   - `dashboard.py`, `custom_dashboard.py` — browser dashboard backend and Kendell dashboard
-  - `prompt_factory.py` + `generated/generated_prompt_factory.py` — prompts (regenerate with `scripts/gen_prompt_factory.py`)
+  - `prompt_factory.py` — fixed ChatGPT prompts and Serena-local sandboxed Jinja rendering
 - `src/solidlsp/` — LSP client framework; per-language servers under `language_servers/`
-- `src/interprompt/` — prompt template library (synced from external repo; see `.syncCommitId.*`)
 - `test/serena/`, `test/solidlsp/<lang>/` — pytest suites; per-language tests gated by pytest markers
 - `test/resources/repos/<lang>/` — fixture projects used by language-server tests
-- `scripts/` — utilities (prompt regen, tool overview, profiling)
+- `scripts/` — utilities (tool overview, profiling, maintenance)
 - `docs/` — Jupyter Book sources; build via `poe doc-build`
 
 ## Project-wide invariants
 
-- Package name (PyPI): `serena-agent`; Wheel includes `serena`, `interprompt`, `solidlsp`.
+- Package name (PyPI): `serena-agent`; wheel includes `serena`, `orchestrator`, `mcp_runtime`, `solidlsp`.
 - Python: `>=3.11, <3.15`. Dependencies are exact-pinned in `pyproject.toml` (uvx installs from git, lockfile ignored — pin exactly).
 - Entry points: `serena` → `serena.cli:top_level`; `orchestrator` → `orchestrator.cli:main`.

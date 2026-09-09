@@ -157,15 +157,6 @@ serena mode create my-custom-mode
 
 # edit a custom mode
 serena mode edit my-custom-mode
-
-# list available prompt definitions
-serena prompts list
-
-# create an override for internal prompts
-serena prompts create-override prompt-name
-
-# edit a prompt override
-serena prompts edit-override prompt-name
 ```
 
 Explore the full set of commands and options using the CLI itself!

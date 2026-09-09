@@ -16,7 +16,7 @@ from sensai.util.string import dict_string
 from serena.execution import ExecutionAccess
 from serena.memories.memory_manager import MemoryManager
 from serena.project import Project
-from serena.prompt_factory import PromptFactory
+from serena.prompt_factory import SerenaPromptFactory
 from serena.session import get_mcp_session_id
 from serena.util.class_decorators import singleton
 from serena.util.ls_diagnostics import DiagnosticsDiff, EditedFilePath, PublishedDiagnosticsSnapshot
@@ -43,7 +43,7 @@ class Component(ABC):
         return self.project.project_root
 
     @property
-    def prompt_factory(self) -> PromptFactory:
+    def prompt_factory(self) -> SerenaPromptFactory:
         return self.agent.prompt_factory
 
     @property
