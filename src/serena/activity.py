@@ -4,15 +4,16 @@ import re
 import threading
 import time
 import uuid
-from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Literal, Protocol, cast
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, ResourceLink
 
-from serena.activity_history import ActivityHistoryStore
+from serena.execution_store import ExecutionRecord, ExecutionStore
 from serena.jobs import JobManager, JobRecord, JobSnapshot, JobStatus
 from serena.session import get_mcp_session_id  # noqa: F401 - compatibility re-export
 
@@ -475,7 +476,7 @@ class ActivityDetailFormatter:
 
 
 class ActivityTracker:
-    """Tracks Serena tool activity and lightweight durable-job state per ChatGPT conversation."""
+    """Presents execution-store state as ChatGPT activity panels and durable-job detail."""
 
     _JOB_LIST_LIMIT = 100
     _JOB_CACHE_SECONDS = 2.0
@@ -483,105 +484,38 @@ class ActivityTracker:
     def __init__(
         self,
         job_source: ActivityJobSource | None = None,
-        history_store: ActivityHistoryStore | None = None,
+        execution_store: ExecutionStore | None = None,
     ) -> None:
         self._lock = threading.RLock()
-        self._runs: OrderedDict[str, ActivityRun] = OrderedDict()
-        self._current_run_by_session: dict[str, str] = {}
         self._job_source = job_source or JobManager()
         self._job_cache_at = 0.0
         self._job_cache: list[JobRecord] = []
-        self._history_store = history_store if history_store is not None else (ActivityHistoryStore() if job_source is None else None)
-        self._load_history()
+        self._temporary_store_dir: TemporaryDirectory[str] | None = None
+        if execution_store is not None:
+            self._execution_store = execution_store
+        elif job_source is None:
+            self._execution_store = ExecutionStore()
+        else:
+            self._temporary_store_dir = TemporaryDirectory(prefix="serena-activity-store-")
+            self._execution_store = ExecutionStore(
+                root=Path(self._temporary_store_dir.name),
+                migrate_legacy=False,
+            )
 
-    def _load_history(self) -> None:
-        """Loads persisted runs as historical panels without making them current."""
-        if self._history_store is None:
-            return
-
-        loaded_at = time.time()
-        for payload in self._history_store.load():
-            try:
-                run = ActivityRun.from_storage_dict(payload)
-            except (KeyError, TypeError, ValueError):
-                continue
-
-            changed = not run.superseded
-            run.superseded = True
-            for call in run.calls:
-                if call.status != "running":
-                    continue
-                call.status = "cancelled"
-                call.finished_at = call.finished_at or loaded_at
-                changed = True
-            self._runs[run.run_id] = run
-
-            if changed:
-                self._save_run(run)
-        self._prune_runs()
-
-    def _snapshot_jobs(self, run: ActivityRun, records: list[JobRecord]) -> None:
-        """Retains lightweight rows for jobs owned by one activity turn."""
-        if not run.job_ids:
-            return
-
-        owned = {record.job_id: record for record in records if record.job_id in run.job_ids}
-        retained = {str(job.get("job_id")): dict(job) for job in run.retained_jobs if job.get("job_id")}
-        for job_id, record in owned.items():
-            retained[job_id] = self._job_payload(record) | {"current_turn": True}
-        next_jobs = [retained[job_id] for job_id in run.job_ids if job_id in retained]
-        if next_jobs == run.retained_jobs:
-            return
-        run.retained_jobs = next_jobs
-        self._save_run(run)
-
-    def _save_run(self, run: ActivityRun) -> None:
-        """Persists one run when history retention is enabled."""
-        if self._history_store is None:
-            return
-        try:
-            self._history_store.save(run.storage_dict())
-        except (OSError, ValueError):
-            pass
+    @property
+    def execution_store(self) -> ExecutionStore:
+        """Returns the authoritative execution store backing this presentation layer."""
+        return self._execution_store
 
     def start_run(self, session_id: str, project_name: str) -> dict[str, Any]:
-        """Starts a new activity run for ``session_id`` and returns its initial snapshot.
-
-        Any tool still running in the superseded panel is carried into the new run so
-        opening another activity panel cannot orphan its live state.
-        """
-        with self._lock:
-            previous_run_id = self._current_run_by_session.get(session_id)
-            previous_run = self._runs.get(previous_run_id) if previous_run_id is not None else None
-            continuing_calls: list[ActivityCall] = []
-            if previous_run is not None:
-                previous_run.superseded = True
-                continuing_calls = [call for call in previous_run.calls if call.status == "running"]
-                self._save_run(previous_run)
-
-            run = ActivityRun(
-                run_id=uuid.uuid4().hex,
-                session_id=session_id,
-                project_name=project_name,
-                started_at=time.time(),
-                calls=continuing_calls,
-            )
-            self._runs[run.run_id] = run
-            self._current_run_by_session[session_id] = run.run_id
-            self._save_run(run)
-            self._prune_runs()
-            run_id = run.run_id
-
-        return self.get_run(session_id, run_id)
+        """Starts a new activity panel run for ``session_id`` and returns its snapshot."""
+        run = self._execution_store.start_activity_run(session_id, project_name)
+        return self.get_run(session_id, run.run_id)
 
     def update_project(self, session_id: str, project_name: str) -> None:
-        """Updates project attribution for the current activity run of ``session_id``."""
-        with self._lock:
-            run_id = self._current_run_by_session.get(session_id)
-            run = self._runs.get(run_id) if run_id is not None else None
-            if run is not None:
-                run.project_name = project_name
-                self._save_run(run)
+        """Updates project attribution for the current activity run and session."""
+        self._execution_store.update_activity_run_project(session_id, project_name)
+        self._execution_store.update_session_project(session_id, project_name)
 
     def start_tool(
         self,
@@ -589,35 +523,26 @@ class ActivityTracker:
         tool_name: str,
         arguments: dict[str, Any],
         project_name: str = "",
-    ) -> str | None:
-        """Records one tool invocation when an activity run is active for ``session_id``."""
-        with self._lock:
-            run_id = self._current_run_by_session.get(session_id)
-            run = self._runs.get(run_id) if run_id is not None else None
-            if run is None:
-                return None
-
-            summary = self._summarize_arguments(tool_name, arguments)
-            if tool_name == "job_status":
-                job_id = arguments.get("job_id")
-                if isinstance(job_id, str) and job_id:
-                    label = self._known_job_label(job_id)
-                    if label:
-                        summary = self._summarize_arguments(tool_name, {**arguments, "label": label})
-            call = ActivityCall(
-                call_id=uuid.uuid4().hex,
+        execution_id: str | None = None,
+    ) -> str:
+        """Records or groups one execution and returns its stable execution identifier."""
+        execution_id = execution_id or uuid.uuid4().hex
+        run = self._execution_store.get_current_activity_run(session_id)
+        effective_project = project_name or (run.project_name if run is not None else "")
+        if self._execution_store.get_execution(execution_id) is None:
+            self._execution_store.start_execution(
+                execution_id=execution_id,
+                session_id=session_id,
+                project_name=effective_project,
                 tool_name=tool_name,
-                detail=summary.detail,
-                scope=summary.scope,
-                started_at=time.time(),
-                project_name=project_name or run.project_name,
                 arguments=self._serialize_value(arguments),
             )
-            run.calls.append(call)
-            if len(run.calls) > _MAX_CALLS_PER_RUN:
-                del run.calls[: len(run.calls) - _MAX_CALLS_PER_RUN]
-            self._save_run(run)
-            return call.call_id
+        self._execution_store.append_execution_to_current_run(
+            session_id,
+            execution_id,
+            project_name=effective_project,
+        )
+        return execution_id
 
     def finish_tool(
         self,
@@ -626,139 +551,111 @@ class ActivityTracker:
         result: object | None = None,
         project_name: str | None = None,
     ) -> None:
-        """Marks one tracked call terminal in every activity run retaining it."""
+        """Marks one execution terminal and updates activity-run job references."""
         if call_id is None:
             return
+        record = self._execution_store.get_execution(call_id)
+        if record is None:
+            return
 
-        with self._lock:
-            # collect every panel that retains the carried call
-            owners: list[tuple[ActivityRun, ActivityCall]] = []
-            for run in self._runs.values():
-                owners.extend((run, call) for call in run.calls if call.call_id == call_id)
-            if not owners:
-                return
+        media = ActivityMedia.from_result(result) if result is not None else None
+        serialized_result = self._serialize_value(result) if result is not None and media is None else None
+        error = serialized_result if not succeeded and serialized_result else None
+        job_id, _ = self._extract_job_identity(result)
+        self._execution_store.finish_execution(
+            call_id,
+            succeeded=succeeded,
+            result=None if not succeeded else serialized_result,
+            error=error,
+            project_name=project_name,
+            media=media.storage_dict() if media is not None else None,
+            durable_job_id=job_id,
+        )
 
-            # update the call lifecycle consistently across old and continuing panels
-            status = "completed" if succeeded else "failed"
-            finished_at = time.time()
-            media = ActivityMedia.from_result(result) if result is not None else None
-            serialized_result = self._serialize_value(result) if result is not None and media is None else None
-            for run, call in owners:
-                call.status = status
-                call.finished_at = finished_at
-                call.result = serialized_result
-                call.media = media
-                if project_name is not None:
-                    call.project_name = project_name
-                self._save_run(run)
-
-            # enrich job-related calls with the durable job identity returned by the tool
-            first_call = owners[0][1]
-            if not succeeded or first_call.tool_name not in {"start_job", "job_status"}:
-                return
-
-            job_id, label = self._extract_job_identity(result)
-            if job_id is None:
-                return
-
-            for run, call in owners:
-                call.job_id = job_id
-                call.job_label = label
-                if label is not None:
-                    call.detail = label
-                if first_call.tool_name == "start_job" and job_id not in run.job_ids:
-                    run.job_ids.append(job_id)
-                self._save_run(run)
-            if first_call.tool_name == "start_job":
-                self._job_cache_at = 0.0
+        if succeeded and record.tool_name == "start_job" and job_id is not None:
+            for run in self._execution_store.list_activity_runs():
+                if call_id not in run.execution_ids:
+                    continue
+                next_job_ids = [*run.job_ids, job_id] if job_id not in run.job_ids else list(run.job_ids)
+                self._execution_store.update_activity_run_jobs(run.run_id, job_ids=next_job_ids)
+            self._job_cache_at = 0.0
 
     def get_run(self, session_id: str, run_id: str) -> dict[str, Any]:
-        """Returns one session-owned run enriched with the jobs relevant to that panel."""
-        with self._lock:
-            run = self._runs.get(run_id)
-            if run is None or run.session_id != session_id:
-                raise ValueError("Activity run is not available in this session")
-            payload = run.as_dict()
-            current_job_ids = list(run.job_ids)
-            superseded = run.superseded
-            retained_jobs = {str(job.get("job_id")): dict(job) for job in run.retained_jobs if job.get("job_id")}
+        """Returns one session-owned activity run enriched with its relevant durable jobs."""
+        run = self._execution_store.get_activity_run(run_id)
+        if run is None or run.session_id != session_id:
+            raise ValueError("Activity run is not available in this session")
+
+        calls = [
+            self._call_payload(record)
+            for execution_id in run.execution_ids[-_MAX_CALLS_PER_RUN:]
+            if (record := self._execution_store.get_execution(execution_id)) is not None
+        ]
+        payload: dict[str, Any] = {
+            "run_id": run.run_id,
+            "project_name": run.project_name,
+            "started_at": run.started_at,
+            "superseded": run.superseded,
+            "calls": calls,
+        }
 
         records = self._list_jobs_safely()
         records_by_id = {record.job_id: record for record in records}
+        retained_jobs = {str(job.get("job_id")): dict(job) for job in run.retained_jobs if job.get("job_id")}
         visible_jobs: list[dict[str, Any]] = []
-        for job_id in current_job_ids:
+        for job_id in run.job_ids:
             record = records_by_id.get(job_id)
             if record is not None:
                 visible_jobs.append(self._job_payload(record) | {"current_turn": True})
             elif job_id in retained_jobs:
                 visible_jobs.append(retained_jobs[job_id] | {"current_turn": True})
 
-        if not superseded:
+        if not run.superseded:
             visible_jobs.extend(
                 self._job_payload(record) | {"current_turn": False}
                 for record in records
-                if record.job_id not in current_job_ids and record.status is JobStatus.RUNNING
+                if record.job_id not in run.job_ids and record.status is JobStatus.RUNNING
             )
-
         visible_jobs.sort(key=lambda job: float(job.get("started_at") or 0.0), reverse=True)
         payload["jobs"] = visible_jobs
-
-        with self._lock:
-            current = self._runs.get(run_id)
-            if current is run:
-                self._snapshot_jobs(run, records)
+        self._snapshot_jobs(run.run_id, run.job_ids, run.retained_jobs, records)
         return payload
 
     def get_call_detail(self, session_id: str, run_id: str, call_id: str) -> dict[str, Any]:
-        """Returns bounded parameters and result detail for one call in a session-owned run."""
-        with self._lock:
-            run = self._runs.get(run_id)
-            if run is None or run.session_id != session_id:
-                raise ValueError("Activity run is not available in this session")
-            for call in run.calls:
-                if call.call_id == call_id:
-                    return {
-                        "call_id": call.call_id,
-                        "tool_name": call.tool_name,
-                        "status": call.status,
-                        "arguments": call.arguments,
-                        "result": call.result,
-                        "media": call.media.public_dict() if call.media is not None else None,
-                    }
-        raise ValueError("Activity call is not available in this run")
+        """Returns bounded parameters and result detail for one execution in a session-owned run."""
+        record = self._execution_in_run(session_id, run_id, call_id)
+        media = ActivityMedia.from_storage_dict(record.media)
+        return {
+            "call_id": record.execution_id,
+            "tool_name": record.tool_name,
+            "status": record.status,
+            "arguments": record.arguments,
+            "result": record.result,
+            "error": record.error,
+            "media": media.public_dict() if media is not None else None,
+        }
 
     def get_call_media(self, session_id: str, run_id: str, call_id: str) -> ActivityMedia:
-        """Returns retrievable media metadata for one session-owned activity call."""
-        with self._lock:
-            run = self._runs.get(run_id)
-            if run is None or run.session_id != session_id:
-                raise ValueError("Activity run is not available in this session")
-            for call in run.calls:
-                if call.call_id == call_id:
-                    if call.media is None:
-                        raise ValueError("Activity call has no retained media")
-                    return call.media
-        raise ValueError("Activity call is not available in this run")
+        """Returns retrievable media metadata for one session-owned activity execution."""
+        record = self._execution_in_run(session_id, run_id, call_id)
+        media = ActivityMedia.from_storage_dict(record.media) or ActivityMedia.from_serialized_result(record.result)
+        if media is None:
+            raise ValueError("Activity call has no retained media")
+        return media
 
     def get_job_detail(self, session_id: str, run_id: str, job_id: str) -> dict[str, Any]:
         """Returns runtime metadata and bounded output for one job visible in a session-owned run."""
-        # validate panel ownership and retained current-turn jobs
-        with self._lock:
-            run = self._runs.get(run_id)
-            if run is None or run.session_id != session_id:
-                raise ValueError("Activity run is not available in this session")
-            current_turn = job_id in run.job_ids
-            superseded = run.superseded
-
-        # admit globally running jobs only while this is the current panel
+        run = self._execution_store.get_activity_run(run_id)
+        if run is None or run.session_id != session_id:
+            raise ValueError("Activity run is not available in this session")
+        current_turn = job_id in run.job_ids
         if not current_turn:
             visible_background_job = any(
                 record.job_id == job_id and record.status is JobStatus.RUNNING for record in self._list_jobs_safely()
             )
-            if superseded or not visible_background_job:
+            if run.superseded or not visible_background_job:
                 raise ValueError("Activity job is not available in this run")
 
-        # read one bounded latest-output snapshot without blocking the activity poller
         snapshot = self._job_source.get_job(job_id)
         record = snapshot.record
         runtime = snapshot.runtime
@@ -784,41 +681,107 @@ class ActivityTracker:
             "cursor_reset": output.cursor_reset if output is not None else False,
         }
 
+    def _execution_in_run(self, session_id: str, run_id: str, execution_id: str) -> ExecutionRecord:
+        run = self._execution_store.get_activity_run(run_id)
+        if run is None or run.session_id != session_id:
+            raise ValueError("Activity run is not available in this session")
+        if execution_id not in run.execution_ids:
+            raise ValueError("Activity call is not available in this run")
+        record = self._execution_store.get_execution(execution_id)
+        if record is None:
+            raise ValueError("Activity call is not available in this run")
+        return record
+
+    def _call_payload(self, record: ExecutionRecord) -> dict[str, Any]:
+        summary = self._execution_summary(record)
+        label = self._job_label_for_execution(record)
+        payload: dict[str, Any] = {
+            "call_id": record.execution_id,
+            "tool_name": record.tool_name,
+            "detail": label or summary.detail,
+            "project_name": record.project_name,
+            "started_at": record.started_at,
+            "finished_at": record.finished_at,
+            "status": record.status,
+        }
+        if summary.scope:
+            payload["scope"] = summary.scope
+        if record.durable_job_id is not None:
+            payload["job_id"] = record.durable_job_id
+        if label:
+            payload["job_label"] = label
+        return payload
+
+    def _execution_summary(self, record: ExecutionRecord) -> ActivitySummary:
+        arguments = ActivityDetailFormatter().parse_parameters(record.arguments) or {}
+        if record.tool_name == "job_status":
+            job_id = arguments.get("job_id")
+            if isinstance(job_id, str) and job_id:
+                label = self._known_job_label(job_id)
+                if label:
+                    arguments = {**arguments, "label": label}
+        return self._summarize_arguments(record.tool_name, arguments)
+
+    def _job_label_for_execution(self, record: ExecutionRecord) -> str:
+        job_id, label = self._extract_job_identity(record.result)
+        if label:
+            return label
+        if record.durable_job_id or job_id:
+            return self._known_job_label(record.durable_job_id or job_id or "")
+        arguments = ActivityDetailFormatter().parse_parameters(record.arguments) or {}
+        candidate = arguments.get("label")
+        return candidate if isinstance(candidate, str) else ""
+
     def _known_job_label(self, job_id: str) -> str:
         """Returns a retained job label without triggering additional backend work."""
-        for run in reversed(self._runs.values()):
-            for call in reversed(run.calls):
-                if call.job_id == job_id and call.job_label:
-                    return call.job_label
-
+        if not job_id:
+            return ""
+        for record in self._execution_store.list_executions(newest_first=True):
+            if record.durable_job_id != job_id:
+                continue
+            _, label = self._extract_job_identity(record.result)
+            if label:
+                return label
+            arguments = ActivityDetailFormatter().parse_parameters(record.arguments) or {}
+            label = arguments.get("label")
+            if isinstance(label, str) and label:
+                return label
         for record in self._job_cache:
             if record.job_id == job_id and record.label:
                 return record.label
         return ""
 
+    def _snapshot_jobs(
+        self,
+        run_id: str,
+        job_ids: list[str],
+        retained_jobs: list[dict[str, Any]],
+        records: list[JobRecord],
+    ) -> None:
+        if not job_ids:
+            return
+        owned = {record.job_id: record for record in records if record.job_id in job_ids}
+        retained = {str(job.get("job_id")): dict(job) for job in retained_jobs if job.get("job_id")}
+        for job_id, record in owned.items():
+            retained[job_id] = self._job_payload(record) | {"current_turn": True}
+        next_jobs = [retained[job_id] for job_id in job_ids if job_id in retained]
+        if next_jobs != retained_jobs:
+            self._execution_store.update_activity_run_jobs(run_id, retained_jobs=next_jobs)
+
     def _list_jobs_safely(self) -> list[JobRecord]:
-        """Returns cached durable-job metadata without allowing job-backend failures to break activity polling."""
+        """Returns cached durable-job metadata without allowing backend failures to break polling."""
         now = time.monotonic()
         with self._lock:
             if self._job_cache and now - self._job_cache_at < self._JOB_CACHE_SECONDS:
                 return list(self._job_cache)
-
         try:
             records = self._job_source.list_jobs(limit=self._JOB_LIST_LIMIT)
         except (OSError, RuntimeError, ValueError):
             return []
-
         with self._lock:
             self._job_cache_at = now
             self._job_cache = list(records)
         return records
-
-    def _prune_runs(self) -> None:
-        """Bounds retained activity state while preserving current runs."""
-        while len(self._runs) > _MAX_RUNS:
-            run_id, run = self._runs.popitem(last=False)
-            if self._current_run_by_session.get(run.session_id) == run_id:
-                self._current_run_by_session.pop(run.session_id, None)
 
     @staticmethod
     def _job_payload(record: JobRecord) -> dict[str, Any]:
@@ -834,7 +797,7 @@ class ActivityTracker:
 
     @staticmethod
     def _extract_job_identity(result: object | None) -> tuple[str | None, str | None]:
-        """Extracts a durable-job identifier from the normal ``start_job`` result shape."""
+        """Extracts a durable-job identifier and label from supported result shapes."""
         payload: object = result
         if isinstance(payload, str):
             try:
@@ -861,7 +824,6 @@ class ActivityTracker:
                         if isinstance(candidate, dict):
                             payload = candidate
                             break
-
         if not isinstance(payload, dict):
             return None, None
         payload_dict = cast(dict[str, Any], payload)
@@ -874,7 +836,6 @@ class ActivityTracker:
                     nested = None
             if isinstance(nested, dict):
                 payload_dict = cast(dict[str, Any], nested)
-
         job_id = payload_dict.get("job_id")
         label = payload_dict.get("label")
         return (
@@ -884,7 +845,7 @@ class ActivityTracker:
 
     @staticmethod
     def _serialize_value(value: object) -> str:
-        """Serializes bounded activity detail without making tool execution depend on display formatting."""
+        """Serializes bounded execution detail without coupling persistence to presentation formatting."""
         try:
             text = json.dumps(value, ensure_ascii=False, indent=2, default=str)
         except (TypeError, ValueError):

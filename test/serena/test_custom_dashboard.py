@@ -1,21 +1,17 @@
-from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from mcp.server.fastmcp import Image
-from mcp.types import ResourceLink
-from pydantic import AnyUrl
 
 from orchestrator.config import OrchestratorConfig
 from orchestrator.dashboard_sessions import OrchestratorDashboardSessionArchive
 from serena.custom_dashboard import DashboardExecutionHistory, DashboardJobOverview
 from serena.dashboard import SerenaDashboardAPI
+from serena.execution_store import ExecutionStore
 from serena.jobs import JobPersistenceInfo, JobRecord, JobRuntimeInfo, JobSnapshot, JobStatus
 from serena.task_executor import TaskExecutor
 from serena.tool_output import ToolOutputPage
-from serena.tools import FetchMediaFileTool
 from solidlsp.ls_config import LanguageServerId
 
 
@@ -46,6 +42,7 @@ class _DashboardAgent:
         self.current_tasks: list[TaskExecutor.TaskInfo] = []
         self.output_descriptor: object | None = None
         self.output_page: ToolOutputPage | None = None
+        self.execution_store = ExecutionStore()
 
     def register_config_changed_callback(self, callback) -> None:
         self.callbacks.append(callback)
@@ -83,43 +80,26 @@ class _DashboardAgent:
         return []
 
 
-def _task_info(name: str, *, is_running: bool, state: str, task_id: int, result=None) -> TaskExecutor.TaskInfo:
-    future: Future = Future()
-    if state == "completed":
-        future.set_result(result)
-    elif state == "failed":
-        future.set_exception(RuntimeError("failed"))
-    elif state == "cancelled":
-        future.cancel()
-    started_at = 1_001.0 if is_running or state != "pending" else None
-    finished_at = 1_002.0 if state in {"completed", "failed", "cancelled"} else None
-    return TaskExecutor.TaskInfo(
-        name=name,
-        is_running=is_running,
-        future=future,
-        task_id=task_id,
-        logged=True,
-        submitted_at=1_000.0,
-        started_at=started_at,
-        finished_at=finished_at,
-    )
-
-
 def test_custom_dashboard_serves_fork_specific_frontend_and_session_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
     monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
     log_handler = _DummyMemoryLogHandler()
+    agent = _DashboardAgent()
+    agent.execution_store.start_execution(
+        execution_id="execution-a",
+        session_id="session-a",
+        project_name="serena",
+        tool_name="get_current_config",
+        arguments="{}",
+    )
+    agent.execution_store.finish_execution("execution-a", succeeded=True, result="config")
     dashboard = SerenaDashboardAPI(
         memory_log_handler=log_handler,
         tool_names=[],
-        agent=_DashboardAgent(),
+        agent=agent,
         tool_usage_stats=None,
     )
     client = dashboard._app.test_client()
-    log_handler.emit_message(
-        "INFO [Task-1:GetCurrentConfigTool] serena.tools.tools_base:_log_tool_application:291 - "
-        "get_current_config: ; project: serena; session_id: session-a"
-    )
 
     redirect = client.get("/dashboard", base_url="https://serena.kendell.uk")
     response = client.get("/dashboard/")
@@ -207,20 +187,25 @@ def test_dashboard_revalidates_unchanged_panel_overview_without_response_body(tm
 def test_dashboard_bootstraps_inactive_serena_panels_with_compact_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
     monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
-    log_handler = _DummyMemoryLogHandler()
+    agent = _DashboardAgent()
+    for task in range(1, 13):
+        execution_id = f"execution-{task}"
+        agent.execution_store.start_execution(
+            execution_id=execution_id,
+            session_id="session-a",
+            project_name="serena",
+            tool_name="read_file",
+            arguments=f'{{"relative_path": "file-{task}.txt"}}',
+            started_at=float(task),
+        )
+        agent.execution_store.finish_execution(execution_id, succeeded=True, result=f"file {task}")
     dashboard = SerenaDashboardAPI(
-        memory_log_handler=log_handler,
+        memory_log_handler=_DummyMemoryLogHandler(),
         tool_names=[],
-        agent=_DashboardAgent(),
+        agent=agent,
         tool_usage_stats=None,
     )
     client = dashboard._app.test_client()
-    for task in range(1, 13):
-        log_handler.emit_message(
-            f"INFO [Task-{task}:ReadFileTool] serena.tools.tools_base:_log_tool_application:291 - "
-            f"read_file: relative_path='file-{task}.txt'; project: serena; session_id: session-a"
-        )
-        log_handler.emit_message(f"INFO [Task-{task}:ReadFileTool] serena.tools.tools_base:apply_ex:410 - Result: file {task}")
 
     panel = client.get("/dashboard/api/serena?include_state=1").get_json()["panels"][0]
     state = panel["initial_state"]
@@ -295,25 +280,28 @@ def test_custom_dashboard_shows_named_orchestrator_conversation_before_first_del
 def test_retained_serena_panel_preserves_semantic_detail_and_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
     monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
-    log_handler = _DummyMemoryLogHandler()
+    agent = _DashboardAgent()
+    agent.execution_store.start_execution(
+        execution_id="search-execution",
+        session_id="session-a",
+        project_name="serena",
+        tool_name="search_for_pattern",
+        arguments='{"substring_pattern": "ActivityTracker.*detail", "relative_path": "src/serena"}',
+    )
+    agent.execution_store.start_execution(
+        execution_id="replace-execution",
+        session_id="session-a",
+        project_name="serena",
+        tool_name="replace_in_files",
+        arguments='{"needle": "old value", "repl": "new value", "mode": "literal", "relative_path": "src/serena"}',
+    )
     dashboard = SerenaDashboardAPI(
-        memory_log_handler=log_handler,
+        memory_log_handler=_DummyMemoryLogHandler(),
         tool_names=[],
-        agent=_DashboardAgent(),
+        agent=agent,
         tool_usage_stats=None,
     )
     client = dashboard._app.test_client()
-
-    log_handler.emit_message(
-        "INFO [Task-1:SearchForPatternTool] serena.tools.tools_base:_log_tool_application:291 - "
-        "search_for_pattern: substring_pattern='ActivityTracker.*detail', relative_path='src/serena'; "
-        "project: serena; session_id: session-a"
-    )
-    log_handler.emit_message(
-        "INFO [Task-2:ReplaceInFilesTool] serena.tools.tools_base:_log_tool_application:291 - "
-        "replace_in_files: needle='old value', repl='new value', mode='literal', relative_path='src/serena'; "
-        "project: serena; session_id: session-a"
-    )
 
     overview = client.get("/dashboard/api/serena").get_json()
     panel_id = overview["panels"][0]["panel_id"]
@@ -345,24 +333,24 @@ def test_retained_serena_panel_serves_rendered_media_instead_of_result_repr(tmp_
     image_bytes = b"\x89PNG\r\n\x1a\nretained-preview"
     (snapshot_root / token).write_bytes(image_bytes)
 
-    log_handler = _DummyMemoryLogHandler()
-    dashboard = SerenaDashboardAPI(
-        memory_log_handler=log_handler,
-        tool_names=[],
-        agent=_DashboardAgent(),
-        tool_usage_stats=None,
+    agent = _DashboardAgent()
+    agent.execution_store.start_execution(
+        execution_id="render-execution",
+        session_id="session-a",
+        project_name="serena",
+        tool_name="render_pdf_page",
+        arguments='{"relative_path": "figure.pdf", "page": 1, "dpi": 150}',
     )
-    client = dashboard._app.test_client()
-    log_handler.emit_message(
-        "INFO [Task-3:RenderPdfPageTool] serena.tools.tools_base:_log_tool_application:291 - "
-        "render_pdf_page: relative_path='figure.pdf', page=1, dpi=150; project: serena; session_id: session-a"
+    agent.execution_store.finish_execution(
+        "render-execution",
+        succeeded=True,
+        media={
+            "type": "image",
+            "name": "figure-p1.png",
+            "mime_type": "image/png",
+            "uri": f"serena-file://export/{token}",
+        },
     )
-    log_handler.emit_message(
-        "INFO [Task-3:RenderPdfPageTool] serena.tools.tools_base:apply_ex:410 - Result: "
-        f"_NativeMediaResult(media=<Image>, file_link=ResourceLink(name='figure-p1.png', "
-        f"uri=AnyUrl('serena-file://export/{token}'), mimeType='image/png', size={len(image_bytes)}))"
-    )
-
     restored_dashboard = SerenaDashboardAPI(
         memory_log_handler=_DummyMemoryLogHandler(),
         tool_names=[],
@@ -410,11 +398,18 @@ def test_custom_dashboard_uses_default_project_and_dynamic_languages() -> None:
     assert session["languages"] == ["python", "html"]
 
 
-def test_custom_dashboard_serves_live_execution_output_endpoint() -> None:
+def test_custom_dashboard_serves_live_execution_output_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
     agent = _DashboardAgent()
-    running = _task_info("Task-7:ExecuteShellCommandTool", is_running=True, state="pending", task_id=7)
-    agent.current_tasks = [running]
-    agent.output_descriptor = SimpleNamespace(output_id="abc123", total_chars=5)
+    execution_id = "execution-7"
+    agent.execution_store.start_execution(
+        execution_id=execution_id,
+        session_id="session-a",
+        project_name="serena",
+        tool_name="execute_shell_command",
+        arguments='{"command": "echo hello"}',
+    )
+    agent.execution_store.set_retained_output(execution_id, "abc123", 5)
     agent.output_page = ToolOutputPage(
         output_id="abc123",
         tool_name="execute_shell_command",
@@ -432,7 +427,7 @@ def test_custom_dashboard_serves_live_execution_output_endpoint() -> None:
     client = dashboard._app.test_client()
 
     executions = client.get("/dashboard/api/executions").get_json()
-    response = client.get("/dashboard/api/executions/7/output")
+    response = client.get(f"/dashboard/api/executions/{execution_id}/output")
 
     assert executions["executions"][0]["stream_output_id"] == "abc123"
     assert response.status_code == 200
@@ -460,54 +455,52 @@ def test_memory_endpoint_reads_active_project_memory() -> None:
     memory_manager.load_memory.assert_called_once_with("critical_info")
 
 
-def test_execution_history_combines_live_tasks_and_completed_history() -> None:
-    agent = MagicMock()
-    callbacks = []
-    agent.register_config_changed_callback.side_effect = callbacks.append
-    agent.get_current_tasks.return_value = [
-        _task_info("Task-3:FindSymbolTool", is_running=True, state="pending", task_id=3),
-        _task_info("Task-4:GitStatusTool", is_running=False, state="pending", task_id=4),
-        _task_info("Task-5:init_project_services", is_running=False, state="pending", task_id=5),
-    ]
-    completed = _task_info("Task-2:ActivateProjectTool", is_running=False, state="completed", task_id=2)
-    log_handler = _DummyMemoryLogHandler()
+def test_execution_history_combines_live_and_completed_canonical_executions(tmp_path: Path) -> None:
+    store = ExecutionStore(tmp_path / "execution-store", migrate_legacy=False)
+    store.start_execution(
+        execution_id="completed-execution",
+        session_id="session-a",
+        project_name="serena",
+        tool_name="activate_project",
+        arguments='{"project": "serena"}',
+        started_at=1.0,
+    )
+    store.finish_execution("completed-execution", succeeded=True, result="Project activated", finished_at=2.0)
+    store.start_execution(
+        execution_id="running-execution",
+        session_id="session-a",
+        project_name="serena",
+        tool_name="find_symbol",
+        arguments='{"name_path_pattern": "Foo"}',
+        started_at=3.0,
+    )
+    agent = _DashboardAgent()
+    agent.execution_store = store
+    result = DashboardExecutionHistory(agent).get_executions()
 
-    history = DashboardExecutionHistory(agent, log_handler)
-    agent.get_last_executed_task.return_value = _task_info("Task-1:init_project_services", is_running=False, state="completed", task_id=1)
-    callbacks[0]()
-    agent.get_last_executed_task.return_value = completed
-    callbacks[0]()
-    callbacks[0]()
-    result = history.get_executions()
-
-    assert [item["status"] for item in result["executions"]] == ["running", "queued", "completed"]
-    assert [item["task_id"] for item in result["executions"]] == [3, 4, 2]
+    assert [item["status"] for item in result["executions"]] == ["running", "completed"]
+    assert [item["execution_id"] for item in result["executions"]] == ["running-execution", "completed-execution"]
     assert result["running"] == 1
-    assert result["queued"] == 1
+    assert result["queued"] == 0
     assert result["done"] == 1
 
 
-def test_execution_history_captures_parameters_and_result_from_tool_logs() -> None:
-    agent = MagicMock()
-    callbacks = []
-    agent.register_config_changed_callback.side_effect = callbacks.append
-    agent.get_current_tasks.return_value = []
-    completed = _task_info("Task-2:ActivateProjectTool", is_running=False, state="completed", task_id=2)
-    agent.get_last_executed_task.return_value = completed
-    log_handler = _DummyMemoryLogHandler()
-    history = DashboardExecutionHistory(agent, log_handler)
-
-    log_handler.emit_message(
-        "INFO  2026-08-29 19:00:00 [Task-2:ActivateProjectTool] serena.tools.tools_base:_log_tool_application:288 - "
-        "activate_project: project='serena', session_id='internal'; project: serena; session_id: abc123"
+def test_execution_history_reads_parameters_and_result_from_canonical_store(tmp_path: Path) -> None:
+    store = ExecutionStore(tmp_path / "execution-store", migrate_legacy=False)
+    store.start_execution(
+        execution_id="activate-execution",
+        session_id="abc123",
+        project_name="serena",
+        tool_name="activate_project",
+        arguments='{"project": "serena"}',
+        started_at=1_000.0,
     )
-    callbacks[0]()
-    log_handler.emit_message(
-        "INFO  2026-08-29 19:00:01 [Task-2:ActivateProjectTool] serena.tools.tools_base:apply_ex:410 - Result: Project activated"
-    )
+    store.finish_execution("activate-execution", succeeded=True, result="Project activated", finished_at=1_001.0)
+    agent = _DashboardAgent()
+    agent.execution_store = store
 
-    execution = history.get_executions()["executions"][0]
-    assert execution["parameters"] == "project='serena'"
+    execution = DashboardExecutionHistory(agent).get_executions()["executions"][0]
+    assert execution["parameters"] == '{"project": "serena"}'
     assert execution["detail"] == "serena"
     assert execution["project"] == "serena"
     assert execution["session_id"] == "abc123"
@@ -517,15 +510,20 @@ def test_execution_history_captures_parameters_and_result_from_tool_logs() -> No
     assert execution["error"] is None
 
 
-def test_execution_history_exposes_live_output_for_exact_running_task() -> None:
-    agent = MagicMock()
-    callbacks = []
-    agent.register_config_changed_callback.side_effect = callbacks.append
-    running = _task_info("Task-7:ExecuteShellCommandTool", is_running=True, state="pending", task_id=7)
-    agent.get_current_tasks.return_value = [running]
-    agent.get_last_executed_task.return_value = None
-    agent.describe_tool_execution_output.return_value = SimpleNamespace(output_id="abc123", total_chars=11)
-    agent.read_tool_execution_tail.return_value = ToolOutputPage(
+def test_execution_history_exposes_live_output_for_exact_running_execution(tmp_path: Path) -> None:
+    store = ExecutionStore(tmp_path / "execution-store", migrate_legacy=False)
+    execution_id = "shell-execution"
+    store.start_execution(
+        execution_id=execution_id,
+        session_id="session-a",
+        project_name="serena",
+        tool_name="execute_shell_command",
+        arguments='{"command": "echo hello"}',
+    )
+    store.set_retained_output(execution_id, "abc123", 11)
+    agent = _DashboardAgent()
+    agent.execution_store = store
+    agent.output_page = ToolOutputPage(
         output_id="abc123",
         tool_name="execute_shell_command",
         total_chars=11,
@@ -533,120 +531,87 @@ def test_execution_history_exposes_live_output_for_exact_running_task() -> None:
         content="hello world",
         next_offset=None,
     )
-    history = DashboardExecutionHistory(agent, _DummyMemoryLogHandler())
+    history = DashboardExecutionHistory(agent)
 
     execution = history.get_executions()["executions"][0]
-    output = history.get_output(7)
+    output = history.get_output(execution_id)
 
     assert execution["stream_output_id"] == "abc123"
     assert execution["stream_output_chars"] == 11
     assert output == {
         "status": "success",
-        "task_id": 7,
+        "execution_id": execution_id,
+        "task_id": execution_id,
         "output_id": "abc123",
         "offset": 0,
         "end_offset": 11,
         "total_chars": 11,
         "output": "hello world",
     }
-    agent.read_tool_execution_tail.assert_called_once_with("Task-7:ExecuteShellCommandTool", 12_000)
 
 
-def test_execution_history_exposes_native_media_without_polling_binary_data() -> None:
-    agent = MagicMock()
-    callbacks = []
-    agent.register_config_changed_callback.side_effect = callbacks.append
-    agent.get_current_tasks.return_value = []
+def test_execution_history_exposes_media_descriptor_without_polling_binary_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     image_bytes = b"\x89PNG\r\n\x1a\npreview"
-    completed = _task_info(
-        "Task-7:RenderPdfPageTool",
-        is_running=False,
-        state="completed",
-        task_id=7,
-        result=Image(data=image_bytes, format="png"),
+    store = ExecutionStore(tmp_path / "execution-store", migrate_legacy=False)
+    store.start_execution(
+        execution_id="render-execution",
+        session_id="session-a",
+        project_name="serena",
+        tool_name="render_pdf_page",
+        arguments='{"relative_path": "figure.pdf", "page": 1}',
     )
-    agent.get_last_executed_task.return_value = completed
-    history = DashboardExecutionHistory(agent, _DummyMemoryLogHandler())
+    store.finish_execution(
+        "render-execution",
+        succeeded=True,
+        media={
+            "type": "image",
+            "name": "figure.png",
+            "mime_type": "image/png",
+            "uri": f"serena-file://export/{'a' * 48}",
+        },
+    )
+    monkeypatch.setattr("serena.custom_dashboard.read_result_file_link", lambda link: image_bytes)
+    agent = _DashboardAgent()
+    agent.execution_store = store
+    history = DashboardExecutionHistory(agent)
 
-    callbacks[0]()
     execution = history.get_executions()["executions"][0]
-    media = history.get_media(7)
+    media = history.get_media("render-execution")
 
-    assert execution["media"] == {"type": "image"}
+    assert execution["media"] == {"type": "image", "name": "figure.png", "mime_type": "image/png"}
     assert execution["result"] is None
     assert media.media_type == "image"
     assert media.mime_type == "image/png"
     assert media.data == image_bytes
 
 
-def test_execution_history_exposes_wrapped_media_result(tmp_path) -> None:
-    image_bytes = b"\x89PNG\r\n\x1a\nwrapped-preview"
-    (tmp_path / "preview.png").write_bytes(image_bytes)
-    project = MagicMock()
-    project.project_root = tmp_path
-    project.project_name = "test"
-    tool_agent = MagicMock()
-    tool_agent.get_active_project_or_raise.return_value = project
-    wrapped_result = FetchMediaFileTool(tool_agent).apply("preview.png")
-
-    agent = MagicMock()
-    callbacks = []
-    agent.register_config_changed_callback.side_effect = callbacks.append
-    agent.get_current_tasks.return_value = []
-    completed = _task_info(
-        "Task-8:FetchMediaFileTool",
-        is_running=False,
-        state="completed",
-        task_id=8,
-        result=wrapped_result,
-    )
-    agent.get_last_executed_task.return_value = completed
-    history = DashboardExecutionHistory(agent, _DummyMemoryLogHandler())
-
-    callbacks[0]()
-    execution = history.get_executions()["executions"][0]
-    media = history.get_media(8)
-
-    assert execution["media"] == {
-        "type": "image",
-        "name": wrapped_result.file_link.name,
-        "mime_type": "image/png",
-    }
-    assert execution["result"] is None
-    assert media.media_type == "image"
-    assert media.mime_type == "image/png"
-    assert media.file_name == wrapped_result.file_link.name
-    assert media.data == image_bytes
-
-
-def test_execution_history_exposes_exported_pdf_as_file(monkeypatch) -> None:
+def test_execution_history_exposes_exported_pdf_as_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     pdf_bytes = b"%PDF-1.4\npreview"
-    link = ResourceLink(
-        type="resource_link",
-        name="paper.pdf",
-        uri=AnyUrl("serena-file://export/test-token"),
-        mimeType="application/pdf",
-        size=len(pdf_bytes),
+    store = ExecutionStore(tmp_path / "execution-store", migrate_legacy=False)
+    store.start_execution(
+        execution_id="download-execution",
+        session_id="session-a",
+        project_name="serena",
+        tool_name="download_file",
+        arguments='{"relative_path": "paper.pdf"}',
+    )
+    store.finish_execution(
+        "download-execution",
+        succeeded=True,
+        media={
+            "type": "file",
+            "name": "paper.pdf",
+            "mime_type": "application/pdf",
+            "uri": f"serena-file://export/{'b' * 48}",
+        },
     )
     monkeypatch.setattr("serena.custom_dashboard.read_result_file_link", lambda file_link: pdf_bytes)
+    agent = _DashboardAgent()
+    agent.execution_store = store
+    history = DashboardExecutionHistory(agent)
 
-    agent = MagicMock()
-    callbacks = []
-    agent.register_config_changed_callback.side_effect = callbacks.append
-    agent.get_current_tasks.return_value = []
-    completed = _task_info(
-        "Task-9:DownloadFileTool",
-        is_running=False,
-        state="completed",
-        task_id=9,
-        result=link,
-    )
-    agent.get_last_executed_task.return_value = completed
-    history = DashboardExecutionHistory(agent, _DummyMemoryLogHandler())
-
-    callbacks[0]()
     execution = history.get_executions()["executions"][0]
-    media = history.get_media(9)
+    media = history.get_media("download-execution")
 
     assert execution["media"] == {"type": "file", "name": "paper.pdf", "mime_type": "application/pdf"}
     assert execution["result"] is None
@@ -656,21 +621,24 @@ def test_execution_history_exposes_exported_pdf_as_file(monkeypatch) -> None:
     assert media.data == pdf_bytes
 
 
-def test_execution_history_reports_failed_and_cancelled_tasks() -> None:
-    agent = MagicMock()
-    callbacks = []
-    agent.register_config_changed_callback.side_effect = callbacks.append
-    agent.get_current_tasks.return_value = []
-    history = DashboardExecutionHistory(agent, _DummyMemoryLogHandler())
+def test_execution_history_reports_failed_executions(tmp_path: Path) -> None:
+    store = ExecutionStore(tmp_path / "execution-store", migrate_legacy=False)
+    store.start_execution(
+        execution_id="failed-execution",
+        session_id="session-a",
+        project_name="serena",
+        tool_name="read_file",
+        arguments='{"relative_path": "missing.txt"}',
+    )
+    store.finish_execution("failed-execution", succeeded=False, error="FileNotFoundError: missing.txt")
+    agent = _DashboardAgent()
+    agent.execution_store = store
 
-    agent.get_last_executed_task.return_value = _task_info("Task-1:ReadFileTool", is_running=False, state="failed", task_id=1)
-    callbacks[0]()
-    agent.get_last_executed_task.return_value = _task_info("Task-2:SearchForPatternTool", is_running=False, state="cancelled", task_id=2)
-    callbacks[0]()
+    result = DashboardExecutionHistory(agent).get_executions()
 
-    result = history.get_executions()
-
-    assert [item["status"] for item in result["executions"]] == ["cancelled", "failed"]
+    assert result["executions"][0]["status"] == "failed"
+    assert result["executions"][0]["error"] == "FileNotFoundError: missing.txt"
+    assert result["done"] == 1
 
 
 def test_job_overview_requests_full_retained_history() -> None:

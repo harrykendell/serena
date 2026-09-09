@@ -379,7 +379,14 @@ class Tool(Component):
         """
         return {}
 
-    def apply_ex(self, log_call: bool = True, catch_exceptions: bool = True, mcp_ctx: Context | None = None, **kwargs) -> Any:
+    def apply_ex(
+        self,
+        log_call: bool = True,
+        catch_exceptions: bool = True,
+        mcp_ctx: Context | None = None,
+        execution_id: str | None = None,
+        **kwargs,
+    ) -> Any:
         """
         Applies the tool with logging and exception handling, using the given keyword arguments.
         This method either returns a string result or raises a ToolCallError in case of an error during tool application
@@ -474,7 +481,13 @@ class Tool(Component):
         tool_call_error: ToolCallError
         timeout = self.agent.serena_config.tool_timeout
         try:
-            task_exec = self.agent.issue_task(task, name=self.__class__.__name__, timeout=timeout, session_id=session_id)
+            task_exec = self.agent.issue_task(
+                task,
+                name=self.__class__.__name__,
+                timeout=timeout,
+                session_id=session_id,
+                execution_id=execution_id,
+            )
             return task_exec.result(timeout=timeout)
         except ToolCallError as e:
             tool_call_error = e

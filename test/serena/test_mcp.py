@@ -1,5 +1,7 @@
 """Tests for the mcp.py module in serena."""
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock
 
 import pytest
@@ -7,6 +9,7 @@ from mcp.server.fastmcp.tools.base import Tool as MCPTool
 
 from serena.agent import Tool, ToolRegistry
 from serena.config.context_mode import SerenaAgentContext
+from serena.execution_store import ExecutionStore
 from serena.mcp import SerenaMCPFactory
 
 make_tool = SerenaMCPFactory.make_mcp_tool
@@ -17,10 +20,22 @@ class MockAgent:
     def __init__(self):
         self.project_config = None
         self.serena_config = None
+        self._execution_store_dir = TemporaryDirectory(prefix="serena-mcp-test-store-")
+        self.execution_store = ExecutionStore(Path(self._execution_store_dir.name), migrate_legacy=False)
 
     @staticmethod
     def get_context() -> SerenaAgentContext:
         return SerenaAgentContext.load_default()
+
+    @staticmethod
+    def get_active_project_for_session(session_id: str):
+        del session_id
+        return
+
+    @staticmethod
+    def describe_tool_execution_output(execution_id: str):
+        del execution_id
+        return
 
 
 class BaseMockTool(Tool):

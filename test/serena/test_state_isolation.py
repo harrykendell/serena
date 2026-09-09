@@ -1,9 +1,8 @@
 import os
 from pathlib import Path
 
-from serena.activity_history import ActivityHistoryStore
 from serena.config.serena_config import SerenaPaths
-from serena.dashboard_activity import DashboardActivityArchive
+from serena.execution_store import ExecutionStore
 from serena.jobs import JobStore
 from solidlsp.settings import SolidLSPSettings
 
@@ -25,14 +24,10 @@ def test_default_persistence_uses_suite_owned_state() -> None:
     job_store = JobStore()
     assert job_store.root.resolve() == serena_home / "jobs"
 
-    run_id = f"f01-test-isolation-check-{os.getpid()}"
-    ActivityHistoryStore().save({"run_id": run_id})
-    assert (serena_home / "activity_runs" / f"{run_id}.json").is_file()
-    assert not (real_serena_home / "activity_runs" / f"{run_id}.json").exists()
-
+    store = ExecutionStore()
     session_id = f"f01-test-isolation-session-{os.getpid()}"
-    archive = DashboardActivityArchive()
-    archive.set_display_name(session_id, "F01 isolation check")
-    panel_id = archive.panel_id_for_session(session_id)
-    assert (serena_home / "dashboard_activity_sessions" / f"{panel_id}.json").is_file()
-    assert not (real_serena_home / "dashboard_activity_sessions" / f"{panel_id}.json").exists()
+    store.set_session_display_name(session_id, "F01 isolation check")
+    state_path = serena_home / "execution_store" / "state.json"
+
+    assert state_path.is_file()
+    assert not (real_serena_home / "execution_store" / "state.json").exists()

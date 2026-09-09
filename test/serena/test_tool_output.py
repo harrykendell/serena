@@ -153,13 +153,13 @@ def test_expired_output_id_fails_instead_of_returning_a_different_result() -> No
 
 def test_live_output_can_be_read_by_exact_execution_before_completion() -> None:
     store = ToolOutputStore(max_records=4)
-    execution_name = "Task-17:ExecuteShellCommandTool"
+    execution_id = "execution-17"
 
     try:
-        with store.open("execute_shell_command", execution_name=execution_name) as writer:
+        with store.open("execute_shell_command", execution_id=execution_id) as writer:
             writer.write("first chunk\n")
-            first_page = store.read_execution_tail(execution_name, max_chars=200)
-            descriptor = store.describe_execution(execution_name)
+            first_page = store.read_execution_tail(execution_id, max_chars=200)
+            descriptor = store.describe_execution(execution_id)
 
             assert first_page is not None
             assert descriptor is not None
@@ -172,12 +172,12 @@ def test_live_output_can_be_read_by_exact_execution_before_completion() -> None:
             assert descriptor.is_open is True
 
             writer.write("second chunk\n")
-            second_page = store.read_execution_tail(execution_name, max_chars=200)
+            second_page = store.read_execution_tail(execution_id, max_chars=200)
             assert second_page is not None
             assert second_page.output_id == writer.output_id
             assert second_page.content == "first chunk\nsecond chunk\n"
 
-        completed = store.describe_execution(execution_name)
+        completed = store.describe_execution(execution_id)
         assert completed is not None
         assert completed.output_id == writer.output_id
         assert completed.is_open is False

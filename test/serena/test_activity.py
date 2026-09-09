@@ -11,8 +11,8 @@ from mcp.types import CallToolResult, RequestParams, ResourceLink
 from pydantic import AnyUrl
 
 from serena.activity import ACTIVITY_RESOURCE_URI, ActivityTracker, get_mcp_session_id, register_activity_resource
-from serena.activity_history import ActivityHistoryStore
 from serena.config.context_mode import SerenaAgentContext
+from serena.execution_store import ExecutionStore
 from serena.jobs import JobOutputChunk, JobRecord, JobRuntimeInfo, JobSnapshot, JobStatus
 from serena.mcp import SerenaMCPFactory
 from serena.tools import Tool
@@ -148,8 +148,8 @@ def test_activity_tracker_records_tool_lifecycle() -> None:
 
 def test_activity_tracker_rehydrates_historical_turn_after_restart(tmp_path: Path) -> None:
     source = _FakeJobSource([_job_record("job-a", "retained job", JobStatus.COMPLETED)])
-    store = ActivityHistoryStore(tmp_path / "activity-runs")
-    tracker = ActivityTracker(source, history_store=store)
+    store_root = tmp_path / "execution-store"
+    tracker = ActivityTracker(source, execution_store=ExecutionStore(store_root, migrate_legacy=False))
     run = tracker.start_run("conversation-a", "serena")
     call_id = tracker.start_tool(
         "conversation-a",
@@ -162,14 +162,14 @@ def test_activity_tracker_rehydrates_historical_turn_after_restart(tmp_path: Pat
     tracker.get_run("conversation-a", run["run_id"])
     interrupted_id = tracker.start_tool("conversation-a", "execute_shell_command", {"command": "sleep 30"})
 
-    restored = ActivityTracker(_FakeJobSource(), history_store=store)
+    restored = ActivityTracker(_FakeJobSource(), execution_store=ExecutionStore(store_root, migrate_legacy=False))
     snapshot = restored.get_run("conversation-a", run["run_id"])
-    detail = restored.get_call_detail("conversation-a", run["run_id"], call_id or "")
+    detail = restored.get_call_detail("conversation-a", run["run_id"], call_id)
 
     assert snapshot["superseded"] is True
     assert [call["tool_name"] for call in snapshot["calls"]] == ["search_for_pattern", "start_job", "execute_shell_command"]
     assert snapshot["calls"][-1]["call_id"] == interrupted_id
-    assert snapshot["calls"][-1]["status"] == "cancelled"
+    assert snapshot["calls"][-1]["status"] == "failed"
     assert snapshot["calls"][-1]["finished_at"] is not None
     assert [(job["job_id"], job["current_turn"]) for job in snapshot["jobs"]] == [("job-a", True)]
     assert json.loads(detail["arguments"]) == {"substring_pattern": "ActivityTracker", "relative_path": "src/serena"}
@@ -486,6 +486,20 @@ def test_mcp_tool_wrapper_records_activity() -> None:
     ]
 
 
+def test_mcp_tool_wrapper_records_execution_without_activity_panel() -> None:
+    tracker = ActivityTracker(_FakeJobSource())
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(_EchoCommandTool(), activity_tracker=tracker)
+
+    assert asyncio.run(mcp_tool.run({"command": "git status"})) == "git status"
+
+    records = tracker.execution_store.list_executions()
+    assert len(records) == 1
+    assert records[0].session_id == "global"
+    assert records[0].tool_name == "echo_command"
+    assert json.loads(records[0].arguments) == {"command": "git status"}
+    assert records[0].status == "completed"
+
+
 def test_mcp_tool_wrapper_tracks_logical_result_when_transport_conversion_is_enabled() -> None:
     tracker = ActivityTracker(_FakeJobSource())
     run = tracker.start_run("global", "serena")
@@ -572,6 +586,7 @@ def test_activity_tools_expose_widget_and_private_polling_contract() -> None:
     async def inspect_tools() -> dict[str, object]:
         factory = SerenaMCPFactory(transport="stdio", context="chatgpt")
         factory.agent = Agent()  # type: ignore[assignment]
+        factory._activity_tracker = ActivityTracker(_FakeJobSource())
         mcp = FastMCP("activity-test")
         factory._register_activity_tools(mcp)
         return {tool.name: tool for tool in await mcp.list_tools()}

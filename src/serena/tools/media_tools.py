@@ -22,6 +22,7 @@ from mcp.server.fastmcp import Audio, FastMCP, Image
 from mcp.types import CallToolResult, ContentBlock, ResourceLink, TextContent
 from pydantic import AnyUrl, BaseModel, ConfigDict
 
+from serena.execution_store import ExecutionStore
 from serena.tools.tools_base import Tool, ToolMarkerCanEdit, ToolMarkerOptional
 
 _FILE_RESOURCE_URI_TEMPLATE = "serena-file://export/{token}"
@@ -82,9 +83,7 @@ class _FileSnapshotStore:
     @classmethod
     def _prune(cls, root: Path, incoming_size: int) -> None:
         """Evicts unreferenced LRU snapshots until a new snapshot fits within bounds."""
-        from serena.dashboard_activity import DashboardActivityArchive
-
-        pinned = DashboardActivityArchive.retained_file_tokens_from_disk()
+        pinned = ExecutionStore.retained_file_tokens_from_disk()
         snapshots: list[tuple[Path, os.stat_result]] = []
         total_size = 0
         for path in root.iterdir():

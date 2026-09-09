@@ -52,7 +52,7 @@ class _ToolOutputRecord:
 
     tool_name: str
     path: Path
-    execution_name: str | None = None
+    execution_id: str | None = None
     total_chars: int = 0
     is_open: bool = True
 
@@ -99,7 +99,7 @@ class ToolOutputStore:
         self._lock = RLock()
         self._closed = False
 
-    def open(self, tool_name: str, execution_name: str | None = None) -> ToolOutputWriter:
+    def open(self, tool_name: str, execution_id: str | None = None) -> ToolOutputWriter:
         """Open one retained result and return its stable append-only writer."""
         with self._lock:
             if self._closed:
@@ -109,9 +109,9 @@ class ToolOutputStore:
             output_id = uuid4().hex
             path = Path(self._directory.name) / f"{output_id}.txt"
             path.touch()
-            self._records[output_id] = _ToolOutputRecord(tool_name=tool_name, path=path, execution_name=execution_name)
-            if execution_name is not None:
-                self._output_by_execution[execution_name] = output_id
+            self._records[output_id] = _ToolOutputRecord(tool_name=tool_name, path=path, execution_id=execution_id)
+            if execution_id is not None:
+                self._output_by_execution[execution_id] = output_id
             self._prune()
             return ToolOutputWriter(self, output_id)
 
@@ -186,10 +186,10 @@ class ToolOutputStore:
                 is_open=record.is_open,
             )
 
-    def describe_execution(self, execution_name: str) -> ToolOutputDescriptor | None:
+    def describe_execution(self, execution_id: str) -> ToolOutputDescriptor | None:
         """Return retained-output metadata for one exact task execution, if still available."""
         with self._lock:
-            output_id = self._output_by_execution.get(execution_name)
+            output_id = self._output_by_execution.get(execution_id)
             if output_id is None or output_id not in self._records:
                 return None
             return self.describe(output_id)
@@ -235,9 +235,9 @@ class ToolOutputStore:
         descriptor = self.describe(output_id)
         return self.read(output_id, max(0, descriptor.total_chars - max_chars), max_chars)
 
-    def read_execution_tail(self, execution_name: str, max_chars: int) -> ToolOutputPage | None:
+    def read_execution_tail(self, execution_id: str, max_chars: int) -> ToolOutputPage | None:
         """Read the newest bounded tail for one exact task execution."""
-        descriptor = self.describe_execution(execution_name)
+        descriptor = self.describe_execution(execution_id)
         if descriptor is None:
             return None
         return self.read_tail(descriptor.output_id, max_chars)
@@ -261,6 +261,6 @@ class ToolOutputStore:
     def _prune(self) -> None:
         while len(self._records) > self._max_records:
             expired_id, expired = self._records.popitem(last=False)
-            if expired.execution_name is not None and self._output_by_execution.get(expired.execution_name) == expired_id:
-                del self._output_by_execution[expired.execution_name]
+            if expired.execution_id is not None and self._output_by_execution.get(expired.execution_id) == expired_id:
+                del self._output_by_execution[expired.execution_id]
             expired.path.unlink(missing_ok=True)

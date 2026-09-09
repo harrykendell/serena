@@ -5,10 +5,11 @@ import re
 import shlex
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event, Lock, current_thread
+from threading import Event, Lock
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from serena.execution import bind_execution_id, reset_execution_id
 from serena.tool_output import ToolOutputStore
 from serena.tools.cmd_tools import ExecuteShellCommandTool
 from serena.util.shell import execute_shell_command
@@ -79,13 +80,18 @@ def test_shell_tool_oversize_response_reuses_live_transcript_id(tmp_path) -> Non
     tool = ExecuteShellCommandTool(agent)
     program = 'print("x" * 1200, flush=True)'
     command = f"{shlex.quote(sys.executable)} -u -c {shlex.quote(program)}"
+    execution_id = "shell-execution"
 
     try:
-        response = tool.apply(command, max_answer_chars=400)
+        execution_token = bind_execution_id(execution_id)
+        try:
+            response = tool.apply(command, max_answer_chars=400)
+        finally:
+            reset_execution_id(execution_token)
         match = re.search(r"Shell transcript retained as ([0-9a-f]{32})", response)
         assert match is not None
         output_id = match.group(1)
-        descriptor = store.describe_execution(current_thread().name)
+        descriptor = store.describe_execution(execution_id)
         page = store.read(output_id, 0, 2_000)
 
         assert descriptor is not None

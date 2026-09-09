@@ -42,6 +42,8 @@ from serena.config.serena_config import (
     ToolInclusionDefinition,
 )
 from serena.dashboard import SerenaDashboardAPI, SerenaDashboardTrayManager, SerenaDashboardViewer, open_url_in_browser
+from serena.execution import bind_execution_id, reset_execution_id
+from serena.execution_store import ExecutionStore
 from serena.jetbrains import jetbrains_plugin_client
 from serena.ls_manager import LanguageServerManager
 from serena.memories.memory_manager import MemoryManager
@@ -632,6 +634,7 @@ class SerenaAgent:
         self._dashboard_manager: DashboardManager | None = None
         self._dashboard_api: SerenaDashboardAPI | None = None
         self._tool_output_store = ToolOutputStore()
+        self._execution_store = ExecutionStore()
         self._project_prompt_status = ProjectPromptProvisionStatus()
         self._session_mode_selection_definition = modes
         self.version = serena_version()
@@ -992,9 +995,14 @@ class SerenaAgent:
         """Read one page from a previously retained oversized tool result."""
         return self._tool_output_store.read(output_id, offset, max_chars)
 
-    def open_tool_output(self, tool_name: str, execution_name: str | None = None) -> ToolOutputWriter:
+    @property
+    def execution_store(self) -> ExecutionStore:
+        """Returns the authoritative persisted Serena execution/session store."""
+        return self._execution_store
+
+    def open_tool_output(self, tool_name: str, execution_id: str | None = None) -> ToolOutputWriter:
         """Open an append-only retained output stream for one tool execution."""
-        return self._tool_output_store.open(tool_name, execution_name)
+        return self._tool_output_store.open(tool_name, execution_id)
 
     def render_tool_output_tail(
         self,
@@ -1014,13 +1022,13 @@ class SerenaAgent:
             details=details,
         )
 
-    def read_tool_execution_tail(self, execution_name: str, max_chars: int) -> ToolOutputPage | None:
-        """Read the newest retained output tail for one exact task execution."""
-        return self._tool_output_store.read_execution_tail(execution_name, max_chars)
+    def read_tool_execution_tail(self, execution_id: str, max_chars: int) -> ToolOutputPage | None:
+        """Read the newest retained output tail for one exact tool execution."""
+        return self._tool_output_store.read_execution_tail(execution_id, max_chars)
 
-    def describe_tool_execution_output(self, execution_name: str) -> ToolOutputDescriptor | None:
-        """Return retained-output metadata for one exact task execution, if available."""
-        return self._tool_output_store.describe_execution(execution_name)
+    def describe_tool_execution_output(self, execution_id: str) -> ToolOutputDescriptor | None:
+        """Return retained-output metadata for one exact tool execution, if available."""
+        return self._tool_output_store.describe_execution(execution_id)
 
     def get_dashboard_url(self) -> str | None:
         """
@@ -1030,11 +1038,9 @@ class SerenaAgent:
             return None
         return self._dashboard_manager.url
 
-    def set_dashboard_session_name(self, session_id: str, display_name: str) -> str | None:
-        """Sets the retained dashboard name for one ChatGPT conversation when available."""
-        if self._dashboard_api is None:
-            return None
-        return self._dashboard_api.set_serena_session_name(session_id, display_name)
+    def set_dashboard_session_name(self, session_id: str, display_name: str) -> str:
+        """Sets the retained operator-facing name for one client session."""
+        return self._execution_store.set_session_display_name(session_id, display_name)
 
     def open_dashboard(self) -> bool:
         """
@@ -1374,6 +1380,7 @@ class SerenaAgent:
         logged: bool = True,
         timeout: float | None = None,
         session_id: str | None = None,
+        execution_id: str | None = None,
     ) -> TaskExecutor.Task[T]:
         """Schedules a task on the executor owned by the current session's project runtime."""
         resolved_session_id = session_id or self._session_id_context.get()
@@ -1390,12 +1397,14 @@ class SerenaAgent:
         project = runtime.project if runtime is not None else self.get_active_project_for_session(resolved_session_id)
 
         def session_bound_task() -> T:
-            execution_token = self._execution_project_context.set((True, runtime, project))
+            project_token = self._execution_project_context.set((True, runtime, project))
+            execution_token = bind_execution_id(execution_id)
             try:
                 with self.session_context(resolved_session_id):
                     return task()
             finally:
-                self._execution_project_context.reset(execution_token)
+                reset_execution_id(execution_token)
+                self._execution_project_context.reset(project_token)
 
         return executor.issue_task(session_bound_task, name=name, logged=logged, timeout=timeout)
 

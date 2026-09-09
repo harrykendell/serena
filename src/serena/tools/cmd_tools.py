@@ -3,8 +3,8 @@ Tools supporting the execution of (external) commands
 """
 
 import os.path
-from threading import current_thread
 
+from serena.execution import get_current_execution_id
 from serena.tools import Tool, ToolMarkerCanEdit
 from serena.util.shell import execute_shell_command
 
@@ -47,8 +47,8 @@ class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit):
 
         effective_max_answer_chars = self._effective_max_answer_chars(max_answer_chars)
 
-        # stream a live transcript keyed to this exact Serena task while preserving the structured final result
-        with self.agent.open_tool_output(self.get_name(), execution_name=current_thread().name) as output_writer:
+        # stream a live transcript keyed to this exact model-visible execution
+        with self.agent.open_tool_output(self.get_name(), execution_id=get_current_execution_id()) as output_writer:
             result = execute_shell_command(command, cwd=_cwd, capture_stderr=capture_stderr, output_sink=output_writer)
         result_json = result.model_dump_json()
         if len(result_json) <= effective_max_answer_chars:

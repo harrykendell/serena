@@ -214,7 +214,7 @@ class SerenaDashboardAPI:
         if trusted_hosts:
             self._app.config["TRUSTED_HOSTS"] = trusted_hosts
         self._tool_usage_stats = tool_usage_stats
-        self._custom_dashboard = CustomDashboard(self._app, agent, memory_log_handler)
+        self._custom_dashboard = CustomDashboard(self._app, agent)
         self._loaded_news: dict[str, str] = {}
         self._news_ready = threading.Event()
         self._setup_routes()

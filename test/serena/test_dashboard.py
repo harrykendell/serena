@@ -1,7 +1,10 @@
 from collections.abc import Callable
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 from serena.dashboard import SerenaDashboardAPI
+from serena.execution_store import ExecutionStore
 from solidlsp.ls_config import LanguageServerId
 
 
@@ -16,6 +19,8 @@ class _DummyMemoryLogHandler:
 class _DummyAgent:
     def __init__(self, project: SimpleNamespace | None) -> None:
         self._project = project
+        self._execution_store_dir = TemporaryDirectory(prefix="serena-dashboard-test-store-")
+        self.execution_store = ExecutionStore(Path(self._execution_store_dir.name), migrate_legacy=False)
 
     def register_config_changed_callback(self, callback: Callable[[], None]) -> None:
         pass

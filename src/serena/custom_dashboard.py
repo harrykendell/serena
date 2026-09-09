@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
-import re
 import threading
 import time
 from dataclasses import dataclass
@@ -14,7 +12,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from flask import Flask, Response, abort, request
-from mcp.server.fastmcp import Audio, Image
 from mcp.types import ResourceLink
 from pydantic import AnyUrl
 
@@ -24,10 +21,9 @@ from orchestrator.delegates import DelegateError, DelegateStore
 from serena.activity import ActivityDetailFormatter, ActivityMedia
 from serena.dashboard_activity import DashboardActivityArchive, DashboardActivitySessionSummary
 from serena.dashboard_widgets import orchestrator_dashboard_widget_html, serena_dashboard_widget_html
+from serena.execution_store import ExecutionRecord
 from serena.jobs import JobManager, JobStatus
-from serena.task_executor import TaskExecutor
-from serena.tools.media_tools import get_result_file_link, get_result_media, read_result_file_link
-from serena.util.logging import MemoryLogHandler
+from serena.tools.media_tools import read_result_file_link
 
 if TYPE_CHECKING:
     from serena.agent import SerenaAgent
@@ -35,31 +31,6 @@ if TYPE_CHECKING:
 CUSTOM_DASHBOARD_DIR = Path(__file__).parent / "resources" / "kendell_dashboard"
 _CUSTOM_DASHBOARD_JOB_LIMIT = 1000
 _EXECUTION_FIELD_LIMIT = 12_000
-_TASK_THREAD_PATTERN = r"Task-\d+:[^\]]+Tool"
-_TOOL_START_RE = re.compile(
-    rf"\[(?P<task>{_TASK_THREAD_PATTERN})\].*? - [a-z0-9_]+: (?P<parameters>.*?); "
-    rf"(?:project: (?P<project>.*?); )?session_id: (?P<session_id>[^\s]+)$",
-    re.DOTALL,
-)
-_TOOL_RESULT_RE = re.compile(rf"\[(?P<task>{_TASK_THREAD_PATTERN})\].*? - Result: (?P<result>.*)$", re.DOTALL)
-_TOOL_ERROR_RE = re.compile(rf"^ERROR.*?\[(?P<task>{_TASK_THREAD_PATTERN})\].*? - (?P<error>.*)$", re.DOTALL)
-_INTERNAL_SESSION_PARAM_RE = re.compile(r",?\s*session_id=(?:'[^']*'|\"[^\"]*\")\s*$")
-_EPHEMERAL_DOWNLOAD_URL_RE = re.compile(r"download_url=(?:'[^']*'|\"[^\"]*\")")
-
-
-def _bounded(value: str) -> str:
-    """Bounds one dashboard field while retaining the most recent tail of oversized output."""
-    if len(value) <= _EXECUTION_FIELD_LIMIT:
-        return value
-    omitted = len(value) - _EXECUTION_FIELD_LIMIT
-    return f"… {omitted} earlier characters omitted …\n{value[-_EXECUTION_FIELD_LIMIT:]}"
-
-
-def _execution_tool_name(task_name: str) -> str:
-    """Converts one TaskExecutor class-style name into the public Serena tool name."""
-    _, _, raw = task_name.partition(":")
-    raw = raw[:-4] if raw.endswith("Tool") else raw
-    return re.sub(r"(?<!^)(?=[A-Z])", "_", raw).lower()
 
 
 @dataclass(frozen=True)
@@ -73,248 +44,76 @@ class DashboardMediaContent:
 
 
 class DashboardExecutionHistory:
-    """Session-local history of Serena tool calls with parameters and bounded results."""
+    """Reads Serena tool execution history directly from the canonical execution store."""
 
-    def __init__(
-        self,
-        agent: SerenaAgent,
-        memory_log_handler: MemoryLogHandler,
-        activity_archive: DashboardActivityArchive | None = None,
-    ):
+    def __init__(self, agent: SerenaAgent):
         self._agent = agent
-        self._lock = threading.Lock()
-        self._completed: list[TaskExecutor.TaskInfo] = []
-        self._last_captured_future: object | None = None
-        self._metadata_by_task_name: dict[str, dict[str, str]] = {}
-        self._activity_archive = activity_archive
+        self._store = agent.execution_store
         self._activity_formatter = ActivityDetailFormatter()
-        self._agent.register_config_changed_callback(self._capture_last_execution)
-        add_emit_callback = getattr(memory_log_handler, "add_emit_callback", None)
-        if callable(add_emit_callback):
-            add_emit_callback(self._observe_log)
 
-    @staticmethod
-    def _status(task_info: TaskExecutor.TaskInfo) -> str:
-        """Returns the externally visible state of a task execution."""
-        if task_info.is_running:
-            return "running"
-        if not task_info.future.done():
-            return "queued"
-        if task_info.future.cancelled():
-            return "cancelled"
-        if task_info.future.exception() is not None:
-            return "failed"
-        return "completed"
-
-    @staticmethod
-    def _is_tool_execution(task_info: TaskExecutor.TaskInfo) -> bool:
-        """Returns whether a task represents an externally invoked Serena tool."""
-        _, separator, task_name = task_info.name.partition(":")
-        return bool(separator) and task_name.endswith("Tool")
-
-    @staticmethod
-    def _media_descriptor(task_info: TaskExecutor.TaskInfo) -> dict[str, str] | None:
-        """Returns lightweight artifact metadata without materialising binary content."""
-        if not task_info.finished_successfully():
-            return None
-
-        result = task_info.future.result()
-        media = get_result_media(result)
-        file_link = get_result_file_link(result)
-        if isinstance(media, Image):
-            descriptor = {"type": "image"}
-        elif isinstance(media, Audio):
-            descriptor = {"type": "audio"}
-        elif file_link is not None:
-            mime_type = file_link.mimeType or "application/octet-stream"
-            if mime_type.startswith("image/"):
-                descriptor = {"type": "image"}
-            elif mime_type.startswith("audio/"):
-                descriptor = {"type": "audio"}
-            else:
-                descriptor = {"type": "file"}
-        else:
-            return None
-
-        if file_link is not None:
-            descriptor["name"] = file_link.name
-            descriptor["mime_type"] = file_link.mimeType or "application/octet-stream"
-        return descriptor
-
-    def _find_task_info(self, task_id: int) -> TaskExecutor.TaskInfo:
-        """Returns one retained task execution by its session-local identifier."""
-        current = list(self._agent.get_current_tasks())
-        with self._lock:
-            completed = list(self._completed)
-        for task_info in [*current, *completed]:
-            if task_info.task_id == task_id:
-                return task_info
-        raise KeyError(f"Unknown tool execution {task_id}")
-
-    def _observe_log(self, message: str) -> None:
-        """Captures parameters, results and errors from Serena's existing tool execution logs."""
-        start_match = _TOOL_START_RE.search(message)
-        if start_match is not None:
-            task_name = start_match.group("task")
-            tool_name = _execution_tool_name(task_name)
-            parameters = _INTERNAL_SESSION_PARAM_RE.sub("", start_match.group("parameters").strip())
-            parameters = _EPHEMERAL_DOWNLOAD_URL_RE.sub("download_url='<ephemeral>'", parameters)
-            project = start_match.group("project")
-            session_id = start_match.group("session_id")
-            summary = self._activity_formatter.format_parameters(tool_name, parameters)
-
-            # retain the complete dashboard execution metadata independently of the compact activity summary
-            with self._lock:
-                metadata = self._metadata_by_task_name.setdefault(task_name, {})
-                metadata["parameters"] = _bounded(parameters)
-                if project:
-                    metadata["project"] = project
-                metadata["session_id"] = session_id
-
-            # persist the same semantic detail/scope pair used by the inline ChatGPT activity tracker
-            if self._activity_archive is not None:
-                self._activity_archive.record_start(
-                    task_name=task_name,
-                    session_id=session_id,
-                    tool_name=tool_name,
-                    parameters=_bounded(parameters),
-                    detail=summary.detail,
-                    scope=summary.scope,
-                    project_name=project,
-                )
-            return
-
-        result_match = _TOOL_RESULT_RE.search(message)
-        if result_match is not None:
-            task_name = result_match.group("task")
-            result = _bounded(result_match.group("result").strip())
-            with self._lock:
-                metadata = self._metadata_by_task_name.setdefault(task_name, {})
-                metadata["result"] = result
-            if self._activity_archive is not None:
-                self._activity_archive.record_result(task_name, result=result)
-            return
-
-        error_match = _TOOL_ERROR_RE.search(message)
-        if error_match is not None:
-            task_name = error_match.group("task")
-            error = _bounded(error_match.group("error").strip())
-            with self._lock:
-                metadata = self._metadata_by_task_name.setdefault(task_name, {})
-                metadata["error"] = error
-            if self._activity_archive is not None:
-                self._activity_archive.record_result(task_name, error=error)
-
-    def _serialize(self, task_info: TaskExecutor.TaskInfo) -> dict[str, Any]:
-        """Serializes a task execution and its captured call metadata."""
-        with self._lock:
-            metadata = dict(self._metadata_by_task_name.get(task_info.name, {}))
-        media = self._media_descriptor(task_info)
-
-        describe_output = getattr(self._agent, "describe_tool_execution_output", None)
-        descriptor = describe_output(task_info.name) if callable(describe_output) else None
-        stream_output_id = getattr(descriptor, "output_id", None)
-        if not isinstance(stream_output_id, str):
-            stream_output_id = None
-        stream_output_chars = getattr(descriptor, "total_chars", None)
-        if not isinstance(stream_output_chars, int):
-            stream_output_chars = None
-
-        started_at = task_info.started_at
-        finished_at = task_info.finished_at
-        elapsed_seconds = max(0.0, (finished_at or time.time()) - started_at) if started_at is not None else None
-        parameters = metadata.get("parameters")
-        summary = self._activity_formatter.format_parameters(
-            _execution_tool_name(task_info.name), parameters if isinstance(parameters, str) else None
-        )
-
+    def _serialize(self, record: ExecutionRecord) -> dict[str, Any]:
+        """Serializes one canonical execution into the existing dashboard response shape."""
+        parameters = record.arguments
+        summary = self._activity_formatter.format_parameters(record.tool_name, parameters)
+        media = ActivityMedia.from_storage_dict(record.media) or ActivityMedia.from_serialized_result(record.result)
+        finished_at = record.finished_at
+        elapsed_seconds = max(0.0, (finished_at or time.time()) - record.started_at)
+        media_payload = media.public_dict() if media is not None else None
         return {
-            "task_id": task_info.task_id,
-            "name": task_info.name,
-            "status": self._status(task_info),
-            "finished_successfully": task_info.finished_successfully(),
-            "project": metadata.get("project"),
-            "session_id": metadata.get("session_id"),
+            "execution_id": record.execution_id,
+            "task_id": record.execution_id,
+            "name": record.tool_name,
+            "status": record.status,
+            "finished_successfully": record.status == "completed",
+            "project": record.project_name or None,
+            "session_id": record.session_id,
             "detail": summary.detail or summary.scope,
-            "submitted_at": task_info.submitted_at,
-            "started_at": started_at,
+            "submitted_at": record.started_at,
+            "started_at": record.started_at,
             "finished_at": finished_at,
             "elapsed_seconds": elapsed_seconds,
-            "parameters": metadata.get("parameters"),
-            "result": None if media is not None else metadata.get("result"),
-            "error": metadata.get("error"),
-            "media": media,
-            "stream_output_id": stream_output_id,
-            "stream_output_chars": stream_output_chars,
+            "parameters": parameters,
+            "result": None if media is not None else record.result,
+            "error": record.error,
+            "media": media_payload,
+            "stream_output_id": record.retained_output_id,
+            "stream_output_chars": record.retained_output_chars,
         }
 
-    def _capture_last_execution(self) -> None:
-        """Adds the last completed tool task to the session history once."""
-        task_info = self._agent.get_last_executed_task()
-        if task_info is None or not task_info.logged or not self._is_tool_execution(task_info):
-            return
-
-        with self._lock:
-            if task_info.future is self._last_captured_future:
-                return
-            self._last_captured_future = task_info.future
-            self._completed.append(task_info)
-
-    def get_media(self, task_id: int) -> DashboardMediaContent:
-        """Returns media or transferable file content from one successful retained tool execution."""
-        task_info = self._find_task_info(task_id)
-        if not task_info.finished_successfully():
-            raise ValueError(f"Tool execution {task_id} has no completed media result")
-
-        result = task_info.future.result()
-        media = get_result_media(result)
-        file_link = get_result_file_link(result)
-        if isinstance(media, Image):
-            content = media.to_image_content()
-            return DashboardMediaContent(
-                data=base64.b64decode(content.data, validate=True),
-                mime_type=content.mimeType,
-                media_type=content.type,
-                file_name=file_link.name if file_link is not None else None,
-            )
-        if isinstance(media, Audio):
-            content = media.to_audio_content()
-            return DashboardMediaContent(
-                data=base64.b64decode(content.data, validate=True),
-                mime_type=content.mimeType,
-                media_type=content.type,
-                file_name=file_link.name if file_link is not None else None,
-            )
-        if file_link is None:
-            raise ValueError(f"Tool execution {task_id} did not return media or a file")
-
-        mime_type = file_link.mimeType or "application/octet-stream"
-        if mime_type.startswith("image/"):
-            media_type = "image"
-        elif mime_type.startswith("audio/"):
-            media_type = "audio"
-        else:
-            media_type = "file"
+    def get_media(self, execution_id: str) -> DashboardMediaContent:
+        """Returns media or transferable file content from one successful retained execution."""
+        record = self._store.get_execution(execution_id)
+        if record is None:
+            raise KeyError(f"Unknown tool execution {execution_id}")
+        if record.status != "completed":
+            raise ValueError(f"Tool execution {execution_id} has no completed media result")
+        media = ActivityMedia.from_storage_dict(record.media) or ActivityMedia.from_serialized_result(record.result)
+        if media is None:
+            raise ValueError(f"Tool execution {execution_id} did not return media or a file")
+        link = ResourceLink(
+            type="resource_link",
+            name=media.name,
+            uri=AnyUrl(media.uri),
+            mimeType=media.mime_type,
+        )
         return DashboardMediaContent(
-            data=read_result_file_link(file_link),
-            mime_type=mime_type,
-            media_type=media_type,
-            file_name=file_link.name,
+            data=read_result_file_link(link),
+            mime_type=media.mime_type,
+            media_type=media.media_type,
+            file_name=media.name,
         )
 
-    def get_output(self, task_id: int) -> dict[str, Any]:
-        """Return the newest bounded retained-output tail for one exact tool execution."""
-        task_info = self._find_task_info(task_id)
-        read_output = getattr(self._agent, "read_tool_execution_tail", None)
-        if not callable(read_output):
-            raise ValueError(f"Tool execution {task_id} has no retained output")
-
-        page = read_output(task_info.name, _EXECUTION_FIELD_LIMIT)
+    def get_output(self, execution_id: str) -> dict[str, Any]:
+        """Returns the newest bounded retained-output tail for one exact execution."""
+        if self._store.get_execution(execution_id) is None:
+            raise KeyError(f"Unknown tool execution {execution_id}")
+        page = self._agent.read_tool_execution_tail(execution_id, _EXECUTION_FIELD_LIMIT)
         if page is None:
-            raise ValueError(f"Tool execution {task_id} has no retained output")
+            raise ValueError(f"Tool execution {execution_id} has no retained output")
         return {
             "status": "success",
-            "task_id": task_id,
+            "execution_id": execution_id,
+            "task_id": execution_id,
             "output_id": page.output_id,
             "offset": page.offset,
             "end_offset": page.offset + len(page.content),
@@ -323,21 +122,15 @@ class DashboardExecutionHistory:
         }
 
     def get_executions(self) -> dict[str, Any]:
-        """Returns current tool calls followed by completed session history, newest first."""
-        self._capture_last_execution()
-
-        current_task_infos = [task for task in self._agent.get_current_tasks() if task.logged and self._is_tool_execution(task)]
-        current = [self._serialize(task) for task in current_task_infos]
-        with self._lock:
-            completed_task_infos = list(reversed(self._completed))
-        completed = [self._serialize(task) for task in completed_task_infos]
-
+        """Returns retained model-visible Serena executions newest first."""
+        records = self._store.list_executions(newest_first=True)
+        executions = [self._serialize(record) for record in records]
         return {
             "status": "success",
-            "executions": [*current, *completed],
-            "running": sum(item["status"] == "running" for item in current),
-            "queued": sum(item["status"] == "queued" for item in current),
-            "done": len(completed),
+            "executions": executions,
+            "running": sum(item["status"] == "running" for item in executions),
+            "queued": sum(item["status"] == "queued" for item in executions),
+            "done": sum(item["status"] in {"completed", "failed", "cancelled"} for item in executions),
         }
 
 
@@ -490,11 +283,9 @@ class DashboardSerenaActivityOverview:
     def __init__(
         self,
         archive: DashboardActivityArchive,
-        execution_history: DashboardExecutionHistory,
         job_overview: DashboardJobOverview,
     ) -> None:
         self._archive = archive
-        self._execution_history = execution_history
         self._job_overview = job_overview
         self._activity_formatter = ActivityDetailFormatter()
         self._jobs_cache_lock = threading.Lock()
@@ -503,8 +294,6 @@ class DashboardSerenaActivityOverview:
 
     def get_panels(self, include_state: bool = False) -> dict[str, Any]:
         """Returns retained Serena session panels newest first by creation time."""
-        executions = self._execution_history.get_executions()
-        self._archive.reconcile_executions(executions.get("executions", []))
         jobs = self._jobs_by_id()
         panels: list[dict[str, Any]] = []
         for summary in self._archive.list_session_summaries():
@@ -859,15 +648,14 @@ class DashboardOrchestratorOverview:
 class CustomDashboard:
     """Fork-specific dashboard integration kept outside Serena's upstream frontend implementation."""
 
-    def __init__(self, app: Flask, agent: SerenaAgent, memory_log_handler: MemoryLogHandler):
+    def __init__(self, app: Flask, agent: SerenaAgent):
         self._session_overview = DashboardSessionOverview(agent)
         self._memory_overview = DashboardMemoryOverview(agent)
-        self._activity_archive = DashboardActivityArchive()
-        self._execution_history = DashboardExecutionHistory(agent, memory_log_handler, self._activity_archive)
+        self._activity_archive = DashboardActivityArchive(agent.execution_store)
+        self._execution_history = DashboardExecutionHistory(agent)
         self._job_overview = DashboardJobOverview(JobManager())
         self._serena_activity_overview = DashboardSerenaActivityOverview(
             self._activity_archive,
-            self._execution_history,
             self._job_overview,
         )
         self._orchestrator_overview = DashboardOrchestratorOverview()
@@ -944,10 +732,10 @@ class CustomDashboard:
         def get_executions() -> dict[str, Any]:
             return self._execution_history.get_executions()
 
-        @app.route("/dashboard/api/executions/<int:task_id>/media", methods=["GET"])
-        def get_execution_media(task_id: int) -> Response:
+        @app.route("/dashboard/api/executions/<execution_id>/media", methods=["GET"])
+        def get_execution_media(execution_id: str) -> Response:
             try:
-                media = self._execution_history.get_media(task_id)
+                media = self._execution_history.get_media(execution_id)
             except (KeyError, ValueError):
                 abort(404)
 
@@ -955,10 +743,10 @@ class CustomDashboard:
             response.headers["Cache-Control"] = "private, max-age=3600"
             return response
 
-        @app.route("/dashboard/api/executions/<int:task_id>/output", methods=["GET"])
-        def get_execution_output(task_id: int) -> dict[str, Any]:
+        @app.route("/dashboard/api/executions/<execution_id>/output", methods=["GET"])
+        def get_execution_output(execution_id: str) -> dict[str, Any]:
             try:
-                return self._execution_history.get_output(task_id)
+                return self._execution_history.get_output(execution_id)
             except (KeyError, ValueError):
                 abort(404)
 

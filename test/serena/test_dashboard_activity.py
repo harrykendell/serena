@@ -1,37 +1,42 @@
+import json
 from pathlib import Path
 
 import pytest
 
 from serena.dashboard_activity import DashboardActivityArchive
+from serena.execution_store import ExecutionStore
 
 
 def test_dashboard_activity_archive_survives_restart_and_pins_file_snapshots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
     token = "a" * 48
-    archive = DashboardActivityArchive()
-    call_id = archive.record_start(
-        task_name="Task-1:FetchMediaFileTool",
+    store = ExecutionStore()
+    store.start_execution(
+        execution_id="execution-a",
         session_id="chat-a",
-        tool_name="fetch_media_file",
-        parameters="relative_path='figure.png'",
-        detail="figure.png",
         project_name="project-a",
-        timestamp=100.0,
+        tool_name="fetch_media_file",
+        arguments='{"relative_path": "figure.png"}',
+        started_at=100.0,
     )
-    archive.record_result(
-        "Task-1:FetchMediaFileTool",
-        result=(
-            "_NativeMediaResult(media=<Image>, file_link=ResourceLink(name='figure.png', "
-            f"uri=AnyUrl('serena-file://export/{token}'), mimeType='image/png', size=123))"
-        ),
+    store.finish_execution(
+        "execution-a",
+        succeeded=True,
+        media={
+            "type": "image",
+            "name": "figure.png",
+            "mime_type": "image/png",
+            "uri": f"serena-file://export/{token}",
+        },
+        finished_at=101.0,
     )
 
-    restored = DashboardActivityArchive()
+    restored = DashboardActivityArchive(ExecutionStore())
     sessions = restored.list_sessions()
 
     assert len(sessions) == 1
     assert sessions[0]["panel_id"] == DashboardActivityArchive.panel_id_for_session("chat-a")
-    assert sessions[0]["calls"][0]["call_id"] == call_id
+    assert sessions[0]["calls"][0]["call_id"] == "execution-a"
     assert sessions[0]["calls"][0]["status"] == "completed"
     assert sessions[0]["calls"][0]["media"] == {
         "type": "image",
@@ -45,10 +50,10 @@ def test_dashboard_activity_archive_survives_restart_and_pins_file_snapshots(tmp
 
 def test_dashboard_activity_archive_persists_operator_conversation_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
-    archive = DashboardActivityArchive()
+    archive = DashboardActivityArchive(ExecutionStore())
 
     assert archive.set_display_name("chat-a", "  Loading scan analysis  ") == "Loading scan analysis"
-    restored = DashboardActivityArchive()
+    restored = DashboardActivityArchive(ExecutionStore())
 
     assert restored.list_sessions()[0]["session_id"] == "chat-a"
     assert restored.list_sessions()[0]["display_name"] == "Loading scan analysis"
@@ -56,17 +61,16 @@ def test_dashboard_activity_archive_persists_operator_conversation_name(tmp_path
 
 def test_dashboard_activity_archive_marks_interrupted_calls_terminal_on_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
-    archive = DashboardActivityArchive()
-    archive.record_start(
-        task_name="Task-1:ReadFileTool",
+    store = ExecutionStore()
+    store.start_execution(
+        execution_id="execution-a",
         session_id="chat-a",
-        tool_name="read_file",
-        parameters="relative_path='notes.txt'",
-        detail="notes.txt",
         project_name="project-a",
+        tool_name="read_file",
+        arguments='{"relative_path": "notes.txt"}',
     )
 
-    restored = DashboardActivityArchive()
+    restored = DashboardActivityArchive(ExecutionStore())
     call = restored.list_sessions()[0]["calls"][0]
 
     assert call["status"] == "failed"
@@ -74,49 +78,74 @@ def test_dashboard_activity_archive_marks_interrupted_calls_terminal_on_restart(
     assert "restarted" in call["error"]
 
 
-def test_dashboard_activity_archive_does_not_reconcile_reused_task_names_across_restart(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
-    first = DashboardActivityArchive()
-    first.record_start(
-        task_name="Task-1:ReadFileTool",
-        session_id="chat-a",
-        tool_name="read_file",
-        parameters="relative_path='old.txt'",
-        detail="old.txt",
-        project_name="project-a",
-        timestamp=100.0,
-    )
-    first.record_result("Task-1:ReadFileTool", result="old result")
-
-    restored = DashboardActivityArchive()
-    restored.record_start(
-        task_name="Task-1:ReadFileTool",
-        session_id="chat-a",
-        tool_name="read_file",
-        parameters="relative_path='new.txt'",
-        detail="new.txt",
-        project_name="project-a",
-        timestamp=200.0,
-    )
-    restored.reconcile_executions(
-        [
+def test_dashboard_activity_archive_migrates_legacy_histories_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    serena_home = tmp_path / "serena-home"
+    monkeypatch.setenv("SERENA_HOME", str(serena_home))
+    dashboard_root = serena_home / "dashboard_activity_sessions"
+    activity_root = serena_home / "activity_runs"
+    dashboard_root.mkdir(parents=True)
+    activity_root.mkdir(parents=True)
+    panel_id = DashboardActivityArchive.panel_id_for_session("chat-a")
+    (dashboard_root / f"{panel_id}.json").write_text(
+        json.dumps(
             {
-                "name": "Task-1:ReadFileTool",
-                "submitted_at": 201.0,
-                "started_at": 202.0,
-                "finished_at": 203.0,
-                "project": "project-a",
-                "status": "completed",
+                "version": 1,
+                "panel_id": panel_id,
+                "session_id": "chat-a",
+                "project_name": "project-a",
+                "display_name": "Legacy chat",
+                "started_at": 100.0,
+                "updated_at": 101.0,
+                "calls": [
+                    {
+                        "call_id": "legacy-call",
+                        "tool_name": "read_file",
+                        "parameters": "relative_path='old.txt'",
+                        "status": "completed",
+                        "submitted_at": 100.0,
+                        "started_at": 100.0,
+                        "finished_at": 101.0,
+                        "result": "old result",
+                        "project_name": "project-a",
+                    }
+                ],
             }
-        ]
+        ),
+        encoding="utf-8",
+    )
+    (activity_root / "legacy-run.json").write_text(
+        json.dumps(
+            {
+                "run_id": "legacy-run",
+                "session_id": "chat-a",
+                "project_name": "project-a",
+                "started_at": 100.0,
+                "superseded": True,
+                "calls": [
+                    {
+                        "call_id": "legacy-call",
+                        "tool_name": "read_file",
+                        "arguments": '{"relative_path": "old.txt"}',
+                        "started_at": 100.0,
+                        "finished_at": 101.0,
+                        "status": "completed",
+                        "result": "old result",
+                        "project_name": "project-a",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
     )
 
-    calls = restored.list_sessions()[0]["calls"]
-    assert calls[0]["submitted_at"] == 100.0
-    assert calls[0]["started_at"] == 100.0
-    assert calls[0]["finished_at"] != 203.0
-    assert calls[1]["submitted_at"] == 201.0
-    assert calls[1]["started_at"] == 202.0
-    assert calls[1]["finished_at"] == 203.0
+    store = ExecutionStore()
+    archive = DashboardActivityArchive(store)
+    restored = ExecutionStore()
+
+    assert archive.list_sessions()[0]["display_name"] == "Legacy chat"
+    assert archive.list_sessions()[0]["calls"][0]["call_id"] == "legacy-call"
+    assert store.get_activity_run("legacy-run") is not None
+    assert len(restored.list_executions()) == 1
+    assert not list(dashboard_root.glob("*.json"))
+    assert not list(activity_root.glob("*.json"))
+    assert (serena_home / "execution_store" / "state.json").is_file()

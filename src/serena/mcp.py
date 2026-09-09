@@ -5,6 +5,7 @@ The Serena Model Context Protocol (MCP) Server
 import asyncio
 import base64
 import sys
+import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
@@ -25,13 +26,14 @@ from pydantic import AnyUrl
 from pydantic_settings import SettingsConfigDict
 from sensai.util import logging
 
-from serena.activity import ACTIVITY_RESOURCE_URI, ActivityTracker, register_activity_resource
+from serena.activity import ACTIVITY_RESOURCE_URI, ActivityMedia, ActivityTracker, register_activity_resource
 from serena.agent import (
     SerenaAgent,
 )
 from serena.config.context_mode import SerenaAgentContext
 from serena.config.serena_config import LanguageBackend, ModeSelectionDefinition, SerenaConfig
 from serena.constants import DEFAULT_CONTEXT, SERENA_LOG_FORMAT
+from serena.execution import bind_execution_id, get_current_execution_id, reset_execution_id
 from serena.session import get_mcp_session_id
 from serena.tools import Tool, ToolCallError
 from serena.tools.media_tools import read_result_file_link, register_file_export_resource
@@ -115,8 +117,17 @@ class SerenaFastMCPTool(FastMCPTool):
                 properties["description"] = param_desc[0].upper() + param_desc[1:]
 
         def execute_fn(**kwargs) -> Any:
+            execution_id = get_current_execution_id()
+            if execution_id is not None:
+                kwargs["execution_id"] = execution_id
             try:
-                return tool.prepare_mcp_result(tool.apply_ex(log_call=True, catch_exceptions=False, **kwargs))
+                return tool.prepare_mcp_result(
+                    tool.apply_ex(
+                        log_call=True,
+                        catch_exceptions=False,
+                        **kwargs,
+                    )
+                )
             except ToolCallError as e:
                 raise ToolError(e.get_error_message()) from e
 
@@ -146,6 +157,7 @@ class SerenaFastMCPTool(FastMCPTool):
         self._param_aliases = tool.get_param_aliases()
         self._activity_tracker = activity_tracker
         self._agent = tool.agent
+        self._execution_store = activity_tracker.execution_store if activity_tracker is not None else tool.agent.execution_store
 
     async def run(
         self,
@@ -153,60 +165,97 @@ class SerenaFastMCPTool(FastMCPTool):
         context: Context[ServerSessionT, LifespanContextT, RequestT] | None = None,
         convert_result: bool = False,
     ) -> Any:
-        # apply parameter aliases before validation and activity display
+        # apply parameter aliases before validation, persistence and activity display
         for param_alias, param_name in self._param_aliases.items():
             if param_alias in arguments and param_name not in arguments:
                 arguments[param_name] = arguments.pop(param_alias)
 
-        # publish invocation lifecycle to an active ChatGPT activity run
+        # create the authoritative execution before leaving the MCP event loop
         session_id = get_mcp_session_id(context)
-        call_id = None
-        activity_project_name = ""
+        project = self._agent.get_active_project_for_session(session_id)
+        submission_project_name = project.project_name if project is not None else ""
+        execution_id = uuid.uuid4().hex
+        execution_store = self._execution_store
+        execution_store.start_execution(
+            execution_id=execution_id,
+            session_id=session_id,
+            project_name=submission_project_name,
+            tool_name=self.name,
+            arguments=execution_store.serialize_value(arguments),
+        )
         if self._activity_tracker is not None:
-            project = self._agent.get_active_project_for_session(session_id)
-            activity_project_name = project.project_name if project is not None else ""
-            if activity_project_name:
-                self._activity_tracker.update_project(session_id, activity_project_name)
-            call_id = self._activity_tracker.start_tool(session_id, self.name, arguments, project_name=activity_project_name)
+            if submission_project_name:
+                self._activity_tracker.update_project(session_id, submission_project_name)
+            self._activity_tracker.start_tool(
+                session_id,
+                self.name,
+                arguments,
+                project_name=submission_project_name,
+                execution_id=execution_id,
+            )
 
-        # keep the MCP event loop free while Serena's synchronous executor waits
+        def finish_execution(*, succeeded: bool, result: object | None = None, project_name: str | None = None) -> None:
+            if self._activity_tracker is not None:
+                self._activity_tracker.finish_tool(
+                    execution_id,
+                    succeeded=succeeded,
+                    result=result,
+                    project_name=project_name,
+                )
+            else:
+                media = ActivityMedia.from_result(result) if result is not None else None
+                serialized = execution_store.serialize_value(result) if result is not None and media is None else None
+                execution_store.finish_execution(
+                    execution_id,
+                    succeeded=succeeded,
+                    result=serialized if succeeded else None,
+                    error=serialized if not succeeded else None,
+                    project_name=project_name,
+                    media=media.storage_dict() if media is not None else None,
+                )
+
+            describe_output = getattr(self._agent, "describe_tool_execution_output", None)
+            descriptor = describe_output(execution_id) if callable(describe_output) else None
+            if descriptor is not None:
+                execution_store.set_retained_output(execution_id, descriptor.output_id, descriptor.total_chars)
+
+        # propagate the execution identifier through asyncio.to_thread and the legacy dispatcher thread
+        execution_token = bind_execution_id(execution_id)
         try:
-            arguments_pre_parsed = self.fn_metadata.pre_parse_json(arguments)
-            arguments_model = self.fn_metadata.arg_model.model_validate(arguments_pre_parsed)
-            arguments_parsed = arguments_model.model_dump_one_level()
-            if self.context_kwarg is not None:
-                arguments_parsed[self.context_kwarg] = context
+            try:
+                arguments_pre_parsed = self.fn_metadata.pre_parse_json(arguments)
+                arguments_model = self.fn_metadata.arg_model.model_validate(arguments_pre_parsed)
+                arguments_parsed = arguments_model.model_dump_one_level()
+                if self.context_kwarg is not None:
+                    arguments_parsed[self.context_kwarg] = context
 
-            result = await asyncio.to_thread(self.fn, **arguments_parsed)
-            activity_result = result
-            if convert_result:
-                result = self.fn_metadata.convert_result(result)
-        except UrlElicitationRequiredError:
-            if self._activity_tracker is not None:
-                self._activity_tracker.finish_tool(call_id, succeeded=False, project_name=activity_project_name)
-            raise
-        except Exception as e:
-            if self._activity_tracker is not None:
-                self._activity_tracker.finish_tool(call_id, succeeded=False, result=e, project_name=activity_project_name)
-            raise ToolError(f"Error executing tool {self.name}: {e}") from e
-        except BaseException:
-            if self._activity_tracker is not None:
-                self._activity_tracker.finish_tool(call_id, succeeded=False, project_name=activity_project_name)
-            raise
+                result = await asyncio.to_thread(self.fn, **arguments_parsed)
+                activity_result = result
+                if convert_result:
+                    result = self.fn_metadata.convert_result(result)
+            except UrlElicitationRequiredError:
+                finish_execution(succeeded=False, project_name=submission_project_name)
+                raise
+            except Exception as e:
+                finish_execution(succeeded=False, result=e, project_name=submission_project_name)
+                raise ToolError(f"Error executing tool {self.name}: {e}") from e
+            except BaseException:
+                finish_execution(succeeded=False, project_name=submission_project_name)
+                raise
 
-        if self._activity_tracker is not None:
-            project = self._agent.get_active_project_for_session(session_id)
-            current_project_name = project.project_name if project is not None else ""
-            if current_project_name:
+            current_project = self._agent.get_active_project_for_session(session_id)
+            current_project_name = current_project.project_name if current_project is not None else ""
+            if self._activity_tracker is not None and current_project_name:
                 self._activity_tracker.update_project(session_id, current_project_name)
-            call_project_name = current_project_name if self.name == "activate_project" else activity_project_name
-            self._activity_tracker.finish_tool(
-                call_id,
+            call_project_name = current_project_name if self.name == "activate_project" else submission_project_name
+            finish_execution(
                 succeeded=True,
                 result=activity_result,
                 project_name=call_project_name,
             )
-        return result
+            return result
+        finally:
+            reset_execution_id(execution_token)
 
 
 class SerenaMCPFactory:
@@ -234,7 +283,7 @@ class SerenaMCPFactory:
         self.project = project
         self.agent: SerenaAgent | None = None
         self.memory_log_handler = memory_log_handler
-        self._activity_tracker = ActivityTracker()
+        self._activity_tracker: ActivityTracker | None = None
 
     @staticmethod
     def _sanitize_for_openai_tools(schema: dict) -> dict:
@@ -425,7 +474,9 @@ class SerenaMCPFactory:
     def _register_activity_tools(self, mcp: FastMCP) -> None:
         """Registers ChatGPT-only activity tools outside Serena's serial executor."""
         assert self.agent is not None
+        assert self._activity_tracker is not None
         agent = self.agent
+        activity_tracker = self._activity_tracker
 
         @mcp.tool(
             name="show_activity",
@@ -452,8 +503,33 @@ class SerenaMCPFactory:
             session_id = get_mcp_session_id(mcp_ctx)
             project = agent.get_active_project_for_session(session_id)
             project_name = project.project_name if project is not None else ""
-            await asyncio.to_thread(agent.set_dashboard_session_name, session_id, conversation_title)
-            return await asyncio.to_thread(self._activity_tracker.start_run, session_id, project_name)
+            execution_id = uuid.uuid4().hex
+            store = agent.execution_store
+            store.start_execution(
+                execution_id=execution_id,
+                session_id=session_id,
+                project_name=project_name,
+                tool_name="show_activity",
+                arguments=store.serialize_value({"conversation_title": conversation_title}),
+            )
+            try:
+                await asyncio.to_thread(agent.set_dashboard_session_name, session_id, conversation_title)
+                result = await asyncio.to_thread(activity_tracker.start_run, session_id, project_name)
+            except Exception as exc:
+                store.finish_execution(
+                    execution_id,
+                    succeeded=False,
+                    error=store.serialize_value(exc),
+                    project_name=project_name,
+                )
+                raise
+            store.finish_execution(
+                execution_id,
+                succeeded=True,
+                result=store.serialize_value(result),
+                project_name=project_name,
+            )
+            return result
 
         @mcp.tool(
             name="get_activity",
@@ -468,7 +544,7 @@ class SerenaMCPFactory:
             structured_output=True,
         )
         async def get_activity(run_id: str, mcp_ctx: Context) -> dict[str, Any]:
-            return await asyncio.to_thread(self._activity_tracker.get_run, get_mcp_session_id(mcp_ctx), run_id)
+            return await asyncio.to_thread(activity_tracker.get_run, get_mcp_session_id(mcp_ctx), run_id)
 
         @mcp.tool(
             name="get_activity_detail",
@@ -483,7 +559,7 @@ class SerenaMCPFactory:
             structured_output=True,
         )
         def get_activity_detail(run_id: str, call_id: str, mcp_ctx: Context) -> dict[str, Any]:
-            return self._activity_tracker.get_call_detail(get_mcp_session_id(mcp_ctx), run_id, call_id)
+            return activity_tracker.get_call_detail(get_mcp_session_id(mcp_ctx), run_id, call_id)
 
         @mcp.tool(
             name="get_activity_media",
@@ -498,7 +574,7 @@ class SerenaMCPFactory:
             structured_output=False,
         )
         def get_activity_media(run_id: str, call_id: str, mcp_ctx: Context) -> CallToolResult:
-            media = self._activity_tracker.get_call_media(get_mcp_session_id(mcp_ctx), run_id, call_id)
+            media = activity_tracker.get_call_media(get_mcp_session_id(mcp_ctx), run_id, call_id)
             link = ResourceLink(
                 type="resource_link",
                 name=media.name,
@@ -529,7 +605,7 @@ class SerenaMCPFactory:
         )
         async def get_activity_job_detail(run_id: str, job_id: str, mcp_ctx: Context) -> dict[str, Any]:
             return await asyncio.to_thread(
-                self._activity_tracker.get_job_detail,
+                activity_tracker.get_job_detail,
                 get_mcp_session_id(mcp_ctx),
                 run_id,
                 job_id,
@@ -614,6 +690,7 @@ class SerenaMCPFactory:
                 project_activation_error=project_activation_error,
                 web_dashboard_port=web_dashboard_port,
             )
+            self._activity_tracker = ActivityTracker(execution_store=self.agent.execution_store) if self.context.name == "chatgpt" else None
 
         except Exception as e:
             show_fatal_exception_safe(e)
