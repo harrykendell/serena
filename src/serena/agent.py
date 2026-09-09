@@ -33,7 +33,7 @@ from serena.config.serena_config import (
     SerenaPaths,
     ToolInclusionDefinition,
 )
-from serena.dashboard import SerenaDashboardAPI, open_url_in_browser
+from serena.dashboard import DashboardServer, open_url_in_browser
 from serena.execution import (
     ExecutionAccess,
     ProjectExecutionCoordinator,
@@ -61,7 +61,6 @@ from serena.tools import (
 )
 from serena.util.gui import system_has_usable_display
 from serena.util.inspection import iter_subclasses
-from serena.util.logging import MemoryLogHandler
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.util import subprocess_util
 from solidlsp.util.subprocess_util import terminate_process_tree_with_kill_fallback
@@ -448,7 +447,6 @@ class SerenaAgent:
         serena_config: SerenaConfig | None = None,
         context: SerenaAgentContext | None = None,
         modes: ModeSelectionDefinition | None = None,
-        memory_log_handler: MemoryLogHandler | None = None,
         web_dashboard_port: int | None = None,
     ):
         """
@@ -461,8 +459,6 @@ class SerenaAgent:
         :param context: the context in which the agent is operating, None for default context.
             The context may adjust prompts, tool availability, and tool descriptions.
         :param modes: mode selection definition to apply for this session
-        :param memory_log_handler: a MemoryLogHandler instance from which to read log messages; if None, a new one will be created
-            if necessary.
         :param web_dashboard_port: exact dashboard port to bind, or None to use the first available secondary dashboard port.
         """
         self._active_project: Project | None = None  # NOTE: field name used in __del__
@@ -478,7 +474,6 @@ class SerenaAgent:
         self._project_activation_callback = project_activation_callback
         self._project_activation_error: str | None = project_activation_error
         self._dashboard_manager: DashboardManager | None = None
-        self._dashboard_api: SerenaDashboardAPI | None = None
         self._tool_output_store = ToolOutputStore()
         self._execution_store = ExecutionStore()
         self._project_prompt_status = ProjectPromptProvisionStatus()
@@ -496,13 +491,6 @@ class SerenaAgent:
             log.info(f"Changing the root logger level to {serena_log_level}")
             Logger.root.setLevel(serena_log_level)
 
-        def get_memory_log_handler() -> MemoryLogHandler:
-            nonlocal memory_log_handler
-            if memory_log_handler is None:
-                memory_log_handler = MemoryLogHandler(level=serena_log_level)
-                Logger.root.addHandler(memory_log_handler)
-            return memory_log_handler
-
         # set the agent context
         if context is None:
             context = SerenaAgentContext.load_default()
@@ -510,7 +498,6 @@ class SerenaAgent:
 
         # instantiate all tool classes
         self._all_tools: dict[type[Tool], Tool] = {tool_class: tool_class(self) for tool_class in ToolRegistry().get_all_tool_classes()}
-        tool_names = [tool.get_name_from_cls() for tool in self._all_tools.values()]
 
         # log fundamental information
         log.info(
@@ -566,30 +553,22 @@ class SerenaAgent:
                 readiness=self._global_readiness,
             )
 
-        # create the dashboard backend (if enabled), which will register callback.
-        dashboard_api: SerenaDashboardAPI | None = None
+        # create the dashboard server if enabled.
+        dashboard_server: DashboardServer | None = None
         if self.serena_config.web_dashboard:
-            dashboard_api = SerenaDashboardAPI(
-                get_memory_log_handler(),
-                tool_names,
+            dashboard_server = DashboardServer(
                 agent=self,
                 host=self.serena_config.web_dashboard_listen_address,
                 trusted_hosts=self.serena_config.web_dashboard_trusted_hosts,
                 port=web_dashboard_port,
             )
-            self._dashboard_api = dashboard_api
 
-        # propagate the initial config/state to listeners, particularly to the dashboard API.
-        # Note: The only ongoing task can be the LS initialisation, which does not change the config
-        # This is executed before starting the dashboard thread to ensure that the dashboard
-        # has the correct initial state before requests can come in.
+        # propagate the initial state to registered listeners.
         self._on_config_changed()
 
-        # start the dashboard backend thread and the dashboard frontend manager (if enabled).
-        # This should be the last thing to happen in the initialization since the dashboard
-        # may access various parts of the agent
-        if dashboard_api:
-            dashboard_thread, port = dashboard_api.run_in_thread()
+        # start the dashboard last because requests may access fully initialized agent state
+        if dashboard_server:
+            dashboard_thread, port = dashboard_server.run_in_thread()
             self._dashboard_manager = DashboardManager(
                 port,
                 self.serena_config.web_dashboard_listen_address,

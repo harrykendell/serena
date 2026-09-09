@@ -38,7 +38,6 @@ from serena.session import get_mcp_session_id
 from serena.tools import Tool, ToolCallError
 from serena.tools.media_tools import read_result_file_link, register_file_export_resource
 from serena.util.exception import show_fatal_exception_safe
-from serena.util.logging import MemoryLogHandler
 
 log = logging.getLogger(__name__)
 
@@ -328,7 +327,6 @@ class SerenaMCPFactory:
         transport: Literal["stdio", "sse", "streamable-http"],
         context: str = DEFAULT_CONTEXT,
         project: str | None = None,
-        memory_log_handler: MemoryLogHandler | None = None,
     ):
         """
         :param transport: The transport to use for the MCP server.
@@ -336,13 +334,11 @@ class SerenaMCPFactory:
         :param project: Either an absolute path to the project directory or a name of an already registered project.
             If the project passed here hasn't been registered yet, it will be registered automatically and can be activated by its name
             afterward.
-        :param memory_log_handler: the in-memory log handler to use for the agent's logging
         """
         self.transport = transport
         self.context = SerenaAgentContext.load(context)
         self.project = project
         self.agent: SerenaAgent | None = None
-        self.memory_log_handler = memory_log_handler
         self._activity_tracker: ActivityTracker | None = None
 
     @staticmethod
@@ -683,7 +679,6 @@ class SerenaMCPFactory:
             serena_config=serena_config,
             context=self.context,
             modes=modes,
-            memory_log_handler=self.memory_log_handler,
             project_activation_error=project_activation_error,
             web_dashboard_port=web_dashboard_port,
         )

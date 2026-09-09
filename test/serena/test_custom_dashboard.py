@@ -6,31 +6,9 @@ import pytest
 
 from orchestrator.config import OrchestratorConfig
 from orchestrator.dashboard_sessions import OrchestratorDashboardSessionArchive
-from serena.custom_dashboard import DashboardExecutionHistory, DashboardJobOverview
-from serena.dashboard import SerenaDashboardAPI
+from serena.dashboard import DashboardServer
 from serena.execution_store import ExecutionStore
-from serena.jobs import JobPersistenceInfo, JobRecord, JobRuntimeInfo, JobSnapshot, JobStatus
-from serena.tool_output import ToolOutputPage
 from solidlsp.ls_config import LanguageServerId
-
-
-class _DummyMemoryLogHandler:
-    def __init__(self) -> None:
-        self.callbacks = []
-
-    def add_emit_callback(self, callback) -> None:
-        self.callbacks.append(callback)
-
-    def emit_message(self, message: str) -> None:
-        for callback in self.callbacks:
-            callback(message)
-
-    def get_log_messages(self, from_idx: int = 0):
-        del from_idx
-        return SimpleNamespace(messages=[], max_idx=-1)
-
-    def clear_log_messages(self) -> None:
-        pass
 
 
 class _DashboardAgent:
@@ -38,8 +16,6 @@ class _DashboardAgent:
         self.version = "0.0.0"
         self.callbacks = []
         self.project = project
-        self.output_descriptor: object | None = None
-        self.output_page: ToolOutputPage | None = None
         self.execution_store = ExecutionStore()
 
     def register_config_changed_callback(self, callback) -> None:
@@ -50,14 +26,6 @@ class _DashboardAgent:
 
     def get_default_project(self):
         return self.project
-
-    def describe_tool_execution_output(self, execution_name: str):
-        del execution_name
-        return self.output_descriptor
-
-    def read_tool_execution_tail(self, execution_name: str, max_chars: int):
-        del execution_name, max_chars
-        return self.output_page
 
     def get_active_tool_names(self):
         return []
@@ -72,10 +40,9 @@ class _DashboardAgent:
         return []
 
 
-def test_custom_dashboard_serves_fork_specific_frontend_and_session_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dashboard_serves_kendell_frontend_and_session_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
     monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
-    log_handler = _DummyMemoryLogHandler()
     agent = _DashboardAgent()
     agent.execution_store.start_execution(
         execution_id="execution-a",
@@ -85,9 +52,7 @@ def test_custom_dashboard_serves_fork_specific_frontend_and_session_api(tmp_path
         arguments="{}",
     )
     agent.execution_store.finish_execution("execution-a", succeeded=True, result="config")
-    dashboard = SerenaDashboardAPI(
-        memory_log_handler=log_handler,
-        tool_names=[],
+    dashboard = DashboardServer(
         agent=agent,
     )
     client = dashboard._app.test_client()
@@ -138,10 +103,7 @@ def test_custom_dashboard_serves_fork_specific_frontend_and_session_api(tmp_path
 def test_custom_dashboard_can_name_retained_serena_conversation_before_first_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
     monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
-    log_handler = _DummyMemoryLogHandler()
-    dashboard = SerenaDashboardAPI(
-        memory_log_handler=log_handler,
-        tool_names=[],
+    dashboard = DashboardServer(
         agent=_DashboardAgent(),
     )
     client = dashboard._app.test_client()
@@ -156,9 +118,7 @@ def test_custom_dashboard_can_name_retained_serena_conversation_before_first_too
 def test_dashboard_revalidates_unchanged_panel_overview_without_response_body(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
     monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
-    dashboard = SerenaDashboardAPI(
-        memory_log_handler=_DummyMemoryLogHandler(),
-        tool_names=[],
+    dashboard = DashboardServer(
         agent=_DashboardAgent(),
     )
     dashboard.set_serena_session_name("session-a", "Cached session")
@@ -188,9 +148,7 @@ def test_dashboard_bootstraps_inactive_serena_panels_with_compact_history(tmp_pa
             started_at=float(task),
         )
         agent.execution_store.finish_execution(execution_id, succeeded=True, result=f"file {task}")
-    dashboard = SerenaDashboardAPI(
-        memory_log_handler=_DummyMemoryLogHandler(),
-        tool_names=[],
+    dashboard = DashboardServer(
         agent=agent,
     )
     client = dashboard._app.test_client()
@@ -208,9 +166,7 @@ def test_dashboard_bootstraps_inactive_serena_panels_with_compact_history(tmp_pa
 def test_dashboard_orders_serena_panels_newest_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
     monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
-    dashboard = SerenaDashboardAPI(
-        memory_log_handler=_DummyMemoryLogHandler(),
-        tool_names=[],
+    dashboard = DashboardServer(
         agent=_DashboardAgent(),
     )
 
@@ -228,9 +184,7 @@ def test_dashboard_orders_orchestrator_panels_newest_first(tmp_path: Path, monke
     archive = OrchestratorDashboardSessionArchive(OrchestratorConfig.from_environment(orchestrator_root))
     archive.set_display_name("session-a", "First session")
     archive.set_display_name("session-b", "Second session")
-    dashboard = SerenaDashboardAPI(
-        memory_log_handler=_DummyMemoryLogHandler(),
-        tool_names=[],
+    dashboard = DashboardServer(
         agent=_DashboardAgent(),
     )
 
@@ -249,9 +203,7 @@ def test_custom_dashboard_shows_named_orchestrator_conversation_before_first_del
     config = OrchestratorConfig.from_environment(orchestrator_root)
     OrchestratorDashboardSessionArchive(config).set_display_name("session-a", "Automatic Session Titles")
 
-    dashboard = SerenaDashboardAPI(
-        memory_log_handler=_DummyMemoryLogHandler(),
-        tool_names=[],
+    dashboard = DashboardServer(
         agent=_DashboardAgent(),
     )
     overview = dashboard._app.test_client().get("/dashboard/api/orchestrator").get_json()
@@ -280,9 +232,7 @@ def test_retained_serena_panel_preserves_semantic_detail_and_scope(tmp_path: Pat
         tool_name="replace_in_files",
         arguments='{"needle": "old value", "repl": "new value", "mode": "literal", "relative_path": "src/serena"}',
     )
-    dashboard = SerenaDashboardAPI(
-        memory_log_handler=_DummyMemoryLogHandler(),
-        tool_names=[],
+    dashboard = DashboardServer(
         agent=agent,
     )
     client = dashboard._app.test_client()
@@ -335,9 +285,7 @@ def test_retained_serena_panel_serves_rendered_media_instead_of_result_repr(tmp_
             "uri": f"serena-file://export/{token}",
         },
     )
-    restored_dashboard = SerenaDashboardAPI(
-        memory_log_handler=_DummyMemoryLogHandler(),
-        tool_names=[],
+    restored_dashboard = DashboardServer(
         agent=_DashboardAgent(),
     )
     client = restored_dashboard._app.test_client()
@@ -368,9 +316,7 @@ def test_custom_dashboard_uses_default_project_and_dynamic_languages() -> None:
         memory_manager=memory_manager,
         get_language_server_candidates=lambda: [LanguageServerId.PYTHON, LanguageServerId.HTML],
     )
-    dashboard = SerenaDashboardAPI(
-        memory_log_handler=_DummyMemoryLogHandler(),
-        tool_names=[],
+    dashboard = DashboardServer(
         agent=_DashboardAgent(project),
     )
 
@@ -380,48 +326,11 @@ def test_custom_dashboard_uses_default_project_and_dynamic_languages() -> None:
     assert session["languages"] == ["python", "html"]
 
 
-def test_custom_dashboard_serves_live_execution_output_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
-    agent = _DashboardAgent()
-    execution_id = "execution-7"
-    agent.execution_store.start_execution(
-        execution_id=execution_id,
-        session_id="session-a",
-        project_name="serena",
-        tool_name="execute_shell_command",
-        arguments='{"command": "echo hello"}',
-    )
-    agent.execution_store.set_retained_output(execution_id, "abc123", 5)
-    agent.output_page = ToolOutputPage(
-        output_id="abc123",
-        tool_name="execute_shell_command",
-        total_chars=5,
-        offset=0,
-        content="hello",
-        next_offset=None,
-    )
-    dashboard = SerenaDashboardAPI(
-        memory_log_handler=_DummyMemoryLogHandler(),
-        tool_names=[],
-        agent=agent,
-    )
-    client = dashboard._app.test_client()
-
-    executions = client.get("/dashboard/api/executions").get_json()
-    response = client.get(f"/dashboard/api/executions/{execution_id}/output")
-
-    assert executions["executions"][0]["stream_output_id"] == "abc123"
-    assert response.status_code == 200
-    assert response.get_json()["output"] == "hello"
-
-
 def test_memory_endpoint_reads_active_project_memory() -> None:
     memory_manager = MagicMock()
     memory_manager.load_memory.return_value = "# Critical info\n\nMemory body"
     project = SimpleNamespace(memory_manager=memory_manager)
-    dashboard = SerenaDashboardAPI(
-        memory_log_handler=_DummyMemoryLogHandler(),
-        tool_names=[],
+    dashboard = DashboardServer(
         agent=_DashboardAgent(project),
     )
 
@@ -433,244 +342,3 @@ def test_memory_endpoint_reads_active_project_memory() -> None:
         "content": "# Critical info\n\nMemory body",
     }
     memory_manager.load_memory.assert_called_once_with("critical_info")
-
-
-def test_execution_history_combines_live_and_completed_canonical_executions(tmp_path: Path) -> None:
-    store = ExecutionStore(tmp_path / "execution-store", migrate_legacy=False)
-    store.start_execution(
-        execution_id="completed-execution",
-        session_id="session-a",
-        project_name="serena",
-        tool_name="activate_project",
-        arguments='{"project": "serena"}',
-        started_at=1.0,
-    )
-    store.finish_execution("completed-execution", succeeded=True, result="Project activated", finished_at=2.0)
-    store.start_execution(
-        execution_id="running-execution",
-        session_id="session-a",
-        project_name="serena",
-        tool_name="find_symbol",
-        arguments='{"name_path_pattern": "Foo"}',
-        started_at=3.0,
-    )
-    agent = _DashboardAgent()
-    agent.execution_store = store
-    result = DashboardExecutionHistory(agent).get_executions()
-
-    assert [item["status"] for item in result["executions"]] == ["running", "completed"]
-    assert [item["execution_id"] for item in result["executions"]] == ["running-execution", "completed-execution"]
-    assert result["running"] == 1
-    assert result["queued"] == 0
-    assert result["done"] == 1
-
-
-def test_execution_history_reads_parameters_and_result_from_canonical_store(tmp_path: Path) -> None:
-    store = ExecutionStore(tmp_path / "execution-store", migrate_legacy=False)
-    store.start_execution(
-        execution_id="activate-execution",
-        session_id="abc123",
-        project_name="serena",
-        tool_name="activate_project",
-        arguments='{"project": "serena"}',
-        started_at=1_000.0,
-    )
-    store.finish_execution("activate-execution", succeeded=True, result="Project activated", finished_at=1_001.0)
-    agent = _DashboardAgent()
-    agent.execution_store = store
-
-    execution = DashboardExecutionHistory(agent).get_executions()["executions"][0]
-    assert execution["parameters"] == '{"project": "serena"}'
-    assert execution["detail"] == "serena"
-    assert execution["project"] == "serena"
-    assert execution["session_id"] == "abc123"
-    assert execution["submitted_at"] == 1_000.0
-    assert execution["elapsed_seconds"] == 1.0
-    assert execution["result"] == "Project activated"
-    assert execution["error"] is None
-
-
-def test_execution_history_exposes_live_output_for_exact_running_execution(tmp_path: Path) -> None:
-    store = ExecutionStore(tmp_path / "execution-store", migrate_legacy=False)
-    execution_id = "shell-execution"
-    store.start_execution(
-        execution_id=execution_id,
-        session_id="session-a",
-        project_name="serena",
-        tool_name="execute_shell_command",
-        arguments='{"command": "echo hello"}',
-    )
-    store.set_retained_output(execution_id, "abc123", 11)
-    agent = _DashboardAgent()
-    agent.execution_store = store
-    agent.output_page = ToolOutputPage(
-        output_id="abc123",
-        tool_name="execute_shell_command",
-        total_chars=11,
-        offset=0,
-        content="hello world",
-        next_offset=None,
-    )
-    history = DashboardExecutionHistory(agent)
-
-    execution = history.get_executions()["executions"][0]
-    output = history.get_output(execution_id)
-
-    assert execution["stream_output_id"] == "abc123"
-    assert execution["stream_output_chars"] == 11
-    assert output == {
-        "status": "success",
-        "execution_id": execution_id,
-        "task_id": execution_id,
-        "output_id": "abc123",
-        "offset": 0,
-        "end_offset": 11,
-        "total_chars": 11,
-        "output": "hello world",
-    }
-
-
-def test_execution_history_exposes_media_descriptor_without_polling_binary_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    image_bytes = b"\x89PNG\r\n\x1a\npreview"
-    store = ExecutionStore(tmp_path / "execution-store", migrate_legacy=False)
-    store.start_execution(
-        execution_id="render-execution",
-        session_id="session-a",
-        project_name="serena",
-        tool_name="render_pdf_page",
-        arguments='{"relative_path": "figure.pdf", "page": 1}',
-    )
-    store.finish_execution(
-        "render-execution",
-        succeeded=True,
-        media={
-            "type": "image",
-            "name": "figure.png",
-            "mime_type": "image/png",
-            "uri": f"serena-file://export/{'a' * 48}",
-        },
-    )
-    monkeypatch.setattr("serena.custom_dashboard.read_result_file_link", lambda link: image_bytes)
-    agent = _DashboardAgent()
-    agent.execution_store = store
-    history = DashboardExecutionHistory(agent)
-
-    execution = history.get_executions()["executions"][0]
-    media = history.get_media("render-execution")
-
-    assert execution["media"] == {"type": "image", "name": "figure.png", "mime_type": "image/png"}
-    assert execution["result"] is None
-    assert media.media_type == "image"
-    assert media.mime_type == "image/png"
-    assert media.data == image_bytes
-
-
-def test_execution_history_exposes_exported_pdf_as_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    pdf_bytes = b"%PDF-1.4\npreview"
-    store = ExecutionStore(tmp_path / "execution-store", migrate_legacy=False)
-    store.start_execution(
-        execution_id="download-execution",
-        session_id="session-a",
-        project_name="serena",
-        tool_name="download_file",
-        arguments='{"relative_path": "paper.pdf"}',
-    )
-    store.finish_execution(
-        "download-execution",
-        succeeded=True,
-        media={
-            "type": "file",
-            "name": "paper.pdf",
-            "mime_type": "application/pdf",
-            "uri": f"serena-file://export/{'b' * 48}",
-        },
-    )
-    monkeypatch.setattr("serena.custom_dashboard.read_result_file_link", lambda file_link: pdf_bytes)
-    agent = _DashboardAgent()
-    agent.execution_store = store
-    history = DashboardExecutionHistory(agent)
-
-    execution = history.get_executions()["executions"][0]
-    media = history.get_media("download-execution")
-
-    assert execution["media"] == {"type": "file", "name": "paper.pdf", "mime_type": "application/pdf"}
-    assert execution["result"] is None
-    assert media.media_type == "file"
-    assert media.mime_type == "application/pdf"
-    assert media.file_name == "paper.pdf"
-    assert media.data == pdf_bytes
-
-
-def test_execution_history_reports_failed_executions(tmp_path: Path) -> None:
-    store = ExecutionStore(tmp_path / "execution-store", migrate_legacy=False)
-    store.start_execution(
-        execution_id="failed-execution",
-        session_id="session-a",
-        project_name="serena",
-        tool_name="read_file",
-        arguments='{"relative_path": "missing.txt"}',
-    )
-    store.finish_execution("failed-execution", succeeded=False, error="FileNotFoundError: missing.txt")
-    agent = _DashboardAgent()
-    agent.execution_store = store
-
-    result = DashboardExecutionHistory(agent).get_executions()
-
-    assert result["executions"][0]["status"] == "failed"
-    assert result["executions"][0]["error"] == "FileNotFoundError: missing.txt"
-    assert result["done"] == 1
-
-
-def test_job_overview_requests_full_retained_history() -> None:
-    job_manager = MagicMock()
-    job_manager.max_concurrent_jobs = 6
-    job_manager.persistence_info.return_value = JobPersistenceInfo(
-        survives_serena_restart=True,
-        survives_logout=False,
-        survives_reboot=False,
-        linger_enabled=False,
-    )
-    runtime = JobRuntimeInfo(
-        elapsed_seconds=12.0,
-        seconds_since_last_output=1.0,
-        memory_bytes=1024,
-        cpu_seconds=2.0,
-        process_count=1,
-    )
-    job_manager.list_job_snapshots.return_value = [
-        JobSnapshot(
-            record=JobRecord(
-                job_id="0123456789abcdef0123456789abcdef",
-                unit_name="serena-job-0123456789abcdef0123456789abcdef.service",
-                project_root="/tmp/project",
-                cwd="/tmp/project",
-                status=JobStatus.RUNNING,
-                created_at="2026-08-29T18:00:00+00:00",
-                project_name="demo",
-                label="Running job",
-            ),
-            runtime=runtime,
-        ),
-        JobSnapshot(
-            record=JobRecord(
-                job_id="fedcba9876543210fedcba9876543210",
-                unit_name="serena-job-fedcba9876543210fedcba9876543210.service",
-                project_root="/tmp/project",
-                cwd="/tmp/project",
-                status=JobStatus.COMPLETED,
-                created_at="2026-08-29T17:00:00+00:00",
-                finished_at="2026-08-29T17:01:00+00:00",
-                return_code=0,
-                project_name="demo",
-                label="Completed job",
-            ),
-            runtime=runtime,
-        ),
-    ]
-
-    result = DashboardJobOverview(job_manager).get_jobs()
-
-    job_manager.list_job_snapshots.assert_called_once_with(limit=1000, running_only=False)
-    assert result["running_jobs"] == 1
-    assert result["terminal_jobs"] == 1
-    assert [job["label"] for job in result["jobs"]] == ["Running job", "Completed job"]

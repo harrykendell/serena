@@ -1,4 +1,4 @@
-"""Fork-specific Serena dashboard kept separate from the upstream dashboard implementation."""
+"""State and routes for the Kendell Serena/Orchestrator dashboard."""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ from orchestrator.delegates import DelegateError, DelegateStore
 from serena.activity import ActivityDetailFormatter, ActivityMedia
 from serena.dashboard_activity import DashboardActivityArchive, DashboardActivitySessionSummary
 from serena.dashboard_widgets import orchestrator_dashboard_widget_html, serena_dashboard_widget_html
-from serena.execution_store import ExecutionRecord
 from serena.jobs import JobManager, JobStatus
 from serena.tools.media_tools import read_result_file_link
 
@@ -30,7 +29,6 @@ if TYPE_CHECKING:
 
 CUSTOM_DASHBOARD_DIR = Path(__file__).parent / "resources" / "kendell_dashboard"
 _CUSTOM_DASHBOARD_JOB_LIMIT = 1000
-_EXECUTION_FIELD_LIMIT = 12_000
 
 
 @dataclass(frozen=True)
@@ -41,97 +39,6 @@ class DashboardMediaContent:
     mime_type: str
     media_type: str
     file_name: str | None = None
-
-
-class DashboardExecutionHistory:
-    """Reads Serena tool execution history directly from the canonical execution store."""
-
-    def __init__(self, agent: SerenaAgent):
-        self._agent = agent
-        self._store = agent.execution_store
-        self._activity_formatter = ActivityDetailFormatter()
-
-    def _serialize(self, record: ExecutionRecord) -> dict[str, Any]:
-        """Serializes one canonical execution into the existing dashboard response shape."""
-        parameters = record.arguments
-        summary = self._activity_formatter.format_parameters(record.tool_name, parameters)
-        media = ActivityMedia.from_storage_dict(record.media) or ActivityMedia.from_serialized_result(record.result)
-        finished_at = record.finished_at
-        elapsed_seconds = max(0.0, (finished_at or time.time()) - record.started_at)
-        media_payload = media.public_dict() if media is not None else None
-        return {
-            "execution_id": record.execution_id,
-            "task_id": record.execution_id,
-            "name": record.tool_name,
-            "status": record.status,
-            "finished_successfully": record.status == "completed",
-            "project": record.project_name or None,
-            "session_id": record.session_id,
-            "detail": summary.detail or summary.scope,
-            "submitted_at": record.started_at,
-            "started_at": record.started_at,
-            "finished_at": finished_at,
-            "elapsed_seconds": elapsed_seconds,
-            "parameters": parameters,
-            "result": None if media is not None else record.result,
-            "error": record.error,
-            "media": media_payload,
-            "stream_output_id": record.retained_output_id,
-            "stream_output_chars": record.retained_output_chars,
-        }
-
-    def get_media(self, execution_id: str) -> DashboardMediaContent:
-        """Returns media or transferable file content from one successful retained execution."""
-        record = self._store.get_execution(execution_id)
-        if record is None:
-            raise KeyError(f"Unknown tool execution {execution_id}")
-        if record.status != "completed":
-            raise ValueError(f"Tool execution {execution_id} has no completed media result")
-        media = ActivityMedia.from_storage_dict(record.media) or ActivityMedia.from_serialized_result(record.result)
-        if media is None:
-            raise ValueError(f"Tool execution {execution_id} did not return media or a file")
-        link = ResourceLink(
-            type="resource_link",
-            name=media.name,
-            uri=AnyUrl(media.uri),
-            mimeType=media.mime_type,
-        )
-        return DashboardMediaContent(
-            data=read_result_file_link(link),
-            mime_type=media.mime_type,
-            media_type=media.media_type,
-            file_name=media.name,
-        )
-
-    def get_output(self, execution_id: str) -> dict[str, Any]:
-        """Returns the newest bounded retained-output tail for one exact execution."""
-        if self._store.get_execution(execution_id) is None:
-            raise KeyError(f"Unknown tool execution {execution_id}")
-        page = self._agent.read_tool_execution_tail(execution_id, _EXECUTION_FIELD_LIMIT)
-        if page is None:
-            raise ValueError(f"Tool execution {execution_id} has no retained output")
-        return {
-            "status": "success",
-            "execution_id": execution_id,
-            "task_id": execution_id,
-            "output_id": page.output_id,
-            "offset": page.offset,
-            "end_offset": page.offset + len(page.content),
-            "total_chars": page.total_chars,
-            "output": page.content,
-        }
-
-    def get_executions(self) -> dict[str, Any]:
-        """Returns retained model-visible Serena executions newest first."""
-        records = self._store.list_executions(newest_first=True)
-        executions = [self._serialize(record) for record in records]
-        return {
-            "status": "success",
-            "executions": executions,
-            "running": sum(item["status"] == "running" for item in executions),
-            "queued": sum(item["status"] == "queued" for item in executions),
-            "done": sum(item["status"] in {"completed", "failed", "cancelled"} for item in executions),
-        }
 
 
 class DashboardSessionOverview:
@@ -652,7 +559,6 @@ class CustomDashboard:
         self._session_overview = DashboardSessionOverview(agent)
         self._memory_overview = DashboardMemoryOverview(agent)
         self._activity_archive = DashboardActivityArchive(agent.execution_store)
-        self._execution_history = DashboardExecutionHistory(agent)
         self._job_overview = DashboardJobOverview(JobManager())
         self._serena_activity_overview = DashboardSerenaActivityOverview(
             self._activity_archive,
@@ -707,7 +613,7 @@ class CustomDashboard:
         return response
 
     def _register_routes(self, app: Flask) -> None:
-        """Registers all fork-specific APIs under the dashboard URL namespace."""
+        """Registers all dashboard APIs under the dashboard URL namespace."""
 
         @app.route("/dashboard/api/state", methods=["GET"])
         def get_dashboard_state() -> Response:
@@ -727,38 +633,6 @@ class CustomDashboard:
                 return self._memory_overview.get_memory(memory_name)
             except Exception as e:
                 return {"status": "error", "message": str(e)}
-
-        @app.route("/dashboard/api/executions", methods=["GET"])
-        def get_executions() -> dict[str, Any]:
-            return self._execution_history.get_executions()
-
-        @app.route("/dashboard/api/executions/<execution_id>/media", methods=["GET"])
-        def get_execution_media(execution_id: str) -> Response:
-            try:
-                media = self._execution_history.get_media(execution_id)
-            except (KeyError, ValueError):
-                abort(404)
-
-            response = Response(media.data, mimetype=media.mime_type)
-            response.headers["Cache-Control"] = "private, max-age=3600"
-            return response
-
-        @app.route("/dashboard/api/executions/<execution_id>/output", methods=["GET"])
-        def get_execution_output(execution_id: str) -> dict[str, Any]:
-            try:
-                return self._execution_history.get_output(execution_id)
-            except (KeyError, ValueError):
-                abort(404)
-
-        @app.route("/dashboard/api/jobs", methods=["GET"])
-        def get_jobs() -> dict[str, Any]:
-            return self._job_overview.get_jobs()
-
-        @app.route("/dashboard/api/jobs/<job_id>/output", methods=["GET"])
-        def get_job_output(job_id: str) -> dict[str, Any]:
-            mode = request.args.get("mode", "latest")
-            cursor = request.args.get("cursor")
-            return self._job_overview.get_output(job_id, mode, cursor)
 
         @app.route("/dashboard/api/serena", methods=["GET"])
         def get_serena_panels() -> Response:

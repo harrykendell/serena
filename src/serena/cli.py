@@ -38,7 +38,6 @@ from serena.execution import ExecutionAccess
 from serena.prompt_factory import SerenaPromptFactory
 from serena.tools import ActivateProjectTool
 from serena.util.cli_util import AutoRegisteringGroup
-from serena.util.logging import MemoryLogHandler
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_types import SymbolKind
 from solidlsp.util.subprocess_util import subprocess_kwargs
@@ -284,15 +283,12 @@ class TopLevelCommands(AutoRegisteringGroup):
     ) -> None:
         from serena.mcp import SerenaMCPFactory
 
-        # initialize logging, using INFO level initially (will later be adjusted by SerenaAgent according to the config)
-        #   * memory log handler (for use by GUI/Dashboard)
-        #   * stream handler for stderr (for direct console output, which will also be captured by clients like Claude Desktop)
+        # initialize logging, using INFO level initially (later adjusted by SerenaAgent according to the config)
+        #   * stream handler for stderr (for direct console output, which will also be captured by clients)
         #   * file handler
         # (Note that stdout must never be used for logging, as it is used by the MCP server to communicate with the client.)
         Logger.root.setLevel(logging.INFO)
         formatter = logging.Formatter(SERENA_LOG_FORMAT)
-        memory_log_handler = MemoryLogHandler()
-        Logger.root.addHandler(memory_log_handler)
         stderr_handler = logging.StreamHandler(stream=sys.stderr)
         stderr_handler.formatter = formatter
         Logger.root.addHandler(stderr_handler)
@@ -326,7 +322,7 @@ class TopLevelCommands(AutoRegisteringGroup):
         if default_modes or added_modes:
             mode_selection_def = ModeSelectionDefinitionWithAddedModes(default_modes=default_modes or None, added_modes=added_modes or None)
 
-        factory = SerenaMCPFactory(transport=transport, context=context, project=project_file, memory_log_handler=memory_log_handler)
+        factory = SerenaMCPFactory(transport=transport, context=context, project=project_file)
         server = factory.create_mcp_server(
             host=host,
             port=port,
