@@ -115,9 +115,9 @@ class ToolOutputStore:
             self._prune()
             return ToolOutputWriter(self, output_id)
 
-    def retain(self, tool_name: str, content: str) -> str:
-        """Retain one complete tool result and return its stable opaque identifier."""
-        with self.open(tool_name) as writer:
+    def retain(self, tool_name: str, content: str, execution_id: str | None = None) -> str:
+        """Retains one complete tool result and returns its stable opaque identifier."""
+        with self.open(tool_name, execution_id=execution_id) as writer:
             writer.write(content)
             return writer.output_id
 
@@ -139,9 +139,15 @@ class ToolOutputStore:
             record = self._record(output_id)
             record.is_open = False
 
-    def retain_with_tail(self, tool_name: str, content: str, max_answer_chars: int) -> str:
-        """Retain a result and render an identified tail that fits the answer limit."""
-        output_id = self.retain(tool_name, content)
+    def retain_with_tail(
+        self,
+        tool_name: str,
+        content: str,
+        max_answer_chars: int,
+        execution_id: str | None = None,
+    ) -> str:
+        """Retains a result and renders an identified tail that fits the answer limit."""
+        output_id = self.retain(tool_name, content, execution_id=execution_id)
         return self.render_tail(output_id, max_answer_chars, answer_chars=len(content))
 
     def render_tail(

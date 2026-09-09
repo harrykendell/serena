@@ -220,6 +220,38 @@ class SerenaFastMCPTool(FastMCPTool):
             if descriptor is not None:
                 execution_store.set_retained_output(execution_id, descriptor.output_id, descriptor.total_chars)
 
+        def completed_project_name() -> str:
+            current_project = self._agent.get_active_project_for_session(session_id)
+            current_project_name = current_project.project_name if current_project is not None else ""
+            if self._activity_tracker is not None and current_project_name:
+                self._activity_tracker.update_project(session_id, current_project_name)
+            return current_project_name if self.name == "activate_project" else submission_project_name
+
+        def detach_worker(worker_task: asyncio.Task[Any], request_error: BaseException) -> None:
+            """Keeps execution live until an abandoned request's worker actually stops."""
+            execution_store.mark_request_abandoned(
+                execution_id,
+                error=execution_store.serialize_value(request_error),
+            )
+
+            def finalize_detached_worker(completed: asyncio.Task[Any]) -> None:
+                try:
+                    completed.result()
+                except BaseException as worker_error:
+                    log.debug(
+                        "Detached worker for execution %s ended with %s: %s",
+                        execution_id,
+                        worker_error.__class__.__name__,
+                        worker_error,
+                    )
+                finish_execution(
+                    succeeded=False,
+                    result=request_error,
+                    project_name=completed_project_name(),
+                )
+
+            worker_task.add_done_callback(finalize_detached_worker)
+
         # propagate the execution identifier through the FastMCP worker thread
         execution_token = bind_execution_id(execution_id)
         try:
@@ -235,45 +267,51 @@ class SerenaFastMCPTool(FastMCPTool):
                 else:
                     with self._agent.submission_project_context(session_id):
                         worker_task = asyncio.create_task(asyncio.to_thread(self.fn, **arguments_parsed))
-                try:
-                    result = await asyncio.wait_for(
-                        asyncio.shield(worker_task),
-                        timeout=self._agent.serena_config.tool_timeout,
-                    )
-                except TimeoutError as exc:
-                    # keep the worker alive so its project permit is held until the operation really returns;
-                    # consume any eventual exception because the timed-out MCP request no longer awaits it.
-                    def consume_worker_result(completed: asyncio.Task[Any]) -> None:
-                        try:
-                            completed.result()
-                        except BaseException:
-                            pass
-
-                    worker_task.add_done_callback(consume_worker_result)
-                    raise TimeoutError(f"Tool execution timed out after {self._agent.serena_config.tool_timeout} seconds") from exc
-
-                activity_result = result
-                if convert_result:
-                    result = self.fn_metadata.convert_result(result)
             except UrlElicitationRequiredError:
                 finish_execution(succeeded=False, project_name=submission_project_name)
                 raise
-            except Exception as e:
-                finish_execution(succeeded=False, result=e, project_name=submission_project_name)
-                raise ToolError(f"Error executing tool {self.name}: {e}") from e
+            except Exception as error:
+                finish_execution(succeeded=False, result=error, project_name=submission_project_name)
+                raise ToolError(f"Error executing tool {self.name}: {error}") from error
             except BaseException:
                 finish_execution(succeeded=False, project_name=submission_project_name)
                 raise
 
-            current_project = self._agent.get_active_project_for_session(session_id)
-            current_project_name = current_project.project_name if current_project is not None else ""
-            if self._activity_tracker is not None and current_project_name:
-                self._activity_tracker.update_project(session_id, current_project_name)
-            call_project_name = current_project_name if self.name == "activate_project" else submission_project_name
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.shield(worker_task),
+                    timeout=self._agent.serena_config.tool_timeout,
+                )
+            except TimeoutError as error:
+                request_error = TimeoutError(f"Tool execution timed out after {self._agent.serena_config.tool_timeout} seconds")
+                detach_worker(worker_task, request_error)
+                raise ToolError(f"Error executing tool {self.name}: {request_error}") from error
+            except asyncio.CancelledError:
+                request_error = RuntimeError("MCP request was cancelled while the tool worker was still running.")
+                detach_worker(worker_task, request_error)
+                raise
+            except UrlElicitationRequiredError:
+                finish_execution(succeeded=False, project_name=submission_project_name)
+                raise
+            except Exception as error:
+                finish_execution(succeeded=False, result=error, project_name=submission_project_name)
+                raise ToolError(f"Error executing tool {self.name}: {error}") from error
+            except BaseException:
+                finish_execution(succeeded=False, project_name=submission_project_name)
+                raise
+
+            activity_result = result
+            try:
+                if convert_result:
+                    result = self.fn_metadata.convert_result(result)
+            except Exception as error:
+                finish_execution(succeeded=False, result=error, project_name=completed_project_name())
+                raise ToolError(f"Error executing tool {self.name}: {error}") from error
+
             finish_execution(
                 succeeded=True,
                 result=activity_result,
-                project_name=call_project_name,
+                project_name=completed_project_name(),
             )
             return result
         finally:

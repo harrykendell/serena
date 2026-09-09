@@ -6,6 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from serena.agent import SerenaAgent
+from serena.execution import bind_execution_id, reset_execution_id
 from serena.tool_output import ToolOutputStore
 from serena.tools.memory_tools import ReadMemoryTool
 from serena.tools.output_tools import ReadToolOutputTool
@@ -181,5 +183,33 @@ def test_live_output_can_be_read_by_exact_execution_before_completion() -> None:
         assert completed is not None
         assert completed.output_id == writer.output_id
         assert completed.is_open is False
+    finally:
+        store.close()
+
+
+def test_agent_retained_outputs_correlate_with_current_execution() -> None:
+    store = ToolOutputStore(max_records=4)
+    agent = MagicMock(spec=SerenaAgent)
+    agent._tool_output_store = store
+
+    try:
+        complete_token = bind_execution_id("execution-complete")
+        try:
+            complete_output_id = SerenaAgent.retain_tool_output(agent, "probe", "complete output")
+        finally:
+            reset_execution_id(complete_token)
+
+        tail_token = bind_execution_id("execution-tail")
+        try:
+            SerenaAgent.retain_tool_output_with_tail(agent, "probe", "x" * 200, 80)
+        finally:
+            reset_execution_id(tail_token)
+
+        complete_descriptor = store.describe_execution("execution-complete")
+        tail_descriptor = store.describe_execution("execution-tail")
+        assert complete_descriptor is not None
+        assert complete_descriptor.output_id == complete_output_id
+        assert tail_descriptor is not None
+        assert tail_descriptor.total_chars == 200
     finally:
         store.close()

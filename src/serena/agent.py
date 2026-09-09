@@ -42,7 +42,14 @@ from serena.config.serena_config import (
     ToolInclusionDefinition,
 )
 from serena.dashboard import SerenaDashboardAPI, SerenaDashboardTrayManager, SerenaDashboardViewer, open_url_in_browser
-from serena.execution import ExecutionAccess, ProjectExecutionCoordinator, RuntimeReadiness, bind_execution_id, reset_execution_id
+from serena.execution import (
+    ExecutionAccess,
+    ProjectExecutionCoordinator,
+    RuntimeReadiness,
+    bind_execution_id,
+    get_current_execution_id,
+    reset_execution_id,
+)
 from serena.execution_store import ExecutionStore
 from serena.jetbrains import jetbrains_plugin_client
 from serena.ls_manager import LanguageServerManager
@@ -952,12 +959,17 @@ class SerenaAgent:
         self._tool_usage_stats.record_tool_usage(tool_name, input_str, output_str)
 
     def retain_tool_output(self, tool_name: str, content: str) -> str:
-        """Retain one complete tool result and return its stable identifier."""
-        return self._tool_output_store.retain(tool_name, content)
+        """Retains one complete tool result and returns its stable identifier."""
+        return self._tool_output_store.retain(tool_name, content, execution_id=get_current_execution_id())
 
     def retain_tool_output_with_tail(self, tool_name: str, content: str, max_answer_chars: int) -> str:
-        """Retain an oversized tool result and return a bounded identified tail."""
-        return self._tool_output_store.retain_with_tail(tool_name, content, max_answer_chars)
+        """Retains an oversized tool result and returns a bounded identified tail."""
+        return self._tool_output_store.retain_with_tail(
+            tool_name,
+            content,
+            max_answer_chars,
+            execution_id=get_current_execution_id(),
+        )
 
     def read_tool_output(self, output_id: str, offset: int, max_chars: int) -> ToolOutputPage:
         """Read one page from a previously retained oversized tool result."""
@@ -1210,7 +1222,7 @@ class SerenaAgent:
 
             if active_project is not None and not prompt_status.is_project_activation_message_already_provided(session_id):
                 system_prompt += "\n\n" + self._format_prompt_tag(self.get_project_activation_message(session_id), tag="active-project")
-            elif self._project_activation_error:
+            elif active_project is None and self._project_activation_error:
                 system_prompt += f"\n\nNo project is active ({self._project_activation_error})."
 
             return self._format_prompt_tag(system_prompt, tag="serena")
@@ -1489,7 +1501,6 @@ class SerenaAgent:
             return False
 
         log.info(f"Activating {project.project_name} at {project.project_root} for session {session_id}")
-        self._project_activation_error = None
 
         project_backend = project.project_config.language_backend
         if project_backend is not None and project_backend != self._language_backend:

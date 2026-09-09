@@ -778,6 +778,13 @@ def test_mcp_timeout_returns_before_worker_without_releasing_write_exclusion(
         with pytest.raises(ToolError, match="timed out"):
             await first
 
+        # the model-visible request has ended, but the authoritative execution remains live
+        first_record = agent.execution_store.list_session_executions("session-a")[-1]
+        assert first_record.status == "running"
+        assert first_record.finished_at is None
+        assert first_record.request_finished_at is not None
+        assert first_record.request_error is not None and "timed out" in first_record.request_error
+
         agent.serena_config.tool_timeout = 2
         second = asyncio.create_task(
             mcp_tool.run(
@@ -791,6 +798,86 @@ def test_mcp_timeout_returns_before_worker_without_releasing_write_exclusion(
         release_first.set()
         await second
         assert second_entered.is_set()
+
+        # terminal lifecycle is recorded only after the detached worker really stops
+        for _ in range(50):
+            first_record = agent.execution_store.list_session_executions("session-a")[-1]
+            if first_record.status != "running":
+                break
+            await asyncio.sleep(0.01)
+        assert first_record.status == "failed"
+        assert first_record.finished_at is not None
+        assert first_record.request_finished_at is not None
+        assert first_record.finished_at >= first_record.request_finished_at
+
+    asyncio.run(scenario())
+
+
+def test_mcp_cancellation_keeps_execution_live_until_worker_stops(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "session-a", "project_a")
+    _activate(agent, "session-b", "project_a")
+
+    tool = agent.get_tool(CreateTextFileTool)
+    original_apply = tool.apply
+    first_entered = threading.Event()
+    second_entered = threading.Event()
+    release_first = threading.Event()
+
+    def blocking_apply(relative_path: str, content: str) -> str:
+        if relative_path == "cancelled.txt":
+            first_entered.set()
+            assert release_first.wait(timeout=5)
+        elif relative_path == "after-cancel.txt":
+            second_entered.set()
+        return original_apply(relative_path=relative_path, content=content)
+
+    monkeypatch.setattr(tool, "apply", blocking_apply)
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(tool)
+
+    async def scenario() -> None:
+        first = asyncio.create_task(
+            mcp_tool.run(
+                {"relative_path": "cancelled.txt", "content": "first"},
+                context=_mcp_context("session-a"),
+            )
+        )
+        assert await asyncio.to_thread(first_entered.wait, 5)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+
+        first_record = agent.execution_store.list_session_executions("session-a")[-1]
+        assert first_record.status == "running"
+        assert first_record.finished_at is None
+        assert first_record.request_finished_at is not None
+        assert first_record.request_error is not None and "cancelled" in first_record.request_error
+
+        agent.serena_config.tool_timeout = 2
+        second = asyncio.create_task(
+            mcp_tool.run(
+                {"relative_path": "after-cancel.txt", "content": "second"},
+                context=_mcp_context("session-b"),
+            )
+        )
+        await asyncio.sleep(0.3)
+        assert not second_entered.is_set()
+
+        release_first.set()
+        await second
+        assert second_entered.is_set()
+
+        for _ in range(50):
+            first_record = agent.execution_store.list_session_executions("session-a")[-1]
+            if first_record.status != "running":
+                break
+            await asyncio.sleep(0.01)
+        assert first_record.status == "failed"
+        assert first_record.finished_at is not None
+        assert first_record.request_finished_at is not None
+        assert first_record.finished_at >= first_record.request_finished_at
 
     asyncio.run(scenario())
 

@@ -40,6 +40,8 @@ class ExecutionRecord:
     started_at: float
     status: str = "running"
     finished_at: float | None = None
+    request_finished_at: float | None = None
+    request_error: str | None = None
     result: str | None = None
     error: str | None = None
     retained_output_id: str | None = None
@@ -150,6 +152,27 @@ class ExecutionStore:
             self._save()
             return record
 
+    def mark_request_abandoned(
+        self,
+        execution_id: str,
+        *,
+        error: str,
+        request_finished_at: float | None = None,
+    ) -> None:
+        """Records that a model-visible request ended while its worker is still running."""
+        now = request_finished_at or time.time()
+        with self._lock:
+            record = self._executions.get(execution_id)
+            if record is None or record.status not in {"running", "queued"}:
+                return
+            if record.request_finished_at is not None:
+                return
+            record.request_finished_at = now
+            record.request_error = error
+            session = self._ensure_session(record.session_id, record.started_at)
+            session.updated_at = max(session.updated_at, now)
+            self._save()
+
     def finish_execution(
         self,
         execution_id: str,
@@ -164,22 +187,29 @@ class ExecutionStore:
         durable_job_id: str | None = None,
         finished_at: float | None = None,
     ) -> None:
-        """Marks one execution terminal and persists its bounded result descriptors."""
+        """Marks one execution terminal after its underlying worker has actually stopped."""
         now = finished_at or time.time()
         with self._lock:
             record = self._executions.get(execution_id)
             if record is None:
                 return
+
+            # finalize worker lifecycle without erasing an earlier request timeout/cancellation
             record.status = "completed" if succeeded else "failed"
             record.finished_at = now
+            if record.request_finished_at is None:
+                record.request_finished_at = now
+            if record.request_error is None:
+                record.request_error = error
             record.result = result if media is None else None
-            record.error = error
+            record.error = record.request_error or error
             record.retained_output_id = retained_output_id
             record.retained_output_chars = retained_output_chars
             record.media = media
             record.durable_job_id = durable_job_id or self._extract_job_id(result)
             if project_name is not None:
                 record.project_name = project_name
+
             session = self._ensure_session(record.session_id, record.started_at)
             if record.project_name:
                 session.project_name = record.project_name
@@ -398,7 +428,9 @@ class ExecutionStore:
                     continue
                 record.status = "failed"
                 record.finished_at = record.finished_at or now
-                record.error = record.error or "Serena restarted before this tool call reached a terminal state."
+                record.request_finished_at = record.request_finished_at or now
+                record.request_error = record.request_error or "Serena restarted before this tool call reached a terminal state."
+                record.error = record.error or record.request_error
                 session = self._sessions.get(record.session_id)
                 if session is not None:
                     session.updated_at = max(session.updated_at, record.finished_at)

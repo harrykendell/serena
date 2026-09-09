@@ -1471,31 +1471,29 @@ class TestPromptProvision:
 
     @pytest.mark.python
     @pytest.mark.skipif(not language_server_tests_enabled(LanguageServerId.PYTHON), reason="python tests are disabled in this environment")
-    def test_initial_instructions_report_project_activation_error_until_project_is_activated(self, serena_config) -> None:
-        """
-        Tests that a project activation error passed to the agent at startup is reported in the initial instructions
-        of every session for as long as no project is active, and that it is no longer reported once a project
-        has been activated. #1773
-        """
+    def test_initial_instructions_keep_startup_activation_error_for_unbound_sessions(self, serena_config) -> None:
+        """Reports startup activation failures only to sessions that still have no active project."""
         project_name = "test_repo_python"
         activation_error = "No project root found from cwd"
 
         agent = SerenaAgent(project=None, serena_config=serena_config, project_activation_error=activation_error)
         agent.execute_task(lambda: None)
         try:
-            # the error must be reported in the initial instructions of any session while no project is active
-            result1 = self._call_tool(agent, InitialInstructionsTool, session_id="session1")
-            assert activation_error in result1, f"Expected activation error to be reported in result:\n{result1}"
-            result2 = self._call_tool(agent, InitialInstructionsTool, session_id="session2")
-            assert activation_error in result2, f"Expected activation error to be reported in result:\n{result2}"
+            # report the startup failure independently to each initially unbound session
+            session1_initial = self._call_tool(agent, InitialInstructionsTool, session_id="session1")
+            session2_initial = self._call_tool(agent, InitialInstructionsTool, session_id="session2")
+            assert activation_error in session1_initial
+            assert activation_error in session2_initial
 
-            # activating a project must provide the activation message
-            result3 = self._call_tool(agent, ActivateProjectTool, project=project_name, session_id="session1")
-            self._assert_activation_message(result3, project_name, present=True)
+            # bind only session1 and leave the immutable startup failure relevant to session2
+            activation_result = self._call_tool(agent, ActivateProjectTool, project=project_name, session_id="session1")
+            self._assert_activation_message(activation_result, project_name, present=True)
 
-            # after activation, the error must no longer be reported
-            result4 = self._call_tool(agent, InitialInstructionsTool, session_id="session2")
-            self._assert_activation_message(result4, project_name, present=True)
-            assert activation_error not in result4, f"Expected activation error to no longer be reported in result:\n{result4}"
+            session1_after = self._call_tool(agent, InitialInstructionsTool, session_id="session1")
+            assert activation_error not in session1_after
+
+            session2_after = self._call_tool(agent, InitialInstructionsTool, session_id="session2")
+            self._assert_activation_message(session2_after, project_name, present=False)
+            assert activation_error in session2_after
         finally:
             agent.on_shutdown(timeout=5)
