@@ -144,7 +144,7 @@ fixed_tools: []
 # See https://oraios.github.io/serena/02-usage/050_configuration.html#modes
 default_modes:
 
-# list of mode names to be activated additionally for this project, e.g. ["query-projects"]
+# list of mode names to be activated additionally for this project, e.g. ["planning"]
 # The full set of modes to be activated is base_modes (from global config) + default_modes + added_modes.
 # See https://oraios.github.io/serena/02-usage/050_configuration.html#modes
 added_modes:

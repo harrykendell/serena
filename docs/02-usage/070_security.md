@@ -104,7 +104,6 @@ Serena includes several network services:
 - the Serena MCP server itself (when run in [HTTP or SSE mode](streamable-http) instead of stdio mode)
 - the Serena Dashboard web server
 - the Serena JetBrains Plugin server, which runs within the JetBrains IDE (when using the JetBrains language backend)
-- the Serena Project Server (only started explicitly for [project querying](query-projects)) 
 
 By default, these services accept connections from localhost only, which is a secure default for most users
 (given our assumption that the local machine is trusted; see above).

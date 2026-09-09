@@ -155,7 +155,7 @@ Audit project-dependent state including:
 - activity-panel project attribution;
 - any cached project-dependent fields on tools or the agent.
 
-The existing `ProjectServer` is useful precedent for caching project instances, but its process-wide `_active_project_lock` is not the intended final execution model for ordinary multi-session Serena use.
+The former project-query service demonstrated that project instances can be cached, but its process-wide active-project locking model was not suitable for ordinary multi-session Serena use.
 
 If upstream Serena invariants make independent in-process project runtimes excessively invasive, stop at the O01 gate and compare that design with a thin Serena supervisor routing to project-fixed headless Serena workers. This is a fallback, not the starting choice.
 

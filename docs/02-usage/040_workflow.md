@@ -187,28 +187,6 @@ You may also use symbolic links to create a monorepo folder if the projects are 
 If several languages are used across the projects, specify all of them as needed when using the LSP backend;
 For JetBrains mode, make sure that your IDE is configured to work with all the languages used across the projects (e.g. by installing the respective language plugins).
 
-(query-projects)=
-### Reading from External Projects
-
-If, while working on a project, you want Serena to be able to read code or other information from another project (e.g. a library or otherwise related project), 
-this can be enabled via the `query_project` tool.
-Provided that the project you want to query is known to Serena (i.e. you have created it as described above),
-the `query_project` tool allows the agent to query files and symbolic information from that project.
-
-To enable this tool, [activate the mode](modes) `query-projects`.
-This also enables a second tool for listing projects that can be queried.
-
-Depending on the language backend being used, the management of resources for the external projects varies:
-
-* When using the JetBrains backend, make sure that every project for which you want symbolic queries to work is open in an IDE instance. 
-* When using the LSP backend, executing symbolic tools via the query tool requires that Serena's **Project Server** be started,
-  which will automatically spawn the necessary language servers for the projects that are queried.
-
-  To start the server, run
-
-      serena start-project-server
-
-
 ### Multiple Agents Accessing a Single Serena Instance
 
 If you want multiple agents to access the same project via a single Serena instance,
