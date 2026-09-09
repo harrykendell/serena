@@ -5,8 +5,18 @@ from unittest.mock import MagicMock
 import pytest
 
 from serena.config.serena_config import SerenaConfig
+from serena.execution import ExecutionAccess
 from serena.project import Project
-from serena.tools import GitBranchTool, GitCommitTool, GitDiffTool, GitLogTool, GitStatusTool
+from serena.tools import (
+    GitBranchTool,
+    GitCommitTool,
+    GitDiffTool,
+    GitFetchTool,
+    GitLogTool,
+    GitPullTool,
+    GitPushTool,
+    GitStatusTool,
+)
 
 
 def _run_git(repo: Path, *args: str) -> str:
@@ -25,6 +35,16 @@ def _make_tool(tool_cls, project: Project):
     tool = tool_cls(agent)
     tool._limit_length = lambda result, max_answer_chars: result
     return tool
+
+
+@pytest.mark.parametrize("tool_cls", [GitStatusTool, GitLogTool, GitDiffTool])
+def test_git_read_operations_use_read_access(tool_cls) -> None:
+    assert tool_cls.get_execution_access() is ExecutionAccess.READ
+
+
+@pytest.mark.parametrize("tool_cls", [GitFetchTool, GitBranchTool, GitCommitTool, GitPullTool, GitPushTool])
+def test_git_mutating_operations_use_write_access(tool_cls) -> None:
+    assert tool_cls.get_execution_access() is ExecutionAccess.WRITE
 
 
 @pytest.fixture
@@ -94,8 +114,6 @@ def test_git_fetch_pull_and_push_use_safe_default_flows(git_project: tuple[Path,
     peer = tmp_path.parent / f"{tmp_path.name}-peer"
     _run_git(remote.parent, "init", "--bare", str(remote))
     _run_git(repo, "remote", "add", "origin", str(remote))
-
-    from serena.tools import GitFetchTool, GitPullTool, GitPushTool
 
     push_tool = _make_tool(GitPushTool, project)
     fetch_tool = _make_tool(GitFetchTool, project)

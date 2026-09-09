@@ -14,6 +14,7 @@ from sensai.util import logging
 from sensai.util.string import dict_string
 
 from serena.config.serena_config import LanguageBackend
+from serena.execution import ExecutionAccess
 from serena.memories.memory_manager import MemoryManager
 from serena.project import Project
 from serena.prompt_factory import PromptFactory
@@ -216,6 +217,11 @@ class Tool(Component):
         :return: True if the tool can edit code, False otherwise
         """
         return issubclass(cls, ToolMarkerCanEdit)
+
+    @classmethod
+    def get_execution_access(cls) -> ExecutionAccess:
+        """Returns the project execution access class required by this tool."""
+        return ExecutionAccess.WRITE if cls.can_edit() else ExecutionAccess.READ
 
     @classmethod
     def get_mcp_tool_meta(cls) -> dict[str, Any] | None:

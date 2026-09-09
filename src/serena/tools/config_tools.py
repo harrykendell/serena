@@ -1,5 +1,6 @@
 from sensai.util.helper import mark_used
 
+from serena.execution import ExecutionAccess
 from serena.tools import Tool, ToolMarkerDoesNotRequireActiveProject, ToolMarkerOptional
 
 
@@ -26,6 +27,11 @@ class ActivateProjectTool(Tool, ToolMarkerDoesNotRequireActiveProject):
 
     # noinspection PyIncorrectDocstring
     # (session_id is injected via apply_ex)
+    @classmethod
+    def get_execution_access(cls) -> ExecutionAccess:
+        """Returns session-control access because activation changes only the calling session binding."""
+        return ExecutionAccess.SESSION_CONTROL
+
     def apply(self, project: str, session_id: str) -> str:
         """
         Activates the project with the given name or path.
