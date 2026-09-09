@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from sensai.util.logging import LogTime
 
 from serena.config.serena_config import ProjectConfig, SerenaPaths
+from serena.errors import UserFacingError
 from serena.util.inspection import detect_language_servers_for_files
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
@@ -195,7 +196,7 @@ class LanguageServerManager:
         language_server = self._language_server_factory.create_language_server(ls_id)
         language_server.start()
         if not language_server.is_running():
-            raise RuntimeError(f"Failed to start the language server for language {ls_id.value}")
+            raise UserFacingError(f"Failed to start the language server for language {ls_id.value}.")
         self._language_servers[ls_id] = language_server
         self._touch(ls_id)
         return language_server
@@ -227,18 +228,16 @@ class LanguageServerManager:
                         self._stop_language_server(ls, save_cache=True)
 
     def get_language_server(self, relative_path: str) -> SolidLanguageServer:
-        """:param relative_path: relative path to a file"""
+        """Returns the language server suitable for one file path."""
         if os.path.isdir(os.path.join(self._project.project_root, relative_path)):
-            raise ValueError(f"Expected a file path, but got a directory: {relative_path}")
+            raise UserFacingError(f"Expected a file path, got a directory: {relative_path}")
 
         ls_id = self._candidate_for_file(relative_path)
         if ls_id is None:
             self._refresh_candidates()
             ls_id = self._candidate_for_file(relative_path)
         if ls_id is None:
-            if not self._candidate_languages:
-                raise ValueError(f"No language server is available for file: {relative_path}")
-            ls_id = self._candidate_languages[0]
+            raise UserFacingError(f"No language server is available for file: {relative_path}")
         return self._ensure_language_server(ls_id)
 
     def ensure_language_servers_for_path(self, relative_path: str) -> list[SolidLanguageServer]:

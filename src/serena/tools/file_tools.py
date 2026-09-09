@@ -7,11 +7,13 @@ File and file system-related tools, specifically for
 """
 
 import os
+import re
 from collections import defaultdict
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Literal
 
+from serena.errors import UserFacingError
 from serena.tools import SUCCESS_RESULT, EditedFileContext, EditingToolWithDiagnostics, Tool
 from serena.util.file_system import scan_directory
 from serena.util.text_utils import (
@@ -29,34 +31,25 @@ class ReadFileTool(Tool):
     """
 
     def apply(self, relative_path: str, start_line: int = 0, end_line: int | None = None, max_answer_chars: int = -1) -> str:
-        """
-        Reads the given file or a chunk of it.
-
-        For analyzable source code, use ``get_symbols_overview``/``find_symbol`` by default. Use this tool for non-code files,
-        module-level material not represented well as symbols, or an exact source-line range whose surrounding context is needed.
-        Do not use raw file reads as a substitute for locating or reading a named symbol.
+        """Reads the given file or an exact line range.
 
         :param relative_path: the relative path to the file to read
-        :param start_line: the 0-based index of the first line to be retrieved, negative values count from the end of the file.
-        :param end_line: the 0-based index of the last line to be retrieved (inclusive). If None, read until the end of the file.
-        :param max_answer_chars: if the file (chunk) is longer than this number of characters,
-            no content will be returned. Don't adjust unless there is really no other way to get the content
-            required for the task.
-        :return: the full text of the file at the given relative path
+        :param start_line: the 0-based first line, with negative values counting from the end
+        :param end_line: the inclusive 0-based final line, or ``None`` for the rest of the file
+        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured default
+        :return: the requested file content
         """
-        self.project.validate_relative_path(relative_path)
+        if end_line is not None and end_line < 0:
+            raise UserFacingError("end_line must be non-negative when provided.")
+        if start_line >= 0 and end_line is not None and end_line < start_line:
+            raise UserFacingError("end_line must be greater than or equal to start_line.")
 
-        # read lines, using the same (LSP-compliant) notion of line breaks as the line-based editing tools
-        result = self.project.read_file(relative_path)
-        result_lines = TextUtils.split_lines(result)
+        result_lines = TextUtils.split_lines(self.project.read_file(relative_path))
+        if start_line < -len(result_lines) or (start_line >= len(result_lines) and result_lines):
+            raise UserFacingError(f"start_line {start_line} is outside the file's {len(result_lines)} lines.")
 
-        if end_line is None:
-            result_lines = result_lines[start_line:]
-        else:
-            result_lines = result_lines[start_line : end_line + 1]
-        result = "\n".join(result_lines)
-
-        return self._limit_length(result, max_answer_chars)
+        selected = result_lines[start_line:] if end_line is None else result_lines[start_line : end_line + 1]
+        return self._limit_length("\n".join(selected), max_answer_chars)
 
 
 class CreateTextFileTool(EditingToolWithDiagnostics):
@@ -65,34 +58,31 @@ class CreateTextFileTool(EditingToolWithDiagnostics):
     """
 
     def apply(self, relative_path: str, content: str) -> str:
-        """
-        Write a new file or overwrite an existing file with the given content.
+        """Writes a new file or overwrites an existing file.
 
         :param relative_path: the relative path to the file to create
-        :param content: the (appropriately encoded) content to write to the file
-        :return: a message indicating success or failure
+        :param content: the UTF-8-compatible text to write
+        :return: ``OK`` with an overwrite qualifier when applicable, plus new diagnostics when present
         """
         with self.DiagnosticsContext(self, relative_path) as diagnostics_context:
-            # validating the destination path
-            project_root = self.get_project_root()
-            abs_path = (Path(project_root) / relative_path).resolve()
+            project_root = Path(self.get_project_root())
+            abs_path = (project_root / relative_path).resolve()
+            if not abs_path.is_relative_to(project_root):
+                raise UserFacingError(f"Path must stay within the active project: {relative_path}")
             will_overwrite_existing = abs_path.exists()
-
             if will_overwrite_existing:
                 self.project.validate_relative_path(relative_path)
-            else:
-                assert abs_path.is_relative_to(self.get_project_root()), (
-                    f"Cannot create file outside of the project directory, got {relative_path=}"
-                )
+                if not abs_path.is_file():
+                    raise UserFacingError(f"Destination is not a regular file: {relative_path}")
 
-            # writing the file
-            abs_path.parent.mkdir(parents=True, exist_ok=True)
-            abs_path.write_text(content, encoding=self.project.project_config.encoding, newline=self.project.line_ending.newline_str)
-            answer = f"File created: {relative_path}."
-            if will_overwrite_existing:
-                answer += " Overwrote existing file."
+            try:
+                abs_path.parent.mkdir(parents=True, exist_ok=True)
+                abs_path.write_text(content, encoding=self.project.project_config.encoding, newline=self.project.line_ending.newline_str)
+            except OSError as error:
+                raise UserFacingError(f"Could not write {relative_path}: {error.strerror or error}") from None
 
-            return diagnostics_context.format_result(answer)
+            result = "OK; overwrote existing file" if will_overwrite_existing else SUCCESS_RESULT
+            return diagnostics_context.format_result(result)
 
 
 class ListDirTool(Tool):
@@ -101,39 +91,30 @@ class ListDirTool(Tool):
     """
 
     def apply(self, relative_path: str, recursive: bool, skip_ignored_files: bool = False, max_answer_chars: int = -1) -> str:
-        """
-        Lists files and directories in the given directory (optionally with recursion).
+        """Lists files and directories under one project-relative directory.
 
-        :param relative_path: the relative path to the directory to list; pass "." to scan the project root
-        :param recursive: whether to scan subdirectories recursively
-        :param skip_ignored_files: whether to skip files and directories that are ignored
-        :param max_answer_chars: if the output is longer than this number of characters,
-            no content will be returned. -1 means the default value from the config will be used.
-            Don't adjust unless there is really no other way to get the content required for the task.
-        :return: a JSON object with the names of directories and files within the given directory
+        :param relative_path: the directory to list; pass ``.`` for the project root
+        :param recursive: whether to recurse into subdirectories
+        :param skip_ignored_files: whether ignored paths should be omitted
+        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured default
+        :return: a JSON object containing directory and file paths
         """
-        # Check if the directory exists before validation
-        if not self.project.relative_path_exists(relative_path):
-            error_info = {
-                "error": f"Directory not found: {relative_path}",
-                "project_root": self.get_project_root(),
-                "hint": "Check if the path is correct relative to the project root",
-            }
-            return self._to_json(error_info)
-
         self.project.validate_relative_path(relative_path)
+        abs_path = Path(self.get_project_root()) / relative_path
+        if not abs_path.exists():
+            raise UserFacingError(f"Directory not found: {relative_path}")
+        if not abs_path.is_dir():
+            raise UserFacingError(f"Expected a directory path, got a file: {relative_path}")
 
         is_ignored_path_fn = self.project.get_is_ignored_path_fn(relative_path, skip_ignored_files)
         dirs, files = scan_directory(
-            os.path.join(self.get_project_root(), relative_path),
+            str(abs_path),
             relative_to=self.get_project_root(),
             recursive=recursive,
             is_ignored_dir=is_ignored_path_fn,
             is_ignored_file=is_ignored_path_fn,
         )
-
-        result = self._to_json({"dirs": dirs, "files": files})
-        return self._limit_length(result, max_answer_chars)
+        return self._limit_length(self._to_json({"dirs": dirs, "files": files}), max_answer_chars)
 
 
 class FindFileTool(Tool):
@@ -142,36 +123,35 @@ class FindFileTool(Tool):
     """
 
     def apply(self, file_mask: str, relative_path: str, max_answer_chars: int = -1) -> str:
-        """
-        Finds files matching the given file mask within the given relative path.
+        """Finds files matching one filename mask below a project-relative directory.
 
-        :param file_mask: the filename or file mask (using the wildcards * or ?) to search for
-        :param relative_path: the relative path to the directory to search in; pass "." to scan the project root
-        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget
-        :return: a JSON object with the list of matching files, using retained-output paging when needed
+        :param file_mask: filename mask using ``*`` and ``?`` wildcards
+        :param relative_path: directory to search; pass ``.`` for the project root
+        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured default
+        :return: a JSON object containing matching file paths
         """
         self.project.validate_relative_path(relative_path)
+        abs_path = Path(self.get_project_root()) / relative_path
+        if not abs_path.exists():
+            raise UserFacingError(f"Search root does not exist: {relative_path}")
+        if not abs_path.is_dir():
+            raise UserFacingError(f"Expected a directory search root, got a file: {relative_path}")
 
-        # find the files by ignoring everything that doesn't match
         is_ignored_path_fn = self.project.get_is_ignored_path_fn(relative_path, skip_ignored_paths=False)
-        dir_to_scan = os.path.join(self.get_project_root(), relative_path)
 
-        def is_ignored_file(abs_path: str) -> bool:
-            if is_ignored_path_fn(abs_path):
+        def is_ignored_file(candidate: str) -> bool:
+            if is_ignored_path_fn(candidate):
                 return True
-            filename = os.path.basename(abs_path)
-            return not fnmatch(filename, file_mask)
+            return not fnmatch(os.path.basename(candidate), file_mask)
 
         _dirs, files = scan_directory(
-            path=dir_to_scan,
+            path=str(abs_path),
             recursive=True,
             is_ignored_dir=is_ignored_path_fn,
             is_ignored_file=is_ignored_file,
             relative_to=self.get_project_root(),
         )
-
-        result = self._to_json({"files": files})
-        return self._limit_length(result, max_answer_chars)
+        return self._limit_length(self._to_json({"files": files}), max_answer_chars)
 
 
 class ReplaceContentTool(EditingToolWithDiagnostics):
@@ -215,11 +195,14 @@ class ReplaceContentTool(EditingToolWithDiagnostics):
             original_content = self.project.read_file(relative_path)
             updated_content = replacer.replace(original_content, needle, repl)
             abs_path = Path(self.get_project_root()) / relative_path
-            abs_path.write_text(
-                updated_content,
-                encoding=self.project.project_config.encoding,
-                newline=self.project.line_ending.newline_str,
-            )
+            try:
+                abs_path.write_text(
+                    updated_content,
+                    encoding=self.project.project_config.encoding,
+                    newline=self.project.line_ending.newline_str,
+                )
+            except OSError as error:
+                raise UserFacingError(f"Could not write {relative_path}: {error.strerror or error}") from None
             self.project.ls_sync_file_system_changes()
 
             return diagnostics_context.format_result(SUCCESS_RESULT)
@@ -293,53 +276,46 @@ class ReplaceInFilesTool(EditingToolWithDiagnostics):
             selected, problems = self._resolve_occurrence_ids(occurrence_ids, occurrences)
             if problems:
                 problem_lines = "\n".join(f"  {p}" for p in problems)
-                raise ValueError(
-                    f"{len(problems)} of the given occurrence_ids could not be resolved - NO changes were applied:\n"
-                    f"{problem_lines}\n"
-                    "Re-run with dry_run=True to obtain current occurrence ids."
+                raise UserFacingError(
+                    f"{len(problems)} occurrence id(s) could not be resolved; no changes were applied:\n"
+                    f"{problem_lines}\nRe-run with dry_run=True to obtain current occurrence ids."
                 )
             if not selected:
-                raise ValueError("occurrence_ids is empty - pass at least one id from a dry run, or omit the parameter to replace all.")
+                raise UserFacingError("occurrence_ids is empty; pass at least one id from a dry run or omit it to replace all occurrences.")
             return self._apply_occurrences(replacer, selected, contents, needle, repl)
 
         # blind apply (no ids)
         if not occurrences:
-            raise ValueError(
-                "No occurrences of the pattern were found - NO changes were applied. "
-                "Check the mode (a literal needle containing regex metacharacters must use mode 'literal'; "
-                "wildcards require mode 'regex') and the path/glob restrictions, "
-                "or locate the content with search_for_pattern first."
+            raise UserFacingError(
+                "No occurrences of the pattern were found; no changes were applied. Check the mode and path/glob restrictions."
             )
         if expected_count >= 0 and len(occurrences) != expected_count:
             listing = self._render_listing(replacer, occurrences, contents, max_answer_chars, dry_run=False)
-            raise ValueError(
-                f"expected_count={expected_count}, but the pattern matches {len(occurrences)} occurrence(s) - "
-                f"NO changes were applied. Review the prospective changes below; re-issue with the corrected "
-                f"expectation, a refined pattern, or occurrence_ids selecting the intended subset.\n{listing}"
+            raise UserFacingError(
+                f"expected_count={expected_count}, but the pattern matches {len(occurrences)} occurrence(s); no changes were applied.\n{listing}"
             )
         ambiguous = [o for o in occurrences if o.is_ambiguous]
         if ambiguous:
             listing = self._render_listing(replacer, occurrences, contents, max_answer_chars, dry_run=False)
-            raise ValueError(
-                f"{len(ambiguous)} occurrence(s) are ambiguous (the pattern matches again inside the matched text, "
-                f"indicating possible over-matching) - NO changes were applied. Review the prospective changes below "
-                f"and either refine the pattern or explicitly select occurrences via occurrence_ids.\n{listing}"
+            raise UserFacingError(
+                f"{len(ambiguous)} occurrence(s) are ambiguous; no changes were applied. Refine the pattern or select explicit occurrence_ids.\n{listing}"
             )
         return self._apply_occurrences(replacer, occurrences, contents, needle, repl)
 
     def _collect_files(self, relative_path: str, paths_include_glob: str, paths_exclude_glob: str) -> list[tuple[str, str]]:
-        """Collects (relative_path, content) pairs of the non-ignored files in scope, in sorted path order."""
+        """Collects readable non-ignored files in deterministic path order."""
         relative_path = relative_path.strip()
         if relative_path:
             self.project.validate_relative_path(relative_path, require_not_ignored=True)
-        abs_path = os.path.join(self.get_project_root(), relative_path)
-        if not os.path.exists(abs_path):
-            raise FileNotFoundError(f"Relative path {relative_path} does not exist.")
-        if os.path.isfile(abs_path):
+        abs_path = Path(self.get_project_root()) / relative_path
+        if not abs_path.exists():
+            raise UserFacingError(f"Relative path does not exist: {relative_path or '.'}")
+
+        if abs_path.is_file():
             rel_paths = [relative_path]
         else:
             _dirs, rel_paths = scan_directory(
-                path=abs_path,
+                path=str(abs_path),
                 recursive=True,
                 is_ignored_dir=self.project.is_ignored_path,
                 is_ignored_file=self.project.is_ignored_path,
@@ -355,8 +331,8 @@ class ReplaceInFilesTool(EditingToolWithDiagnostics):
                 continue
             try:
                 files.append((path, self.project.read_file(path)))
-            except Exception:
-                continue  # skip unreadable (e.g. binary) files
+            except UserFacingError:
+                continue
         return files
 
     def _render_listing(
@@ -447,11 +423,11 @@ class ReplaceInFilesTool(EditingToolWithDiagnostics):
                         fresh_by_id = {o.occurrence_id: o for o in replacer.find_occurrences([(path, original_content)], needle, repl)}
                         try:
                             file_occurrences = [fresh_by_id[o.occurrence_id] for o in file_occurrences]
-                        except KeyError as e:
-                            raise ValueError(
-                                f"The content of {path} changed while replacing (occurrence {e} no longer resolves); "
-                                f"the file was NOT modified. Re-run with dry_run=True for current ids."
-                            ) from e
+                        except KeyError as error:
+                            raise UserFacingError(
+                                f"The content of {path} changed while replacing (occurrence {error} no longer resolves); "
+                                "the file was not modified. Re-run with dry_run=True for current ids."
+                            ) from None
                     context.set_updated_content(replacer.apply_to_content(original_content, file_occurrences))
             per_file = "\n".join(f"  {path}: {len(occs)}" for path, occs in occurrences_by_file.items())
             summary = f"Replaced {len(occurrences)} occurrence(s) in {len(occurrences_by_file)} file(s):\n{per_file}"
@@ -496,6 +472,16 @@ class SearchForPatternTool(Tool):
         relative_path = relative_path.strip()
         if relative_path:
             self.project.validate_relative_path(relative_path)
+        if context_lines_before < 0 or context_lines_after < 0:
+            raise UserFacingError("context_lines_before and context_lines_after must be non-negative.")
+        try:
+            re.compile(substring_pattern, flags=(re.MULTILINE | re.DOTALL) if multiline else re.MULTILINE)
+        except re.error as error:
+            raise UserFacingError(f"Invalid regex: {error}") from None
+        if paths_include_glob.strip():
+            GlobMatcher(paths_include_glob.strip())
+        if paths_exclude_glob.strip():
+            GlobMatcher(paths_exclude_glob.strip())
 
         matches = self.project.search_project_files_for_pattern(
             pattern=substring_pattern,

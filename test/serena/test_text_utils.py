@@ -2,6 +2,7 @@ from collections.abc import Callable
 
 import pytest
 
+from serena.errors import UserFacingError
 from serena.util.file_proxy import FileCollection, FileProxy
 from serena.util.text_utils import GlobMatcher, LineType, MultiFileContentReplacer, search_files, search_text
 
@@ -592,7 +593,7 @@ class TestExpandBraces:
     )
     def test_expand_braces_rejects_malformed_braces(self, pattern):
         """Malformed brace globs should fail instead of looping forever."""
-        with pytest.raises(ValueError, match="Invalid glob brace expression"):
+        with pytest.raises(UserFacingError, match="Invalid glob brace expression"):
             GlobMatcher._expand_braces(pattern)
 
 

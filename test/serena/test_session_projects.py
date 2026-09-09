@@ -469,6 +469,51 @@ def test_replace_content_mcp_failure_is_single_line_and_persisted(
     asyncio.run(scenario())
 
 
+def test_read_file_missing_path_is_concise_mcp_failure(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
+) -> None:
+    agent, _roots = multi_project_agent
+    _activate(agent, "session-a", "project_a")
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(ReadFileTool))
+
+    async def scenario() -> None:
+        with pytest.raises(ToolError) as exc_info:
+            await mcp_tool.run({"relative_path": "missing.txt"}, context=_mcp_context("session-a"))
+
+        message = str(exc_info.value)
+        assert message == "File not found: missing.txt"
+        record = agent.execution_store.list_session_executions("session-a")[-1]
+        assert record.status == "failed"
+        assert record.error == message
+
+    asyncio.run(scenario())
+
+
+def test_replace_content_ambiguous_match_is_concise_mcp_failure(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
+) -> None:
+    agent, roots = multi_project_agent
+    (roots["project_a"] / "sample.txt").write_text("start A\nstart B\nend\n")
+    _activate(agent, "session-a", "project_a")
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(ReplaceContentTool))
+
+    async def scenario() -> None:
+        with pytest.raises(ToolError) as exc_info:
+            await mcp_tool.run(
+                {"relative_path": "sample.txt", "needle": "start.*?end", "repl": "X", "mode": "regex"},
+                context=_mcp_context("session-a"),
+            )
+
+        message = str(exc_info.value)
+        assert message.startswith("Match is ambiguous:")
+        assert "Traceback" not in message
+        assert "ValueError" not in message
+        record = agent.execution_store.list_session_executions("session-a")[-1]
+        assert record.error == message
+
+    asyncio.run(scenario())
+
+
 def test_mcp_validation_failure_is_compact_and_persisted(
     multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
 ) -> None:

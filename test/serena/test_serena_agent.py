@@ -14,6 +14,7 @@ from _pytest.mark import Mark, MarkDecorator, ParameterSet
 
 from serena.agent import SerenaAgent
 from serena.config.serena_config import ProjectConfig, RegisteredProject, SerenaConfig
+from serena.errors import UserFacingError
 from serena.project import Project
 from serena.tools import (
     SUCCESS_RESULT,
@@ -644,7 +645,7 @@ class TestSerenaAgent:
         case: RegexDefiningSymbolErrorCase,
     ) -> None:
         tool = serena_agent.get_tool(FindDeclarationTool)
-        with pytest.raises(ValueError, match=case.error_fragment):
+        with pytest.raises(UserFacingError, match=case.error_fragment):
             tool.apply(
                 regex=case.regex,
                 relative_path=case.relative_path,
@@ -847,7 +848,7 @@ class TestSerenaAgent:
         tool = serena_agent.get_tool(ReplaceInFilesTool)
         with project_file_modification_context(serena_agent, relative_path):
             original_content = read_project_file(serena_agent.get_active_project(), relative_path)
-            with pytest.raises(ValueError, match="NO changes were applied") as exc_info:
+            with pytest.raises(UserFacingError, match="no changes were applied") as exc_info:
                 tool.apply(needle=needle, repl="X", mode="literal", relative_path=relative_path, expected_count=1)
             assert re.search(r"\[[^\[\]]+:\d+@[0-9a-f]{6}\]", str(exc_info.value))  # the listing with ids is included
             assert read_project_file(serena_agent.get_active_project(), relative_path) == original_content
@@ -925,7 +926,7 @@ class TestSerenaAgent:
         a smaller match triggers an exception
         """
         replace_content_tool = serena_agent.get_tool(ReplaceContentTool)
-        with pytest.raises(ValueError, match="ambiguous"):
+        with pytest.raises(UserFacingError, match="ambiguous"):
             replace_content_tool.apply(
                 needle=r'catch \(error\) \{.*?this\.updateConnectionStatus\("Connection failed", false\);.*?\}',
                 repl='catch(error) {console.log("Never mind"); }',

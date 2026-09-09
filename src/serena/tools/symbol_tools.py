@@ -8,6 +8,7 @@ from collections import Counter, defaultdict
 from collections.abc import Sequence
 from typing import Any
 
+from serena.errors import UserFacingError
 from serena.symbol import LanguageServerSymbol, LanguageServerSymbolDictGrouper
 from serena.tools import (
     SUCCESS_RESULT,
@@ -76,45 +77,36 @@ class GetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead):
         return self._limit_length(result_json_str, max_answer_chars, shortened_result_factories=shortened_results)
 
     def get_symbol_overview(self, relative_path: str, depth: int = 0) -> list[LanguageServerSymbol.OutputDict]:
-        """
-        :param relative_path: relative path to a source file
-        :param depth: the depth up to which descendants shall be retrieved
-        :return: a list of symbol dictionaries representing the symbol overview of the file
-        """
-        symbol_retriever = self.create_language_server_symbol_retriever()
-
-        # The symbol overview is capable of working with both files and directories,
-        # but we want to ensure that the user provides a file path.
+        """Returns the symbol hierarchy for one analyzable source file."""
+        if depth < 0:
+            raise UserFacingError("depth must be non-negative.")
+        self.project.validate_relative_path(relative_path)
         file_path = os.path.join(self.project.project_root, relative_path)
         if not os.path.exists(file_path):
-            raise FileNotFoundError(f"File or directory {relative_path} does not exist in the project.")
+            raise UserFacingError(f"File not found: {relative_path}")
         if os.path.isdir(file_path):
-            raise ValueError(f"Expected a file path, but got a directory path: {relative_path}. ")
-        if not symbol_retriever.can_analyze_file(relative_path):
-            raise ValueError(
-                f"Cannot extract symbols from file {relative_path}. Language server candidates: "
-                f"{[l.value for l in self.project.get_language_server_candidates()]}"
-            )
+            raise UserFacingError(f"Expected a file path, got a directory: {relative_path}")
 
+        symbol_retriever = self.create_language_server_symbol_retriever()
+        if not symbol_retriever.can_analyze_file(relative_path):
+            raise UserFacingError(f"No language server is available for file: {relative_path}")
         symbols = symbol_retriever.get_symbol_overview(relative_path)[relative_path]
 
-        def child_inclusion_predicate(s: LanguageServerSymbol) -> bool:
-            return not s.is_low_level()
+        def child_inclusion_predicate(symbol: LanguageServerSymbol) -> bool:
+            return not symbol.is_low_level()
 
-        symbol_dicts = []
-        for symbol in symbols:
-            symbol_dicts.append(
-                symbol.to_dict(
-                    name_path=False,
-                    name=True,
-                    depth=depth,
-                    kind=True,
-                    relative_path=False,
-                    location=False,
-                    child_inclusion_predicate=child_inclusion_predicate,
-                )
+        return [
+            symbol.to_dict(
+                name_path=False,
+                name=True,
+                depth=depth,
+                kind=True,
+                relative_path=False,
+                location=False,
+                child_inclusion_predicate=child_inclusion_predicate,
             )
-        return symbol_dicts
+            for symbol in symbols
+        ]
 
 
 class FindSymbolTool(Tool, ToolMarkerSymbolicRead):
@@ -179,11 +171,21 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead):
         """
         # Note: file system sync not required; the symbol finder opens all relevant source files explicitly in the case of changes
 
+        if not name_path_pattern:
+            raise UserFacingError("name_path_pattern must not be empty.")
+        if depth < 0:
+            raise UserFacingError("depth must be non-negative.")
+        if max_matches == 0 or max_matches < -1:
+            raise UserFacingError("max_matches must be positive or -1.")
+        if relative_path:
+            self.project.validate_relative_path(relative_path)
         if include_body:
-            depth = 0  # ignore user-specified depth if include_body is True
-        assert max_matches != 0, "max_matches must be > 0 or equal to -1."
-        parsed_include_kinds: Sequence[SymbolKind] | None = [SymbolKind(k) for k in include_kinds] if include_kinds else None
-        parsed_exclude_kinds: Sequence[SymbolKind] | None = [SymbolKind(k) for k in exclude_kinds] if exclude_kinds else None
+            depth = 0
+        try:
+            parsed_include_kinds: Sequence[SymbolKind] | None = [SymbolKind(k) for k in include_kinds] if include_kinds else None
+            parsed_exclude_kinds: Sequence[SymbolKind] | None = [SymbolKind(k) for k in exclude_kinds] if exclude_kinds else None
+        except ValueError as error:
+            raise UserFacingError(f"Invalid symbol kind: {error}") from None
         symbol_retriever = self.create_language_server_symbol_retriever()
         symbols = symbol_retriever.find(
             name_path_pattern,
@@ -266,15 +268,18 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
         :return: a list of JSON objects with the symbols referencing the requested symbol
         """
         if not 0 <= context_lines <= 5:
-            raise ValueError("context_lines must be between 0 and 5")
+            raise UserFacingError("context_lines must be between 0 and 5.")
+        if not name_path:
+            raise UserFacingError("name_path must not be empty.")
+        self.project.validate_relative_path(relative_path)
+        self.project.ls_sync_file_system_changes()
 
-        # file system sync needed for case where symbol finder does not perform a global search, updating everything
-        if relative_path:
-            self.project.ls_sync_file_system_changes()
-
-        include_body = False  # It is probably never a good idea to include the body of the referencing symbols
-        parsed_include_kinds: Sequence[SymbolKind] | None = [SymbolKind(k) for k in include_kinds] if include_kinds else None
-        parsed_exclude_kinds: Sequence[SymbolKind] | None = [SymbolKind(k) for k in exclude_kinds] if exclude_kinds else None
+        include_body = False
+        try:
+            parsed_include_kinds: Sequence[SymbolKind] | None = [SymbolKind(k) for k in include_kinds] if include_kinds else None
+            parsed_exclude_kinds: Sequence[SymbolKind] | None = [SymbolKind(k) for k in exclude_kinds] if exclude_kinds else None
+        except ValueError as error:
+            raise UserFacingError(f"Invalid symbol kind: {error}") from None
 
         symbol_retriever = self.create_language_server_symbol_retriever()
         references_in_symbols = symbol_retriever.find_referencing_symbols(
@@ -362,11 +367,17 @@ class FindImplementationsTool(Tool, ToolMarkerSymbolicRead):
         :param max_answer_chars: max result length; -1 for default
         :return: a list of JSON objects with the symbols implementing the requested symbol
         """
+        if not name_path:
+            raise UserFacingError("name_path must not be empty.")
+        self.project.validate_relative_path(relative_path)
         self.project.ls_sync_file_system_changes()
 
         include_body = False
-        parsed_include_kinds: Sequence[SymbolKind] | None = [SymbolKind(k) for k in include_kinds] if include_kinds else None
-        parsed_exclude_kinds: Sequence[SymbolKind] | None = [SymbolKind(k) for k in exclude_kinds] if exclude_kinds else None
+        try:
+            parsed_include_kinds: Sequence[SymbolKind] | None = [SymbolKind(k) for k in include_kinds] if include_kinds else None
+            parsed_exclude_kinds: Sequence[SymbolKind] | None = [SymbolKind(k) for k in exclude_kinds] if exclude_kinds else None
+        except ValueError as error:
+            raise UserFacingError(f"Invalid symbol kind: {error}") from None
         symbol_retriever = self.create_language_server_symbol_retriever()
 
         implementing_symbols = symbol_retriever.find_implementing_symbols(
@@ -419,10 +430,11 @@ class FindDeclarationTool(Tool, ToolMarkerSymbolicRead):
         :param include_info: whether to include additional info (hover-like). Default False.
         :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget.
         """
+        relative_path = self._sanitize_input_param(relative_path)
+        self.project.validate_relative_path(relative_path)
         self.project.ls_sync_file_system_changes()
 
         symbol_retriever = self.create_language_server_symbol_retriever()
-        relative_path = self._sanitize_input_param(relative_path)
         regex = self._sanitize_input_param(regex)
 
         # find relevant location for lookup
@@ -447,9 +459,7 @@ class FindDeclarationTool(Tool, ToolMarkerSymbolicRead):
             include_body=include_body,
         )
         if defining_symbol is None:
-            raise ValueError(
-                f"No symbol declaration found at the location of the regex match. Location: {relative_path}:{coords.line}:{coords.col}."
-            )
+            raise UserFacingError(f"No symbol declaration found at {relative_path}:{coords.line}:{coords.col}.")
 
         # create output
         symbol_dict = self._defining_symbol_to_result_dict(
@@ -508,6 +518,15 @@ class GetDiagnosticsForFileTool(Tool, ToolMarkerSymbolicRead):
         :param max_answer_chars: max result length; -1 for default.
         :return: grouped diagnostics for the requested file.
         """
+        if start_line < 0:
+            raise UserFacingError("start_line must be non-negative.")
+        if end_line < -1 or (end_line != -1 and end_line < start_line):
+            raise UserFacingError("end_line must be -1 or greater than or equal to start_line.")
+        if not 1 <= min_severity <= 4:
+            raise UserFacingError("min_severity must be between 1 and 4.")
+        self.project.validate_relative_path(relative_path)
+        if not os.path.isfile(os.path.join(self.project.project_root, relative_path)):
+            raise UserFacingError(f"File not found: {relative_path}")
         self.project.ls_sync_file_system_changes()
 
         symbol_retriever = self.create_language_server_symbol_retriever()

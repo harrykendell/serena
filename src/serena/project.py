@@ -13,6 +13,7 @@ from serena.config.serena_config import (
     ProjectConfig,
     SerenaConfig,
 )
+from serena.errors import UserFacingError
 from serena.ls_manager import LanguageServerFactory, LanguageServerManager
 from serena.memories.memory_manager import MemoryManager
 from serena.util.file_proxy import FileCollection, FileProxy
@@ -158,14 +159,23 @@ class Project(ToStringMixin):
         return self.serena_config.is_trusted_project_path(self.project_root)
 
     def read_file(self, relative_path: str) -> str:
-        """
-        Reads a project file.
+        """Reads one project file.
 
-        :param relative_path: the path to the file relative to the project root or an external
-            path token like "<ext:FileUtil.class|472e0a13>"
-        :return: the content of the file
+        :param relative_path: the path to the file relative to the project root
+        :return: the file content
         """
-        return FileProxy.from_project_relative_path(self, relative_path).get_contents()
+        self.validate_relative_path(relative_path)
+        abs_path = Path(self.project_root) / relative_path
+        if not abs_path.exists():
+            raise UserFacingError(f"File not found: {relative_path}")
+        if not abs_path.is_file():
+            raise UserFacingError(f"Expected a file path, got a directory: {relative_path}")
+        try:
+            return FileProxy.from_project_relative_path(self, relative_path).get_contents()
+        except UnicodeDecodeError:
+            raise UserFacingError(f"File is not readable as {self.project_config.encoding} text: {relative_path}") from None
+        except OSError as error:
+            raise UserFacingError(f"Could not read {relative_path}: {error.strerror or error}") from None
 
     @property
     def _ignore_spec(self) -> pathspec.PathSpec:
@@ -300,30 +310,27 @@ class Project(ToStringMixin):
             return exists
 
     def validate_relative_path(self, relative_path: str, require_not_ignored: bool = False) -> None:
-        """
-        Validates that the given relative path is within the project directory
-        (and, optionally, not ignored according to the project's ignore settings),
-        raising a ValueError if the validation fails.
+        """Validates one project-relative path.
 
         :param relative_path: the path to validate, relative to the project root
-        :param require_not_ignored: if True, the path must not be ignored according to the project's ignore settings
+        :param require_not_ignored: whether the path must also be outside the project ignore set
         """
         if not self.is_path_in_project(relative_path):
-            raise ValueError(f"{relative_path=} points outside the project root ({self.project_root})")
+            raise UserFacingError(f"Path must stay within the active project: {relative_path}")
 
-        if require_not_ignored:
-            if self.is_ignored_path(relative_path):
-                raise ValueError(f"Path {relative_path} is ignored")
+        if require_not_ignored and self.is_ignored_path(relative_path):
+            raise UserFacingError(f"Path is ignored: {relative_path}")
 
     def gather_source_files(self, relative_path: str = "") -> list[str]:
         """Retrieves relative paths of all source files, optionally limited to the given path
 
         :param relative_path: if provided, restrict search to this path
         """
+        self.validate_relative_path(relative_path)
         rel_file_paths = []
         start_path = os.path.join(self.project_root, relative_path)
         if not os.path.exists(start_path):
-            raise FileNotFoundError(f"Relative path {start_path} not found.")
+            raise UserFacingError(f"Relative path does not exist: {relative_path}")
         if os.path.isfile(start_path):
             return [relative_path]
 
@@ -365,9 +372,10 @@ class Project(ToStringMixin):
         :param skip_ignored_files: whether to skip ignored files; has no effect if `code_files_only` is True
         :return: the selected local project files
         """
+        self.validate_relative_path(relative_path)
         abs_path = os.path.join(self.project_root, relative_path)
         if not os.path.exists(abs_path):
-            raise FileNotFoundError(f"Relative path {relative_path} does not exist.")
+            raise UserFacingError(f"Relative path does not exist: {relative_path}")
 
         if code_files_only:
             relative_file_paths = self.gather_source_files(relative_path=relative_path)

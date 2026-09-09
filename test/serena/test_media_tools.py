@@ -12,6 +12,7 @@ import requests
 from mcp.types import CallToolResult, ResourceLink
 
 from serena.config.serena_config import SerenaConfig
+from serena.errors import UserFacingError
 from serena.project import Project
 from serena.tools import DownloadFileTool, FetchMediaFileTool, RenderPdfPageTool, UploadFileTool
 from serena.tools.media_tools import OpenAIFile, get_result_file_link, read_result_file_link
@@ -163,7 +164,7 @@ def test_download_file_snapshot_remains_readable_after_old_mtime(project: Projec
 
 
 def test_download_file_rejects_path_outside_project(project: Project) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(UserFacingError):
         _make_tool(DownloadFileTool, project).apply("../outside.txt")
 
 
@@ -266,7 +267,7 @@ def test_fetch_media_file_rejects_non_media(project: Project, tmp_path: Path) ->
 
 
 def test_fetch_media_file_rejects_path_outside_project(project: Project) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(UserFacingError):
         _make_tool(FetchMediaFileTool, project).apply("../outside.png")
 
 

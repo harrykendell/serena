@@ -9,6 +9,7 @@ from typing import Any, Literal, Self
 from joblib import Parallel, delayed
 from sensai.util.string import ToStringMixin
 
+from serena.errors import UserFacingError
 from serena.util.file_proxy import FileCollection, FileProxy
 from solidlsp.ls_utils import TextUtils
 
@@ -225,7 +226,7 @@ class GlobMatcher(ToStringMixin):
                 if match:
                     options_expr = match.group(1)
                     if not options_expr:
-                        raise ValueError(f"Invalid glob brace expression in {pattern!r}: empty braces are not allowed")
+                        raise UserFacingError(f"Invalid glob brace expression in {pattern!r}: empty braces are not allowed")
 
                     prefix = p[: match.start()]
                     suffix = p[match.end() :]
@@ -233,7 +234,7 @@ class GlobMatcher(ToStringMixin):
                     for option in options:
                         new_patterns.append(f"{prefix}{option}{suffix}")
                 else:
-                    raise ValueError(f"Invalid glob brace expression in {pattern!r}: unmatched brace")
+                    raise UserFacingError(f"Invalid glob brace expression in {pattern!r}: unmatched brace")
             patterns = new_patterns
         return patterns
 
@@ -381,41 +382,27 @@ class ContentReplacer:
 
     @staticmethod
     def _create_replacement_function(regex_pattern: str, repl_template: str, regex_flags: int) -> Callable[[re.Match], str]:
-        """
-        Creates a replacement function that validates for ambiguity and handles backreferences.
-
-        :param regex_pattern: The regex pattern being used for matching
-        :param repl_template: The replacement template with $!1, $!2, etc. for backreferences
-        :param regex_flags: The flags to use when searching (e.g., re.DOTALL | re.MULTILINE)
-        :return: A function suitable for use with re.sub() or re.subn()
-        """
+        """Creates the validated replacement function for one regex pattern."""
 
         def validate_and_replace(match: re.Match) -> str:
             matched_text = match.group(0)
 
-            # For multi-line match, check if the same pattern matches again within the already-matched text,
-            # rendering the match ambiguous. Typical pattern in the code:
-            #    <start><other-stuff><start><stuff><end>
-            # When matching
-            #    <start>.*?<end>
-            # this will match the entire span above, while only the suffix may have been intended.
-            # (See test case for a practical example.)
-            # To detect this, we check if the same pattern matches again within the matched text,
+            # reject a multiline match that contains another match of the same pattern
             if "\n" in matched_text and re.search(regex_pattern, matched_text[1:], flags=regex_flags):
-                raise ValueError(
+                raise UserFacingError(
                     "Match is ambiguous: the search pattern matches multiple overlapping occurrences. "
-                    "Please revise the search pattern to be more specific to avoid ambiguity, "
-                    "e.g. by matching specific context after the match, or try using the literal mode."
+                    "Revise the search pattern to be more specific or use literal mode."
                 )
 
-            # Handle backreferences: replace $!1, $!2, etc. with actual matched groups
-            def expand_backreference(m: re.Match) -> str:
-                group_num = int(m.group(1))
-                group_value = match.group(group_num)
-                return group_value if group_value is not None else m.group(0)
+            def expand_backreference(backreference: re.Match) -> str:
+                group_num = int(backreference.group(1))
+                try:
+                    group_value = match.group(group_num)
+                except IndexError:
+                    raise UserFacingError(f"Replacement references missing regex group $!{group_num}.") from None
+                return group_value if group_value is not None else backreference.group(0)
 
-            result = re.sub(r"\$!(\d+)", expand_backreference, repl_template)
-            return result
+            return re.sub(r"\$!(\d+)", expand_backreference, repl_template)
 
         return validate_and_replace
 
@@ -425,38 +412,34 @@ class ContentReplacer:
         needle: str,
         repl: str,
     ) -> str:
-        """
-        Performs the replacement.
-
-        Raises ValueError if no match is found, or if multiple matches are found while allow_multiple_occurrences is False.
+        """Performs one literal or regular-expression replacement.
 
         :param content: the content in which to perform the replacement
-        :param needle: the search expression, which is either a literal string or a regular expression, depending on the mode
-        :param repl: the replacement string, which, in regex mode, may contain backreferences in the form of $!1, $!2, etc. to
-            refer to matched groups in the search expression
-        :return: the updated content after performing the replacement
+        :param needle: the literal string or regular expression to search for
+        :param repl: the replacement text, including optional ``$!N`` regex backreferences
+        :return: the updated content
         """
         if self.mode == "literal":
             regex = re.escape(needle)
         elif self.mode == "regex":
             regex = needle
         else:
-            raise ValueError(f"Invalid mode: '{self.mode}', expected 'literal' or 'regex'.")
+            raise UserFacingError(f"Invalid mode: {self.mode!r}; expected 'literal' or 'regex'.")
 
         regex_flags = (re.MULTILINE | re.DOTALL) if self.regex_multiline else 0
-
-        # create replacement function with validation and backreference handling
         repl_fn = self._create_replacement_function(regex, repl, regex_flags=regex_flags)
 
-        # perform replacement
-        updated_content, n = re.subn(regex, repl_fn, content, flags=regex_flags)
+        try:
+            updated_content, count = re.subn(regex, repl_fn, content, flags=regex_flags)
+        except re.error as error:
+            raise UserFacingError(f"Invalid regex: {error}") from None
 
-        if n == 0:
-            raise ValueError("Error: No matches of search expression found.")
-        if not self.allow_multiple_occurrences and n > 1:
-            raise ValueError(
-                f"Expression matches {n} occurrences. "
-                "Please revise the expression to be more specific or enable allow_multiple_occurrences if this is expected."
+        if count == 0:
+            raise UserFacingError("No matches of search expression found.")
+        if not self.allow_multiple_occurrences and count > 1:
+            raise UserFacingError(
+                f"Expression matches {count} occurrences. Revise the expression to be more specific or enable "
+                "allow_multiple_occurrences if this is expected."
             )
         return updated_content
 
@@ -502,12 +485,15 @@ class MultiFileContentReplacer:
         :param regex_multiline: whether to apply multi-line regex matching, enabling the flags re.DOTALL and re.MULTILINE
         """
         if mode not in ("literal", "regex"):
-            raise ValueError(f"Invalid mode: '{mode}', expected 'literal' or 'regex'.")
+            raise UserFacingError(f"Invalid mode: {mode!r}; expected 'literal' or 'regex'.")
         self.mode = mode
         self._flags = (re.MULTILINE | re.DOTALL) if regex_multiline else 0
 
     def _compile(self, needle: str) -> re.Pattern:
-        return re.compile(re.escape(needle) if self.mode == "literal" else needle, flags=self._flags)
+        try:
+            return re.compile(re.escape(needle) if self.mode == "literal" else needle, flags=self._flags)
+        except re.error as error:
+            raise UserFacingError(f"Invalid regex: {error}") from None
 
     @classmethod
     def _digest(cls, matched_text: str) -> str:
@@ -519,11 +505,15 @@ class MultiFileContentReplacer:
 
     @staticmethod
     def _expand_backreferences(match: re.Match, repl_template: str) -> str:
-        """Expands $!1, $!2, ... in the replacement template (same syntax as :class:`ContentReplacer`)."""
+        """Expands ``$!N`` references in one replacement template."""
 
-        def expand(m: re.Match) -> str:
-            group_value = match.group(int(m.group(1)))
-            return group_value if group_value is not None else m.group(0)
+        def expand(backreference: re.Match) -> str:
+            group_num = int(backreference.group(1))
+            try:
+                group_value = match.group(group_num)
+            except IndexError:
+                raise UserFacingError(f"Replacement references missing regex group $!{group_num}.") from None
+            return group_value if group_value is not None else backreference.group(0)
 
         return re.sub(r"\$!(\d+)", expand, repl_template)
 
@@ -630,28 +620,29 @@ class TextCoords:
 
 
 def find_text_coordinates(content: str, regex: str, require_unique: bool = False) -> TextCoords | None:
-    """
-    Finds the line and column number of the first match of a regex pattern in the given content.
+    """Finds the line and column of the first regex capture group.
 
-    :param content: the text content to search through
-    :param regex: the regular expression pattern to search for; it must match part of a single line,
-        and contain exactly one group that captures the position of interest (e.g., the exact variable name to find the coordinates of)
-    :param require_unique: if True, raises an error if not exactly one match is found;
-        if False, returns None if no match is found, and returns the coordinates of the first match if multiple matches are found
-    :return: the coordinates of the match or None
+    :param content: the text content to search
+    :param regex: a regular expression containing exactly one capture group
+    :param require_unique: whether exactly one match is required
+    :return: the captured position, or ``None`` when no match is found and uniqueness is not required
     """
-    pattern = re.compile(regex, flags=re.MULTILINE | re.DOTALL)
+    try:
+        pattern = re.compile(regex, flags=re.MULTILINE | re.DOTALL)
+    except re.error as error:
+        raise UserFacingError(f"Invalid regex: {error}") from None
+
     matches = list(pattern.finditer(content))
-    if len(matches) == 0:
+    if not matches:
         if require_unique:
-            raise ValueError(f"No match found for regex: {regex}")
+            raise UserFacingError("No match found for the supplied regex.")
         return None
-    else:
-        if require_unique and len(matches) > 1:
-            raise ValueError(f"Match must be unique; found {len(matches)} matches for regex: {regex}")
-        match = matches[0]
-        if len(match.groups()) != 1:
-            raise ValueError(f"Regex must contain exactly one group to capture the position, but found {len(match.groups())} groups.")
-        index_in_content = match.start(1)
-        line, col = TextUtils.get_line_col_from_index(content, index_in_content)
-        return TextCoords(line, col)
+    if require_unique and len(matches) > 1:
+        raise UserFacingError(f"Match must be unique; found {len(matches)} matches.")
+
+    match = matches[0]
+    if len(match.groups()) != 1:
+        raise UserFacingError(f"Regex must contain exactly one group; found {len(match.groups())}.")
+    index_in_content = match.start(1)
+    line, col = TextUtils.get_line_col_from_index(content, index_in_content)
+    return TextCoords(line, col)

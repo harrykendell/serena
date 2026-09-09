@@ -5,6 +5,7 @@ from collections.abc import Iterable, Iterator, Reversible
 from contextlib import contextmanager
 from typing import Generic, TypeVar, cast
 
+from serena.errors import UserFacingError
 from serena.symbol import LanguageServerSymbol, LanguageServerSymbolRetriever, PositionInFile, Symbol
 from solidlsp import SolidLanguageServer, ls_types
 from solidlsp.ls import LSPFileBuffer
@@ -143,8 +144,8 @@ class CodeEditor(Generic[TSymbol], ABC):
         # must have been retrieved either with body or at least with location.
         # since _find_unique_symbol passes include_location=True, it works here
         if symbol.body == symbol.name:
-            raise ValueError(
-                f"Cannot insert after this symbol (not a function, class or method): {symbol}. Consider using insert_before_symbol instead."
+            raise UserFacingError(
+                "Cannot insert after this symbol because it has no enclosing definition body. Use insert_before_symbol if appropriate."
             )
 
         # make sure body always ends with at least one newline
@@ -357,7 +358,7 @@ class LanguageServerCodeEditor(CodeEditor[LanguageServerSymbol]):
         """
         symbol = self._find_unique_symbol(name_path, relative_path)
         if not symbol.location.has_position_in_file():
-            raise ValueError(f"Symbol '{name_path}' does not have a valid position in file for renaming")
+            raise UserFacingError(f"Symbol {name_path!r} does not have a valid file position for renaming.")
 
         # After has_position_in_file check, line and column are guaranteed to be non-None
         assert symbol.location.line is not None
@@ -368,16 +369,10 @@ class LanguageServerCodeEditor(CodeEditor[LanguageServerSymbol]):
             relative_file_path=relative_path, line=symbol.location.line, column=symbol.location.column, new_name=new_name
         )
         if rename_result is None:
-            raise ValueError(
-                f"Language server for {lang_server.language_id} returned no rename edits for symbol '{name_path}'. "
-                f"The symbol might not support renaming."
-            )
+            raise UserFacingError(f"The language server returned no rename edits for symbol {name_path!r}; it may not support renaming.")
         num_changes = self._apply_workspace_edit(rename_result)
 
         if num_changes == 0:
-            raise ValueError(
-                f"Renaming symbol '{name_path}' to '{new_name}' resulted in no changes being applied; renaming may not be supported."
-            )
+            raise UserFacingError(f"Renaming symbol {name_path!r} produced no changes; renaming may not be supported.")
 
-        msg = f"Successfully renamed '{name_path}' to '{new_name}' ({num_changes} changes applied)"
-        return msg
+        return f"OK; {num_changes} change(s) applied"

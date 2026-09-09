@@ -17,6 +17,7 @@ from solidlsp.ls import LSPFileBuffer
 from solidlsp.ls import ReferenceInSymbol as LSPReferenceInSymbol
 from solidlsp.ls_types import Position, SymbolKind, UnifiedSymbolInformation
 
+from .errors import UserFacingError
 from .ls_manager import LanguageServerManager
 from .project import Project
 
@@ -106,7 +107,7 @@ class Symbol(ToStringMixin, ABC):
         """
         pos = self.get_body_start_position()
         if pos is None:
-            raise ValueError(f"Body start position is not defined for {self}")
+            raise UserFacingError("Symbol body start position is not available for this operation.")
         return pos
 
     def get_body_end_position_or_raise(self) -> PositionInFile:
@@ -115,7 +116,7 @@ class Symbol(ToStringMixin, ABC):
         """
         pos = self.get_body_end_position()
         if pos is None:
-            raise ValueError(f"Body end position is not defined for {self}")
+            raise UserFacingError("Symbol body end position is not available for this operation.")
         return pos
 
     @abstractmethod
@@ -312,7 +313,7 @@ class LanguageServerSymbol(Symbol, ToStringMixin):
     def get_body_line_numbers_or_raise(self) -> tuple[int, int]:
         start_line, end_line = self.get_body_line_numbers()
         if start_line is None or end_line is None:
-            raise ValueError(f"Body line numbers could not be determined for {self.get_name_path()}")
+            raise UserFacingError(f"Body line numbers are not available for symbol {self.get_name_path()!r}.")
         return start_line, end_line
 
     @property
@@ -772,6 +773,8 @@ class LanguageServerSymbolRetriever:
         substring_matching: bool = False,
         within_relative_path: str | None = None,
     ) -> LanguageServerSymbol:
+        if not name_path_pattern:
+            raise UserFacingError("name path must not be empty.")
         symbol_candidates = self.find(
             name_path_pattern,
             include_kinds=include_kinds,
@@ -781,20 +784,16 @@ class LanguageServerSymbolRetriever:
         )
         if len(symbol_candidates) == 1:
             return symbol_candidates[0]
-        elif len(symbol_candidates) == 0:
-            raise ValueError(f"No symbol matching '{name_path_pattern}' found")
-        else:
-            # There are multiple candidates.
-            # If only one of the candidates has the given pattern as its exact name path, return that one
-            exact_matches = [s for s in symbol_candidates if s.get_name_path() == name_path_pattern]
-            if len(exact_matches) == 1:
-                return exact_matches[0]
-            # otherwise, raise an error
-            include_rel_path = within_relative_path is not None
-            raise ValueError(
-                f"Found multiple {len(symbol_candidates)} symbols matching '{name_path_pattern}'. "
-                "They are: \n" + json.dumps([s.to_dict(kind=True, relative_path=include_rel_path) for s in symbol_candidates], indent=2)
-            )
+        if not symbol_candidates:
+            raise UserFacingError(f"No symbol matching {name_path_pattern!r} found.")
+
+        exact_matches = [symbol for symbol in symbol_candidates if symbol.get_name_path() == name_path_pattern]
+        if len(exact_matches) == 1:
+            return exact_matches[0]
+
+        include_rel_path = within_relative_path is not None
+        candidates = json.dumps([symbol.to_dict(kind=True, relative_path=include_rel_path) for symbol in symbol_candidates], indent=2)
+        raise UserFacingError(f"Found {len(symbol_candidates)} symbols matching {name_path_pattern!r}:\n{candidates}")
 
     def find_by_location(self, location: LanguageServerSymbolLocation) -> LanguageServerSymbol | None:
         if location.relative_path is None:
@@ -854,7 +853,7 @@ class LanguageServerSymbolRetriever:
         :return: a list of symbols that reference the given symbol
         """
         if not symbol_location.has_position_in_file():
-            raise ValueError("Symbol location does not contain a valid position in a file")
+            raise UserFacingError("Symbol does not have a valid position in a file for this operation.")
         assert symbol_location.relative_path is not None
         assert symbol_location.line is not None
         assert symbol_location.column is not None
@@ -923,7 +922,7 @@ class LanguageServerSymbolRetriever:
         :return: a list of symbols that implement the given symbol
         """
         if not symbol_location.has_position_in_file():
-            raise ValueError("Symbol location does not contain a valid position in a file")
+            raise UserFacingError("Symbol does not have a valid position in a file for this operation.")
         assert symbol_location.relative_path is not None
         assert symbol_location.line is not None
         assert symbol_location.column is not None
@@ -1089,7 +1088,7 @@ class LanguageServerSymbolRetriever:
         :return: an ordered mapping from symbols to the diagnostics that overlap their body ranges.
         """
         if not symbol_location.has_position_in_file():
-            raise ValueError("Symbol location does not contain a valid position in a file")
+            raise UserFacingError("Symbol does not have a valid position in a file for this operation.")
 
         symbol = self.find_by_location(symbol_location)
         if symbol is None:

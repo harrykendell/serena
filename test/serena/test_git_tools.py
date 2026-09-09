@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from serena.config.serena_config import SerenaConfig
+from serena.errors import UserFacingError
 from serena.execution import ExecutionAccess
 from serena.project import Project
 from serena.tools import (
@@ -88,7 +89,7 @@ def test_git_commit_includes_only_explicit_paths(git_project: tuple[Path, Projec
 def test_git_commit_rejects_paths_outside_project(git_project: tuple[Path, Project]) -> None:
     _, project = git_project
 
-    with pytest.raises(ValueError):
+    with pytest.raises(UserFacingError):
         _make_tool(GitCommitTool, project).apply("bad commit", ["../outside.txt"])
 
 
