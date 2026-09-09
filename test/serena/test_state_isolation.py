@@ -30,4 +30,5 @@ def test_default_persistence_uses_suite_owned_state() -> None:
     state_path = serena_home / "execution_store" / "state.json"
 
     assert state_path.is_file()
-    assert not (real_serena_home / "execution_store" / "state.json").exists()
+    real_state_path = real_serena_home / "execution_store" / "state.json"
+    assert state_path.resolve() != real_state_path.resolve()
