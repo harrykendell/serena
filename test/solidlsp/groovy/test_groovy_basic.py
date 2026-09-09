@@ -47,7 +47,7 @@ class TestGroovyLanguageServer:
 
         project_data_path = os.path.join(repo_path, SERENA_MANAGED_DIR_NAME)
         solidlsp_settings = SolidLSPSettings(
-            solidlsp_dir=str(Path.home() / ".serena"),
+            solidlsp_dir=os.environ["SOLIDLSP_DIR"],
             project_data_path=project_data_path,
             ls_specific_settings={LanguageServerId.GROOVY: groovy_settings},
         )

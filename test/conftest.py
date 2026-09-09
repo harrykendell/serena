@@ -6,14 +6,22 @@ import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
+
+_TEST_STATE_DIRECTORY = TemporaryDirectory(prefix="serena-test-state-")
+_TEST_STATE_ROOT = Path(_TEST_STATE_DIRECTORY.name)
+_SERENA_TEST_HOME = _TEST_STATE_ROOT / "serena"
+_SOLIDLSP_TEST_HOME = _TEST_STATE_ROOT / "solidlsp"
+os.environ["SERENA_HOME"] = str(_SERENA_TEST_HOME)
+os.environ["SOLIDLSP_DIR"] = str(_SOLIDLSP_TEST_HOME)
 
 import pytest
 from _pytest.mark import Mark, MarkDecorator
 from sensai.util import logging
 
 from serena.agent import SerenaAgent
-from serena.config.serena_config import SerenaConfig, SerenaPaths
+from serena.config.serena_config import SerenaConfig
 from serena.constants import SERENA_MANAGED_DIR_NAME
 from serena.project import Project
 from serena.util.file_system import GitignoreParser
@@ -99,7 +107,7 @@ def _create_ls(
         workspace_folders=workspace_folders or ["."],
         additional_workspace_folders=additional_workspace_folders or [],
     )
-    effective_solidlsp_dir = solidlsp_dir if solidlsp_dir is not None else SerenaPaths().serena_user_home_dir
+    effective_solidlsp_dir = str(solidlsp_dir) if solidlsp_dir is not None else str(_SOLIDLSP_TEST_HOME)
     project_data_path = os.path.join(repo_path, SERENA_MANAGED_DIR_NAME)
     return SolidLanguageServer.create(
         config,

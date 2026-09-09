@@ -19,6 +19,14 @@ log = logging.getLogger(__name__)
 SOLIDLSP_RESOURCES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources")
 
 
+def _default_solidlsp_dir() -> str:
+    """Returns the configured global SolidLSP state directory."""
+    configured_dir = os.getenv("SOLIDLSP_DIR", "").strip()
+    if configured_dir:
+        return str(pathlib.Path(configured_dir).expanduser())
+    return str(pathlib.Path.home() / ".solidlsp")
+
+
 @dataclass
 class SolidLSPSettings:
     """
@@ -27,7 +35,7 @@ class SolidLSPSettings:
     Note: Server instance-specific settings belong in LanguageServerConfig, not here.
     """
 
-    solidlsp_dir: str = str(pathlib.Path.home() / ".solidlsp")
+    solidlsp_dir: str = field(default_factory=_default_solidlsp_dir)
     """
     Path to the directory in which to store global Solid-LSP data (which is not project-specific)
     """
