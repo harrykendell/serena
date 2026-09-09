@@ -23,7 +23,7 @@ The implementation should preserve these rules.
 6. **Orchestrator-managed Codex work should avoid live checkouts when modifying code.** Modifying Codex delegates should normally receive isolated Orchestrator-owned Git worktrees. This prevents clashes with Serena and also prevents Orchestrator's own concurrent Codex delegates from editing the same checkout.
 7. **No global Serena writer lock.** `writer(serena)` and `writer(qengine)` should be able to run simultaneously. Same-project safety is a Serena-internal concern.
 8. **Keep the primary ChatGPT context small.** Delegates return bounded typed results rather than transcripts, full logs, or all tool activity.
-9. **Keep Serena's upstream-facing changes narrow.** Multi-session project safety and coding/jobs improvements belong in Serena; provider/delegation machinery belongs in Orchestrator.
+9. **Keep Serena and Orchestrator boundaries explicit.** Multi-session project safety and coding/jobs improvements belong in Serena; provider/delegation machinery belongs in Orchestrator.
 
 ## 2. Non-goals
 
@@ -157,7 +157,7 @@ Audit project-dependent state including:
 
 The former project-query service demonstrated that project instances can be cached, but its process-wide active-project locking model was not suitable for ordinary multi-session Serena use.
 
-If upstream Serena invariants make independent in-process project runtimes excessively invasive, stop at the O01 gate and compare that design with a thin Serena supervisor routing to project-fixed headless Serena workers. This is a fallback, not the starting choice.
+If Serena runtime invariants make independent in-process project runtimes excessively invasive, stop at the O01 gate and compare that design with a thin Serena supervisor routing to project-fixed headless Serena workers. This is a fallback, not the starting choice.
 
 ### 4.3 Serena owns same-project safety
 
@@ -685,7 +685,7 @@ Acceptance tests:
 - same-project concurrent sessions remain correct according to Serena's internal policy;
 - concurrent calls remain correctly attributed to their session/project.
 
-Gate: if independent in-process runtimes require pervasive upstream surgery, compare with a thin supervisor + project-fixed Serena workers before proceeding.
+Gate: if independent in-process runtimes require pervasive Serena core surgery, compare with a thin supervisor + project-fixed Serena workers before proceeding.
 
 ### O02 - Orchestrator MCP skeleton
 
@@ -929,9 +929,9 @@ A claim ID must not become a general authorization token across unrelated authen
 
 There is intentionally **no Serena/Orchestrator shared trust boundary** because there is no shared runtime state.
 
-## 17. Repository and upstream strategy
+## 17. Repository strategy
 
-Both MCPs live in the Serena fork/repository for development/deployment convenience, but should remain architecturally independent.
+Both MCPs live in the standalone Serena repository for development/deployment convenience, but remain architecturally independent.
 
 Keep Serena changes concentrated in:
 
@@ -950,11 +950,11 @@ Keep Orchestrator additions concentrated in new modules/packages:
 - Orchestrator UI/audit storage;
 - fan-out/fan-in and routing policy.
 
-Do not make upstream Serena core classes import Orchestrator code. Do not make Orchestrator import Serena agent/project runtime internals.
+Do not make Serena core classes import Orchestrator code. Do not make Orchestrator import Serena agent/project runtime internals.
 
 Generic dependency/library reuse is fine where it is incidental, but avoid creating shared mutable runtime abstractions merely to reduce code duplication.
 
-The desired long-term property is that Orchestrator can evolve rapidly while Serena's divergence from upstream remains narrow and understandable.
+The desired long-term property is that Orchestrator can evolve rapidly while Serena core remains focused, stable, and understandable.
 
 ## 18. Immediate next step
 

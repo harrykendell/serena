@@ -83,6 +83,18 @@ def test_explicit_only_project_can_disable_auto_detection(tmp_path: Path) -> Non
     assert project.determine_language_server_candidates() == []
 
 
+def test_source_file_discovery_auto_detects_languages(tmp_path: Path) -> None:
+    (tmp_path / "module.py").write_text("value = 1\n")
+    config = SerenaConfig(log_level=logging.ERROR).with_headless_mode_overrides()
+    project = Project(
+        project_root=str(tmp_path),
+        project_config=ProjectConfig(project_name="python", language_servers=[]),
+        serena_config=config,
+    )
+
+    assert "module.py" in project.gather_source_files()
+
+
 def test_language_server_starts_lazily_and_is_reused(tmp_path: Path) -> None:
     factory = _FakeFactory()
     project = _FakeProject(tmp_path, [LanguageServerId.PYTHON])

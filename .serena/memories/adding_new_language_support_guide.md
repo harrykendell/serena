@@ -1,6 +1,6 @@
 # Adding Retained Language Support
 
-Use this only when the Kendell deployment has a concrete need for another semantic language server. The supported catalogue is intentionally small; do not restore upstream breadth by default.
+Use this only when the Kendell deployment has a concrete need for another semantic language server. The supported catalogue is intentionally small; do not expand it without a concrete deployment requirement.
 
 ## 1. Implement the adapter
 

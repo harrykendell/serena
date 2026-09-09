@@ -1,6 +1,6 @@
 # Serena standalone runtime
 
-This repository is the Kendell standalone deployment of Serena, together with the sibling Orchestrator MCP and their shared runtime support. It is maintained as an operated product rather than as a general-purpose upstream-compatible distribution.
+This repository is the Kendell standalone Serena 2.0 runtime, together with the sibling Orchestrator MCP and their shared runtime support. It is maintained as an independent operated product with no upstream-tracking compatibility requirement.
 
 The runtime is built for ChatGPT and keeps the parts used by the current deployment: session-scoped project activation, semantic retrieval and refactoring through language servers, guarded file and shell operations, Git tooling, project memories, durable jobs, retained tool output, media/file transfer, the inline activity UI, and the Kendell dashboard.
 
@@ -53,10 +53,9 @@ Focused language-server tests use the pytest markers declared in `pyproject.toml
 
 Useful repository documentation is intentionally limited to the current Kendell design and operation notes under `docs/03-special-guides/`, especially:
 
-- `serena_standalone_simplification_plan.md`
 - `chatgpt_orchestrator_plan.md`
 - `cpp_setup.md`
 
-## Upstream attribution
+## Origin and attribution
 
-This codebase derives from Serena by Oraios AI and retains upstream code under the MIT licence. See `LICENSE` for the copyright and licence terms.
+Serena 2.0 is maintained as an independent project. The codebase derives from Serena by Oraios AI and retains the original MIT-licensed code and copyright notice; see `LICENSE` for the licence terms.

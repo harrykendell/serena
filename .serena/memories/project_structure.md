@@ -1,6 +1,6 @@
 # Serena — Standalone Project Core
 
-Serena is the Kendell-operated ChatGPT MCP coding runtime. This repository also ships the independent sibling Orchestrator MCP and shared runtime support; upstream distribution compatibility is not a product constraint.
+Serena 2.0 is the independent Kendell-operated ChatGPT MCP coding runtime. This repository also ships the independent sibling Orchestrator MCP and shared runtime support; it is not maintained as a fork or upstream-tracking distribution.
 
 ## Source map
 
@@ -28,7 +28,7 @@ Serena is the Kendell-operated ChatGPT MCP coding runtime. This repository also 
 - Wheel contents: `serena`, `orchestrator`, `mcp_runtime`, `solidlsp`.
 - Entry points: `serena` -> `serena.cli:top_level`; `orchestrator` -> `orchestrator.cli:main`.
 - CI is a single Linux/Python-3.13 workflow; no PyPI/TestPyPI, release, Docker, Nix packaging, devcontainer, generated-docs, or cross-platform release machinery is maintained.
-- Upstream Serena attribution remains under the MIT `LICENSE`.
+- Original Serena attribution remains under the MIT `LICENSE`; repository development is otherwise standalone.
 
 ## Retained language catalogue
 

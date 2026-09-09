@@ -550,7 +550,7 @@ class DashboardOrchestratorOverview:
 
 
 class CustomDashboard:
-    """Fork-specific dashboard integration kept outside Serena's upstream frontend implementation."""
+    """Serena-specific dashboard integration kept outside the bundled frontend implementation."""
 
     def __init__(self, app: Flask, agent: SerenaAgent):
         self._session_overview = DashboardSessionOverview(agent)

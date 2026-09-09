@@ -326,31 +326,35 @@ class Project(ToStringMixin):
             raise FileNotFoundError(f"Relative path {start_path} not found.")
         if os.path.isfile(start_path):
             return [relative_path]
-        else:
-            for root, dirs, files in os.walk(start_path, followlinks=True):
-                # prevent recursion into ignored directories
-                dirs[:] = [d for d in dirs if not self.is_ignored_path(os.path.join(root, d))]
 
-                # collect non-ignored files
-                for file in files:
-                    abs_file_path = os.path.join(root, file)
-                    try:
-                        if not self.is_ignored_path(abs_file_path, ignore_non_source_files=True):
-                            try:
-                                rel_file_path = os.path.relpath(abs_file_path, start=self.project_root)
-                            except Exception:
-                                log.warning(
-                                    "Ignoring path '%s' because it appears to be outside of the project root (%s)",
-                                    abs_file_path,
-                                    self.project_root,
-                                )
-                                continue
-                            rel_file_paths.append(rel_file_path)
-                    except FileNotFoundError:
-                        log.warning(
-                            f"File {abs_file_path} not found (possibly due it being a symlink), skipping it in request_parsed_files",
-                        )
-            return rel_file_paths
+        # refresh automatically detected languages before filtering source files
+        if self.project_config.auto_detect_language_servers:
+            self.determine_language_server_candidates()
+
+        for root, dirs, files in os.walk(start_path, followlinks=True):
+            # prevent recursion into ignored directories
+            dirs[:] = [d for d in dirs if not self.is_ignored_path(os.path.join(root, d))]
+
+            # collect non-ignored files
+            for file in files:
+                abs_file_path = os.path.join(root, file)
+                try:
+                    if not self.is_ignored_path(abs_file_path, ignore_non_source_files=True):
+                        try:
+                            rel_file_path = os.path.relpath(abs_file_path, start=self.project_root)
+                        except Exception:
+                            log.warning(
+                                "Ignoring path '%s' because it appears to be outside of the project root (%s)",
+                                abs_file_path,
+                                self.project_root,
+                            )
+                            continue
+                        rel_file_paths.append(rel_file_path)
+                except FileNotFoundError:
+                    log.warning(
+                        f"File {abs_file_path} not found (possibly due it being a symlink), skipping it in request_parsed_files",
+                    )
+        return rel_file_paths
 
     def _create_file_collection(self, relative_path: str, *, code_files_only: bool, skip_ignored_files: bool) -> FileCollection:
         """

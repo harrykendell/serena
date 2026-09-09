@@ -14,6 +14,7 @@ from typing import Any
 _FILE_RESOURCE_RE = re.compile(r"serena-file://export/([0-9a-f]{48})")
 _JOB_ID_RE = re.compile(r'"job_id"\s*:\s*"([0-9a-f]{32})"')
 _STATE_VERSION = 1
+ACTIVITY_HISTORY_LIMIT = 2048
 
 
 @dataclass
@@ -77,7 +78,7 @@ class ExecutionStore:
         root: Path | None = None,
         *,
         max_sessions: int = 128,
-        max_executions: int = 2048,
+        max_executions: int = ACTIVITY_HISTORY_LIMIT,
         max_activity_runs: int = 128,
         migrate_legacy: bool = True,
     ) -> None:
