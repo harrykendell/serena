@@ -23,10 +23,14 @@ from serena.tools import (
     FindSymbolTool,
     ReadFileTool,
     ReadMemoryTool,
+    RenameSymbolTool,
     ReplaceContentTool,
     ToolCallError,
     WriteMemoryTool,
 )
+from solidlsp.ls_config import LanguageServerId
+from solidlsp.ls_exceptions import SolidLSPException
+from solidlsp.ls_process import LanguageServerTerminatedException
 
 
 class _EmptyJobSource:
@@ -86,6 +90,118 @@ def test_project_tool_execution_access_contract() -> None:
     assert WriteMemoryTool.get_execution_access() is ExecutionAccess.WRITE
     assert ExecuteShellCommandTool.get_execution_access() is ExecutionAccess.WRITE
     assert ActivateProjectTool.get_execution_access() is ExecutionAccess.SESSION_CONTROL
+
+
+def test_lsp_termination_restarts_and_replays_read_once(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "session-a", "project_a")
+    tool = agent.get_tool(FindSymbolTool)
+    apply_calls = 0
+    restarted_languages: list[LanguageServerId] = []
+
+    def recovering_read(**kwargs: Any) -> str:
+        nonlocal apply_calls
+        del kwargs
+        apply_calls += 1
+        if apply_calls == 1:
+            raise SolidLSPException(
+                "language server stopped",
+                LanguageServerTerminatedException("terminated", LanguageServerId.PYTHON),
+            )
+        return "recovered"
+
+    monkeypatch.setattr(tool, "apply", recovering_read)
+    monkeypatch.setattr(
+        agent,
+        "get_language_server_manager_or_raise",
+        lambda: SimpleNamespace(restart_language_server=restarted_languages.append),
+    )
+
+    result = tool.apply_ex(
+        name_path_pattern="Example",
+        mcp_ctx=_mcp_context("session-a"),
+        catch_exceptions=False,
+    )
+
+    assert result == "recovered"
+    assert apply_calls == 2
+    assert restarted_languages == [LanguageServerId.PYTHON]
+
+
+def test_lsp_termination_restarts_but_does_not_replay_write(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "session-a", "project_a")
+    tool = agent.get_tool(RenameSymbolTool)
+    apply_calls = 0
+    restarted_languages: list[LanguageServerId] = []
+
+    def interrupted_write(**kwargs: Any) -> str:
+        nonlocal apply_calls
+        del kwargs
+        apply_calls += 1
+        raise SolidLSPException(
+            "language server stopped",
+            LanguageServerTerminatedException("terminated", LanguageServerId.PYTHON),
+        )
+
+    monkeypatch.setattr(tool, "apply", interrupted_write)
+    monkeypatch.setattr(
+        agent,
+        "get_language_server_manager_or_raise",
+        lambda: SimpleNamespace(restart_language_server=restarted_languages.append),
+    )
+
+    with pytest.raises(ToolCallError, match="Re-inspect the affected state"):
+        tool.apply_ex(
+            name_path="Example",
+            relative_path="example.py",
+            new_name="Renamed",
+            mcp_ctx=_mcp_context("session-a"),
+            catch_exceptions=False,
+        )
+
+    assert apply_calls == 1
+    assert restarted_languages == [LanguageServerId.PYTHON]
+
+
+def test_lsp_termination_replays_read_at_most_once(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "session-a", "project_a")
+    tool = agent.get_tool(FindSymbolTool)
+    apply_calls = 0
+    restarted_languages: list[LanguageServerId] = []
+
+    def repeatedly_failing_read(**kwargs: Any) -> str:
+        nonlocal apply_calls
+        del kwargs
+        apply_calls += 1
+        raise SolidLSPException(
+            "language server stopped",
+            LanguageServerTerminatedException("terminated", LanguageServerId.PYTHON),
+        )
+
+    monkeypatch.setattr(tool, "apply", repeatedly_failing_read)
+    monkeypatch.setattr(
+        agent,
+        "get_language_server_manager_or_raise",
+        lambda: SimpleNamespace(restart_language_server=restarted_languages.append),
+    )
+
+    with pytest.raises(ToolCallError, match="SolidLSPException"):
+        tool.apply_ex(
+            name_path_pattern="Example",
+            mcp_ctx=_mcp_context("session-a"),
+            catch_exceptions=False,
+        )
+
+    assert apply_calls == 2
+    assert restarted_languages == [LanguageServerId.PYTHON]
 
 
 def test_startup_project_sessions_share_serialization(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -379,6 +379,62 @@ class Tool(Component):
         """
         return {}
 
+    def _apply_with_lsp_recovery(self, apply_fn: Callable[..., Any], apply_kwargs: dict[str, Any]) -> Any:
+        """Applies one tool operation with side-effect-aware recovery from LSP termination.
+
+        Read operations are safe to replay once after restarting the affected language server.
+        Mutating operations are never replayed because their partial side effects may be unknown.
+        """
+        try:
+            return apply_fn(**apply_kwargs)
+        except SolidLSPException as error:
+            if not error.is_language_server_terminated():
+                raise
+
+            # recover the affected language server when its identity is available
+            affected_language = error.get_affected_language()
+            access = self.get_execution_access()
+            if affected_language is None:
+                if access is ExecutionAccess.WRITE:
+                    raise ToolCallError(
+                        f"Language server terminated while executing mutating tool '{self.get_name()}'. "
+                        "Serena did not replay the operation because it may have partially changed project state, and the affected "
+                        "language server could not be identified for automatic recovery. Re-inspect the affected state before "
+                        "attempting the edit again."
+                    ) from error
+                log.error("Language server terminated while executing read tool (%s), but the affected language is unknown.", error)
+                raise
+
+            try:
+                self.agent.get_language_server_manager_or_raise().restart_language_server(affected_language)
+            except Exception as recovery_error:
+                if access is ExecutionAccess.WRITE:
+                    raise ToolCallError(
+                        f"Language server '{affected_language.value}' terminated while executing mutating tool '{self.get_name()}'. "
+                        "Serena did not replay the operation because it may have partially changed project state. Automatic "
+                        f"language-server recovery also failed: {recovery_error}. Re-inspect the affected state before attempting "
+                        "the edit again."
+                    ) from recovery_error
+                raise
+
+            # replay only operations whose execution contract is read-only
+            if access is ExecutionAccess.READ:
+                log.error(
+                    "Language server %s terminated while executing read tool (%s). Restarted it and retrying the read once.",
+                    affected_language.value,
+                    error,
+                )
+                return apply_fn(**apply_kwargs)
+
+            if access is ExecutionAccess.WRITE:
+                raise ToolCallError(
+                    f"Language server '{affected_language.value}' terminated while executing mutating tool '{self.get_name()}'. "
+                    "Serena restarted the language server but did not replay the operation because it may have partially changed "
+                    "project state. Re-inspect the affected state before attempting the edit again."
+                ) from error
+
+            raise
+
     def apply_ex(
         self,
         log_call: bool = True,
@@ -434,25 +490,8 @@ class Tool(Component):
                 if self._is_session_aware:
                     apply_kwargs["session_id"] = session_id
 
-                # apply the actual tool
-                try:
-                    result = apply_fn(**apply_kwargs)
-                except SolidLSPException as e:
-                    if e.is_language_server_terminated():
-                        affected_language = e.get_affected_language()
-                        if affected_language is not None:
-                            log.error(
-                                f"Language server terminated while executing tool ({e}). Restarting the language server and retrying ..."
-                            )
-                            self.agent.get_language_server_manager_or_raise().restart_language_server(affected_language)
-                            result = apply_fn(**apply_kwargs)
-                        else:
-                            log.error(
-                                f"Language server terminated while executing tool ({e}), but affected language is unknown. Not retrying."
-                            )
-                            raise
-                    else:
-                        raise
+                # apply the actual tool with side-effect-aware language-server recovery
+                result = self._apply_with_lsp_recovery(apply_fn, apply_kwargs)
 
                 # record tool usage
                 self.agent.record_tool_usage(apply_kwargs, result, self)
