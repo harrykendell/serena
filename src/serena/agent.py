@@ -620,7 +620,7 @@ class SerenaAgent:
         :param web_dashboard_port: exact dashboard port to bind, or None to use the first available secondary dashboard port.
         """
         self._active_project: Project | None = None  # NOTE: field name used in __del__
-        self._default_project: Project | None = None
+        self._startup_project: Project | None = None
         self._session_id_context: ContextVar[str] = ContextVar(f"serena_session_{id(self)}", default="global")
         self._execution_project_context: ContextVar[tuple[bool, ProjectRuntime | None, Project | None]] = ContextVar(
             f"serena_execution_project_{id(self)}", default=(False, None, None)
@@ -740,6 +740,7 @@ class SerenaAgent:
         if project is not None:
             try:
                 self.activate_project_from_path_or_name(project, update_active_modes=False, update_active_tools=False)
+                self._startup_project = self._active_project
             except Exception as e:
                 log.error(f"Error activating project '{project}' at startup: {e}", exc_info=e)
                 self._project_activation_error = str(e)
@@ -1078,7 +1079,7 @@ class SerenaAgent:
         runtime = self._session_projects.get_runtime_for_session(session_id)
         if runtime is not None:
             return runtime.project
-        return self._default_project
+        return self._startup_project
 
     def _get_project_runtime(self, session_id: str | None = None) -> ProjectRuntime | None:
         """Returns the project runtime pinned to this execution, or the session's current runtime."""
@@ -1090,8 +1091,8 @@ class SerenaAgent:
         return self._session_projects.get_runtime_for_session(session_id)
 
     def get_default_project(self) -> Project | None:
-        """:return: the most recently selected project, independent of execution/session context"""
-        return self._default_project
+        """:return: the immutable project selected at process startup, if any"""
+        return self._startup_project
 
     def get_active_project(self) -> Project | None:
         """
@@ -1377,8 +1378,8 @@ class SerenaAgent:
         """Schedules a task on the executor owned by the current session's project runtime."""
         resolved_session_id = session_id or self._session_id_context.get()
         runtime = self._session_projects.get_runtime_for_session(resolved_session_id)
-        if runtime is None and resolved_session_id != "global" and self._default_project is not None:
-            default_project = self._default_project
+        if runtime is None and resolved_session_id != "global" and self._startup_project is not None:
+            default_project = self._startup_project
             default_executor = self._task_executor if default_project is self._active_project else None
             runtime, _, _ = self._session_projects.bind(
                 resolved_session_id,
@@ -1464,7 +1465,6 @@ class SerenaAgent:
                 project,
                 self._create_project_runtime,
             )
-            self._default_project = project
             if not binding_changed:
                 return False
 
@@ -1487,7 +1487,6 @@ class SerenaAgent:
             self._active_project.shutdown()
 
         self._active_project = project
-        self._default_project = project
         project.set_agent(self)
 
         if update_active_modes:
@@ -1735,7 +1734,7 @@ class SerenaAgent:
             log.info(f"Shutting down project '{project.project_name}' ...")
             project.shutdown(timeout=timeout)
         self._active_project = None
-        self._default_project = None
+        self._startup_project = None
 
     def shutdown(self) -> None:
         """

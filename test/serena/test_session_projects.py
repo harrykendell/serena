@@ -125,8 +125,39 @@ def test_startup_project_sessions_share_serialization(tmp_path: Path, monkeypatc
         agent.on_shutdown(timeout=5)
 
 
+def test_session_activation_does_not_change_startup_default(tmp_path: Path) -> None:
+    config = SerenaConfig(log_level=logging.ERROR, tool_timeout=30).with_headless_mode_overrides()
+    registered_projects: list[RegisteredProject] = []
+    for name in ("project_a", "project_b"):
+        root = tmp_path / name
+        root.mkdir()
+        project = Project(
+            project_root=str(root),
+            project_config=ProjectConfig(project_name=name, language_servers=[]),
+            serena_config=config,
+        )
+        registered_projects.append(RegisteredProject.from_project_instance(project))
+    config.projects = registered_projects
+    agent = SerenaAgent(project="project_a", serena_config=config)
+
+    try:
+        assert agent.get_default_project().project_name == "project_a"
+        assert agent.get_active_project_for_session("unbound-session").project_name == "project_a"
+
+        assert "project_b" in _activate(agent, "session-a", "project_b")
+
+        assert agent.get_active_project_for_session("session-a").project_name == "project_b"
+        assert agent.get_active_project_for_session("unbound-session").project_name == "project_a"
+        assert agent.get_default_project().project_name == "project_a"
+    finally:
+        agent.on_shutdown(timeout=5)
+
+
 def test_sessions_bind_projects_independently(multi_project_agent: tuple[SerenaAgent, dict[str, Path]]) -> None:
     agent, _ = multi_project_agent
+
+    assert agent.get_default_project() is None
+    assert agent.get_active_project_for_session("unbound-session") is None
 
     assert "project_a" in _activate(agent, "session-a", "project_a")
     assert "project_b" in _activate(agent, "session-b", "project_b")
@@ -135,7 +166,8 @@ def test_sessions_bind_projects_independently(multi_project_agent: tuple[SerenaA
     assert agent.get_active_project_for_session("session-a").project_name == "project_a"
     assert agent.get_active_project_for_session("session-b").project_name == "project_b"
     assert agent.get_active_project_for_session("session-c").project_name == "project_c"
-    assert agent.get_default_project().project_name == "project_c"
+    assert agent.get_active_project_for_session("unbound-session") is None
+    assert agent.get_default_project() is None
 
 
 def test_replace_content_works_without_language_server(multi_project_agent: tuple[SerenaAgent, dict[str, Path]]) -> None:
