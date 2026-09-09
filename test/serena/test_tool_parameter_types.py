@@ -1,14 +1,11 @@
 import logging
 
-import pytest
-
 from serena.config.serena_config import SerenaConfig
 from serena.mcp import SerenaMCPFactory
 from serena.tools.tools_base import ToolRegistry
 
 
-@pytest.mark.parametrize("context", ("chatgpt", "codex", "oaicompat-agent"))
-def test_all_tool_parameters_have_type(context):
+def test_all_tool_parameters_have_type():
     """
     For every tool exposed by Serena, ensure that the generated
     Open‑AI schema contains a ``type`` entry for each parameter.
@@ -16,7 +13,7 @@ def test_all_tool_parameters_have_type(context):
     cfg = SerenaConfig(log_level=logging.ERROR).with_headless_mode_overrides()
     registry = ToolRegistry()
     cfg.included_optional_tools = tuple(registry.get_tool_names_optional())
-    factory = SerenaMCPFactory(transport="stdio", context=context)
+    factory = SerenaMCPFactory(transport="stdio", context="chatgpt")
     # Initialize the agent so that the tools are available
     factory.agent = factory._create_serena_agent(cfg)
     tools = list(factory._iter_tools())

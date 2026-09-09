@@ -28,7 +28,7 @@ def _make_tool(tool_cls, project: Project):
 @pytest.fixture
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Project:
     monkeypatch.setenv("SERENA_HOME", str(tmp_path / ".serena-home"))
-    return Project.load(str(tmp_path), serena_config=SerenaConfig(gui_log_window=False, web_dashboard=False))
+    return Project.load(str(tmp_path), serena_config=SerenaConfig(web_dashboard=False))
 
 
 def _write_minimal_pdf(path: Path) -> None:

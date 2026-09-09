@@ -37,7 +37,6 @@ from serena.util.text_utils import GlobMatcher
 from serena.util.yaml import YamlCommentNormalisation, load_yaml, normalise_yaml_comments, save_yaml, transfer_yaml_comments
 from solidlsp.ls_config import LanguageServerId
 
-from ..analytics import RegisteredTokenCountEstimator
 from ..util.class_decorators import singleton
 from ..util.cli_util import ask_yes_no
 from ..util.dataclass import get_dataclass_default
@@ -798,12 +797,10 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
     # *** fields that are mapped directly to/from the configuration file (DO NOT RENAME) ***
 
     projects: list[RegisteredProject] = field(default_factory=list)
-    gui_log_window: bool = False
     log_level: int = logging.INFO
     trace_lsp_communication: bool = False
     web_dashboard: bool = True
     web_dashboard_open_on_launch: bool = True
-    web_dashboard_interface: str | None = None
     web_dashboard_listen_address: str = "127.0.0.1"
     web_dashboard_trusted_hosts: list[str] = field(default_factory=lambda: ["127.0.0.1", "localhost"])
     tool_timeout: float = DEFAULT_TOOL_TIMEOUT
@@ -814,14 +811,6 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
     language_server_idle_timeout: float = 900.0
     """Idle seconds after which lazily managed language servers are stopped and cached."""
 
-    token_count_estimator: str = RegisteredTokenCountEstimator.CHAR_COUNT.name
-    """Only relevant if `record_tool_usage` is True; the name of the token count estimator to use for tool usage statistics.
-    See the `RegisteredTokenCountEstimator` enum for available options.
-    
-    Note: some token estimators (like tiktoken) may require downloading data files
-    on the first run, which can take some time and require internet access. Others, like the Anthropic ones, may require an API key
-    and rate limits may apply.
-    """
     default_max_tool_answer_chars: int = 150_000
     """Used as the legacy character ceiling for tools with bounded answers."""
     default_max_tool_answer_tokens: int = 4_000
@@ -1040,6 +1029,12 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
                 instance.read_only_memory_patterns.append("global/.*")
             del loaded_commented_yaml["edit_global_memories"]
 
+        # remove obsolete standalone-client and analytics settings
+        for obsolete_field in ("gui_log_window", "web_dashboard_interface", "token_count_estimator"):
+            if obsolete_field in loaded_commented_yaml:
+                del loaded_commented_yaml[obsolete_field]
+                num_migrations += 1
+
         # re-save the configuration file if any migrations were performed
         if num_migrations > 0:
             log.info("Legacy configuration was migrated; re-saving configuration file")
@@ -1084,7 +1079,6 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
 
         :return: the instance with overrides applied for headless mode
         """
-        self.gui_log_window = False
         self.web_dashboard = False
         return self
 

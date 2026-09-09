@@ -19,7 +19,6 @@ def _make_project(
 ) -> Project:
     """Create a minimal Project pointing at project_root with the given activation settings."""
     serena_config = SerenaConfig(
-        gui_log_window=False,
         web_dashboard=False,
         trusted_project_path_patterns=["**"] if trusted else [],
     )

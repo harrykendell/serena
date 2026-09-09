@@ -232,18 +232,7 @@ class SerenaAgentContext(ToolInclusionDefinition, ToStringMixin):
     @classmethod
     def from_name(cls, name: str) -> Self:
         """Load a registered Serena context."""
-        legacy_name_mapping = {
-            "ide-assistant": "claude-code",
-        }
-        if name in legacy_name_mapping:
-            log.warning(
-                f"Context name '{name}' is deprecated and has been renamed to '{legacy_name_mapping[name]}'. "
-                f"Please update your configuration; refer to the configuration guide for more details: "
-                "https://oraios.github.io/serena/02-usage/050_configuration.html#contexts"
-            )
-            name = legacy_name_mapping[name]
-        context_path = cls.get_path(name)
-        return cls.from_yaml(context_path)
+        return cls.from_yaml(cls.get_path(name))
 
     @classmethod
     def load(cls, name_or_path: str | Path) -> Self:

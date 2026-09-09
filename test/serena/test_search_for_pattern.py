@@ -26,7 +26,7 @@ def test_search_for_pattern_snippet_stage(tmp_path):
         ]
     (tmp_path / "data.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    project = Project.load(str(tmp_path), serena_config=SerenaConfig(gui_log_window=False, web_dashboard=False))
+    project = Project.load(str(tmp_path), serena_config=SerenaConfig(web_dashboard=False))
     agent = MagicMock()
     agent.get_active_project_or_raise.return_value = project
     tool = SearchForPatternTool(agent)
@@ -56,7 +56,7 @@ def test_search_for_pattern_snippet_stage(tmp_path):
 def test_search_deduplicates_multiple_matches_on_one_source_line(tmp_path) -> None:
     (tmp_path / "data.txt").write_text("MATCHME and MATCHME on one line\n", encoding="utf-8")
 
-    project = Project.load(str(tmp_path), serena_config=SerenaConfig(gui_log_window=False, web_dashboard=False))
+    project = Project.load(str(tmp_path), serena_config=SerenaConfig(web_dashboard=False))
     agent = MagicMock()
     agent.get_active_project_or_raise.return_value = project
     tool = SearchForPatternTool(agent)
@@ -76,7 +76,7 @@ def test_search_overflow_keeps_exact_result_recoverable(tmp_path) -> None:
     lines = [f"MATCHME item number {i:04d} " + "payload " * 12 for i in range(60)]
     (tmp_path / "data.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    project = Project.load(str(tmp_path), serena_config=SerenaConfig(gui_log_window=False, web_dashboard=False))
+    project = Project.load(str(tmp_path), serena_config=SerenaConfig(web_dashboard=False))
     store = ToolOutputStore()
     agent = MagicMock()
     agent.get_active_project_or_raise.return_value = project

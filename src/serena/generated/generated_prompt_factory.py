@@ -39,9 +39,3 @@ class PromptFactory(PromptFactoryBase):
         tool_names: Any,
     ) -> str:
         return self._render_prompt("system_prompt", locals())
-
-    def get_cc_system_prompt_override_template_string(self) -> str:
-        return self.get_prompt_template_string("cc_system_prompt_override")
-
-    def create_cc_system_prompt_override(self) -> str:
-        return self._render_prompt("cc_system_prompt_override", locals())

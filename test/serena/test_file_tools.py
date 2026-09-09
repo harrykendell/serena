@@ -12,7 +12,7 @@ from solidlsp.ls_utils import TextUtils
 
 @pytest.fixture
 def read_file_tool(tmp_path: Path) -> ReadFileTool:
-    project = Project.load(str(tmp_path), serena_config=SerenaConfig(gui_log_window=False, web_dashboard=False))
+    project = Project.load(str(tmp_path), serena_config=SerenaConfig(web_dashboard=False))
     agent = MagicMock()
     agent.get_active_project_or_raise.return_value = project
     tool = ReadFileTool(agent)

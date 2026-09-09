@@ -21,7 +21,7 @@ SERENA_ICON_DIR = str(_resources_path / "icons")
 
 DEFAULT_SOURCE_FILE_ENCODING = "utf-8"
 """The default encoding assumed for project source files."""
-DEFAULT_CONTEXT = "desktop-app"
+DEFAULT_CONTEXT = "chatgpt"
 
 SERENA_FILE_ENCODING = "utf-8"
 """The encoding used for Serena's own files, such as configuration files and memories."""

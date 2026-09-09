@@ -481,9 +481,6 @@ class Tool(Component):
                 # apply the actual tool with side-effect-aware language-server recovery
                 result = self._apply_with_lsp_recovery(apply_fn, apply_kwargs)
 
-                # record tool usage
-                self.agent.record_tool_usage(apply_kwargs, result, self)
-
             except ToolCallError:
                 raise
             except Exception as e:

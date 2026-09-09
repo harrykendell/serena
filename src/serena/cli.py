@@ -18,7 +18,6 @@ from sensai.util.string import dict_string
 from tqdm import tqdm
 
 from serena import serena_version
-from serena.config.client_setup import client_setup_handlers
 from serena.config.context_mode import SerenaAgentContext, SerenaAgentMode
 from serena.config.serena_config import (
     ModeSelectionDefinition,
@@ -144,9 +143,7 @@ class TopLevelCommands(AutoRegisteringGroup):
     def __init__(self) -> None:
         super().__init__(
             name="serena",
-            help="Main serena CLI commands. "
-            "Note that you also have access to `serena-hooks` CLI commands which are kept under "
-            "that separate entrypoint for performance reasons, see `serena-hooks --help`. You can run `<command> --help` for more info on each command.",
+            help="Main Serena CLI commands. You can run `<command> --help` for more info on each command.",
         )
 
         # register --version / -V flag
@@ -179,46 +176,7 @@ class TopLevelCommands(AutoRegisteringGroup):
         click.echo(f"\nSerena version: {serena_version()}\n")
         serena_config = SerenaConfig.init()
         click.echo(f"Configuration file: {serena_config.config_file_path}")
-
-        # check for auto-configurable clients
-        applicable_setup_handlers = []
-        for setup_handler in client_setup_handlers:
-            if setup_handler.is_applicable():
-                applicable_setup_handlers.append(setup_handler)
-        if len(applicable_setup_handlers) > 0:
-            click.echo(
-                "\nAuto-configurable clients detected.\nApply the following commands to configure the Serena MCP server (in a default configuration):"
-            )
-            for setup_handler in applicable_setup_handlers:
-                click.echo(f"  serena setup {setup_handler.name}")
-
         click.echo("\nSerena has been initialised successfully.\n")
-
-    @staticmethod
-    @click.command(
-        "setup",
-        help="Set up Serena for use with a specific client by registering it as an MCP server.",
-        context_settings={"max_content_width": _MAX_CONTENT_WIDTH},
-    )
-    @click.argument(
-        "client",
-        type=click.Choice([h.name for h in client_setup_handlers]),
-    )
-    def setup(client: str) -> None:
-        # find the matching handler
-        handler = next(h for h in client_setup_handlers if h.name == client)
-
-        # check applicability
-        if not handler.is_applicable():
-            click.echo(f"\nCannot apply setup for client '{client}' (not found or not functional).\n")
-            raise SystemExit(1)
-
-        # apply the setup
-        if handler.apply():
-            click.echo(f"\nSerena has been successfully set up for {client}.\n")
-        else:
-            click.echo(f"\nFailed to set up Serena for {client}.\n")
-            raise SystemExit(1)
 
     @staticmethod
     @click.command("start-mcp-server", help="Starts the Serena MCP server.", context_settings={"max_content_width": _MAX_CONTENT_WIDTH})
@@ -286,13 +244,6 @@ class TopLevelCommands(AutoRegisteringGroup):
         help="Bind the web dashboard to this exact port. When omitted, dashboard instances start at port 24283.",
     )
     @click.option(
-        "--enable-gui-log-window",
-        type=bool,
-        is_flag=False,
-        default=None,
-        help="Enable the gui log window (currently only displays logs; overriding the setting in Serena's config).",
-    )
-    @click.option(
         "--open-web-dashboard",
         type=bool,
         is_flag=False,
@@ -327,7 +278,6 @@ class TopLevelCommands(AutoRegisteringGroup):
         enable_web_dashboard: bool | None,
         web_dashboard_port: int | None,
         open_web_dashboard: bool | None,
-        enable_gui_log_window: bool | None,
         log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] | None,
         trace_lsp_communication: bool | None,
         tool_timeout: float | None,
@@ -385,7 +335,6 @@ class TopLevelCommands(AutoRegisteringGroup):
             enable_web_dashboard=enable_web_dashboard,
             web_dashboard_port=web_dashboard_port,
             open_web_dashboard=open_web_dashboard,
-            enable_gui_log_window=enable_gui_log_window,
             log_level=log_level,
             trace_lsp_communication=trace_lsp_communication,
             tool_timeout=tool_timeout,
@@ -439,21 +388,6 @@ class TopLevelCommands(AutoRegisteringGroup):
             print(instr)
         else:
             print(f"{prefix}\n{instr}\n{postfix}")
-
-    @staticmethod
-    @click.command(
-        "dashboard-viewer",
-        help="Open the Serena dashboard viewer for a given URL.",
-        context_settings={"max_content_width": _MAX_CONTENT_WIDTH},
-    )
-    @click.argument("url", type=str)
-    @click.option("--width", type=int, default=1400, show_default=True, help="Window width.")
-    @click.option("--height", type=int, default=900, show_default=True, help="Window height.")
-    def dashboard_viewer(url: str, width: int, height: int) -> None:
-        from serena.dashboard import SerenaDashboardViewer
-
-        viewer = SerenaDashboardViewer(url, width=width, height=height)
-        viewer.run()
 
 
 class ModeCommands(AutoRegisteringGroup):
@@ -1444,15 +1378,6 @@ class PromptCommands(AutoRegisteringGroup):
     @click.argument("prompt_name", type=str)
     def print_prompt_template(prompt_name: str) -> None:
         click.echo(SerenaPromptFactory().get_prompt_template_string(prompt_name))
-
-    @staticmethod
-    @click.command(
-        "print-cc-system-prompt-override",
-        help="To be used specifically in Claude Code as value for `--system-prompt`",
-        context_settings={"max_content_width": _MAX_CONTENT_WIDTH},
-    )
-    def print_cc_system_prompt_override() -> None:
-        click.echo(SerenaPromptFactory().create_cc_system_prompt_override())
 
 
 _mode = ModeCommands()

@@ -19,7 +19,6 @@ classifiers = [
 dependencies = [
   "requests==2.33.0",
   "overrides==7.7.0",
-  "python-dotenv==1.2.2",
   "mcp==1.28.1",
   "flask==3.1.3", # bumped from 3.1.1 for CVE fix (also fixes werkzeug alert)
   "sensai-utils==1.5.0",
@@ -33,11 +32,7 @@ dependencies = [
   "docstring_parser==0.17.0",
   "joblib==1.5.1",
   "tqdm==4.67.1",
-  "tiktoken==0.12.0",
-  "anthropic==0.117.0",
   "beautifulsoup4==4.14.2",
-  "pywebview==6.2",
-  "pystray==0.19.5",
   "pygls==2.1.1", # used to implement an msl language server
   "lsprotocol==2025.0.0",
   # Transitive deps pinned for security (dependabot alerts).
@@ -49,7 +44,6 @@ dependencies = [
   "filelock==3.25.2",
   "cryptography==50.0.0",
   "regex==2026.2.28",
-  "pythonnet==3.1.0 ; sys_platform == 'win32'",
   "oslex==2.0.0",
 ]
 
@@ -63,7 +57,6 @@ explicit = true
 [project.scripts]
 serena = "serena.cli:top_level"
 serena-agent = "serena.cli:top_level"
-serena-hooks = "serena.hooks:hook_commands"
 orchestrator = "orchestrator.cli:main"
 
 [project.license]
@@ -97,8 +90,6 @@ dev = [
   "pyasn1==0.6.4",
   "PyJWT==2.12.0",
 ]
-agno = ["agno==2.6.6", "sqlalchemy==2.0.41"]  # agno bumped for session state overwrite CVE
-google = ["google-genai==1.27.0"]
 
 [project.urls]
 Homepage = "https://github.com/oraios/serena"
@@ -117,9 +108,7 @@ python-version = "3.11"
 python-platform = "all"
 
 [tool.ty.rules]
-# Mirror mypy's ignore_missing_imports=true: optional extras (e.g. agno, google-genai) and
-# platform-specific modules (e.g. AppKit on macOS) are not installed in the default dev environment,
-# so we do not want unresolvable imports to fail the type check.
+# Mirror mypy's ignore_missing_imports=true so optional language-server dependencies do not fail the type check.
 unresolved-import = "ignore"
 possibly-missing-submodule = "ignore"
 

@@ -56,7 +56,7 @@ def git_project(tmp_path: Path) -> tuple[Path, Project]:
     (tmp_path / "b.txt").write_text("b0\n")
     _run_git(tmp_path, "add", "a.txt", "b.txt")
     _run_git(tmp_path, "commit", "-m", "initial")
-    project = Project.load(str(tmp_path), serena_config=SerenaConfig(gui_log_window=False, web_dashboard=False))
+    project = Project.load(str(tmp_path), serena_config=SerenaConfig(web_dashboard=False))
     return tmp_path, project
 
 

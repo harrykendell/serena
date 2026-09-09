@@ -696,7 +696,6 @@ class SerenaMCPFactory:
         mode_selection_def: ModeSelectionDefinition | None = None,
         enable_web_dashboard: bool | None = None,
         web_dashboard_port: int | None = None,
-        enable_gui_log_window: bool | None = None,
         open_web_dashboard: bool | None = None,
         log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] | None = None,
         trace_lsp_communication: bool | None = None,
@@ -712,8 +711,6 @@ class SerenaMCPFactory:
         :param mode_selection_def: the mode selection definition to apply
         :param enable_web_dashboard: Whether to enable the web dashboard. If not specified, will take the value from the serena configuration.
         :param web_dashboard_port: Exact dashboard port to bind. If omitted, secondary dashboard instances start searching at port 24283.
-        :param enable_gui_log_window: Whether to enable the GUI log window. It currently does not work on macOS, and setting this to True will be ignored then.
-            If not specified, will take the value from the serena configuration.
         :param open_web_dashboard: Whether to open the web dashboard on launch.
             If not specified, will take the value from the serena configuration.
         :param log_level: Log level. If not specified, will take the value from the serena configuration.
@@ -728,8 +725,6 @@ class SerenaMCPFactory:
             # update configuration with the provided parameters
             if enable_web_dashboard is not None:
                 config.web_dashboard = enable_web_dashboard
-            if enable_gui_log_window is not None:
-                config.gui_log_window = enable_gui_log_window
             if open_web_dashboard is not None:
                 config.web_dashboard_open_on_launch = open_web_dashboard
             if log_level is not None:
@@ -781,7 +776,7 @@ class SerenaMCPFactory:
 
         :param mcp_server: the MCP server instance to configure
         """
-        openai_tool_compatible = self.context.name in ["chatgpt", "codex", "oaicompat-agent"]
+        openai_tool_compatible = self.context.name == "chatgpt"
         assert self.agent is not None
         context = self.agent.get_context()
         self._set_mcp_tools(mcp_server, openai_tool_compatible=openai_tool_compatible, structured_output=context.structured_tool_output)

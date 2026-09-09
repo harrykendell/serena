@@ -89,7 +89,6 @@ def test_custom_dashboard_serves_fork_specific_frontend_and_session_api(tmp_path
         memory_log_handler=log_handler,
         tool_names=[],
         agent=agent,
-        tool_usage_stats=None,
     )
     client = dashboard._app.test_client()
 
@@ -144,7 +143,6 @@ def test_custom_dashboard_can_name_retained_serena_conversation_before_first_too
         memory_log_handler=log_handler,
         tool_names=[],
         agent=_DashboardAgent(),
-        tool_usage_stats=None,
     )
     client = dashboard._app.test_client()
 
@@ -162,7 +160,6 @@ def test_dashboard_revalidates_unchanged_panel_overview_without_response_body(tm
         memory_log_handler=_DummyMemoryLogHandler(),
         tool_names=[],
         agent=_DashboardAgent(),
-        tool_usage_stats=None,
     )
     dashboard.set_serena_session_name("session-a", "Cached session")
     client = dashboard._app.test_client()
@@ -195,7 +192,6 @@ def test_dashboard_bootstraps_inactive_serena_panels_with_compact_history(tmp_pa
         memory_log_handler=_DummyMemoryLogHandler(),
         tool_names=[],
         agent=agent,
-        tool_usage_stats=None,
     )
     client = dashboard._app.test_client()
 
@@ -216,7 +212,6 @@ def test_dashboard_orders_serena_panels_newest_first(tmp_path: Path, monkeypatch
         memory_log_handler=_DummyMemoryLogHandler(),
         tool_names=[],
         agent=_DashboardAgent(),
-        tool_usage_stats=None,
     )
 
     dashboard.set_serena_session_name("session-a", "First session")
@@ -237,7 +232,6 @@ def test_dashboard_orders_orchestrator_panels_newest_first(tmp_path: Path, monke
         memory_log_handler=_DummyMemoryLogHandler(),
         tool_names=[],
         agent=_DashboardAgent(),
-        tool_usage_stats=None,
     )
 
     panels = dashboard._app.test_client().get("/dashboard/api/orchestrator").get_json()["panels"]
@@ -259,7 +253,6 @@ def test_custom_dashboard_shows_named_orchestrator_conversation_before_first_del
         memory_log_handler=_DummyMemoryLogHandler(),
         tool_names=[],
         agent=_DashboardAgent(),
-        tool_usage_stats=None,
     )
     overview = dashboard._app.test_client().get("/dashboard/api/orchestrator").get_json()
 
@@ -291,7 +284,6 @@ def test_retained_serena_panel_preserves_semantic_detail_and_scope(tmp_path: Pat
         memory_log_handler=_DummyMemoryLogHandler(),
         tool_names=[],
         agent=agent,
-        tool_usage_stats=None,
     )
     client = dashboard._app.test_client()
 
@@ -347,7 +339,6 @@ def test_retained_serena_panel_serves_rendered_media_instead_of_result_repr(tmp_
         memory_log_handler=_DummyMemoryLogHandler(),
         tool_names=[],
         agent=_DashboardAgent(),
-        tool_usage_stats=None,
     )
     client = restored_dashboard._app.test_client()
     overview = client.get("/dashboard/api/serena").get_json()
@@ -381,7 +372,6 @@ def test_custom_dashboard_uses_default_project_and_dynamic_languages() -> None:
         memory_log_handler=_DummyMemoryLogHandler(),
         tool_names=[],
         agent=_DashboardAgent(project),
-        tool_usage_stats=None,
     )
 
     session = dashboard._app.test_client().get("/dashboard/api/session").get_json()
@@ -414,7 +404,6 @@ def test_custom_dashboard_serves_live_execution_output_endpoint(tmp_path: Path, 
         memory_log_handler=_DummyMemoryLogHandler(),
         tool_names=[],
         agent=agent,
-        tool_usage_stats=None,
     )
     client = dashboard._app.test_client()
 
@@ -434,7 +423,6 @@ def test_memory_endpoint_reads_active_project_memory() -> None:
         memory_log_handler=_DummyMemoryLogHandler(),
         tool_names=[],
         agent=_DashboardAgent(project),
-        tool_usage_stats=None,
     )
 
     response = dashboard._app.test_client().get("/dashboard/api/memory?name=critical_info").get_json()
