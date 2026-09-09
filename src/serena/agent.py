@@ -31,12 +31,10 @@ from serena import serena_version
 from serena.analytics import RegisteredTokenCountEstimator, ToolUsageStats
 from serena.config.context_mode import SerenaAgentContext, SerenaAgentMode
 from serena.config.serena_config import (
-    LanguageBackend,
     ModeSelectionDefinition,
     ModeSelectionDefinitionWithAddedModes,
     ModeSelectionDefinitionWithBaseModes,
     NamedToolInclusionDefinition,
-    RegisteredProject,
     SerenaConfig,
     SerenaPaths,
     ToolInclusionDefinition,
@@ -51,7 +49,6 @@ from serena.execution import (
     reset_execution_id,
 )
 from serena.execution_store import ExecutionStore
-from serena.jetbrains import jetbrains_plugin_client
 from serena.ls_manager import LanguageServerManager
 from serena.memories.memory_manager import MemoryManager
 from serena.project import Project
@@ -654,14 +651,6 @@ class SerenaAgent:
         # obtain serena configuration using the decoupled factory function
         self.serena_config = serena_config or SerenaConfig.from_config_file()
 
-        # propagate configuration to other components
-        self.serena_config.propagate_settings()
-
-        # determine registered project to be activated (if any)
-        registered_project_to_activate: RegisteredProject | None = (
-            self.serena_config.get_registered_project(project, autoregister=True) if project is not None else None
-        )
-
         # adjust log level
         serena_log_level = self.serena_config.log_level
         if Logger.root.level != serena_log_level:
@@ -714,8 +703,8 @@ class SerenaAgent:
 
         # log fundamental information
         log.info(
-            f"Starting Serena server (version={self.version}, process id={os.getpid()}, parent process id={os.getppid()}; "
-            f"language backend={self.serena_config.language_backend.name}); Python version={platform.python_version()}, platform={platform.platform()}"
+            f"Starting Serena server (version={self.version}, process id={os.getpid()}, parent process id={os.getppid()}); "
+            f"Python version={platform.python_version()}, platform={platform.platform()}"
         )
         log.info("Configuration file: %s", self.serena_config.config_file_path)
         log.info("Available projects: {}".format(", ".join(self.serena_config.project_names)))
@@ -723,16 +712,8 @@ class SerenaAgent:
 
         self._check_shell_settings()
 
-        # determine the effective language backend for this session.
-        # If a startup project is provided and has a per-project override, use it; otherwise use the global config.
-        # Since we don't want to change the toolset after startup, the language backend cannot be changed within a running Serena session
-        self._language_backend = self.serena_config.determine_language_backend(
-            project_config=registered_project_to_activate.project_config if registered_project_to_activate is not None else None,
-            log_choice=True,
-        )
-
         # create the tool names mapping for prompts
-        self._prompt_tool_names_mapping = self._create_prompt_tool_names_mapping(self._language_backend)
+        self._prompt_tool_names_mapping = self._create_prompt_tool_names_mapping()
 
         # create the execution coordinator used when no session-scoped project runtime is bound.
         # Project runtimes get their own coordinators so unrelated projects remain independent.
@@ -820,7 +801,6 @@ class SerenaAgent:
             "os": platform.system(),
             "dashboard": int(self.serena_config.web_dashboard),
             "version": self.version,
-            "backend": self._language_backend.value,
             "context": self._context.name,
         }
         try:
@@ -842,7 +822,7 @@ class SerenaAgent:
            * dashboard availability/opening on launch
            * Serena config
            * the context (which is fixed for the session)
-           * the base modes (including background base modes like JetBrains mode)
+           * the base modes
            * the optional tools enabled by initial dynamic modes
            * single-project mode reductions (if applicable)
         """
@@ -908,9 +888,6 @@ class SerenaAgent:
             base_toolset = base_toolset.without_editing_tools()
         log.info(f"Number of exposed tools: {len(base_toolset)}")
         return base_toolset
-
-    def get_language_backend(self) -> LanguageBackend:
-        return self._language_backend
 
     def get_language_server_manager(self) -> LanguageServerManager | None:
         project = self.get_active_project()
@@ -1108,25 +1085,11 @@ class SerenaAgent:
         return self._active_modes
 
     @staticmethod
-    def _create_prompt_tool_names_mapping(language_backend: LanguageBackend) -> dict[str, str]:
-        """
-        Creates a mapping from tool names to new tool names, which take into consideration
-
-           * legacy tool names, where the name was changed and
-           * LSP tools which are functionally replaced by other tools due to the active language backend
-             (e.g. "find_symbol" being replaced by "jet_brains_find_symbol" in JetBrains mode).
-
-        The mapping is intended to be used for the generation of prompts, such that prompts can
-        refer to tool names as `{{ tool_names["find_symbol"] }}`, and the mapping will ensure that
-        the correct tool name is used in the prompt based on the active language backend.
-
-        :return: the mapping from tool names to new tool names
-        """
+    def _create_prompt_tool_names_mapping() -> dict[str, str]:
+        """Creates the prompt mapping for canonical and legacy tool names."""
         result = dict(ToolSet.LEGACY_TOOL_NAME_MAPPING)
-        class_replacements = language_backend.get_lsp_tool_class_replacements()
         for tool_class in ToolRegistry().get_all_tool_classes():
-            new_tool_class: type[Tool] = class_replacements.get(tool_class, tool_class)
-            result[tool_class.get_name_from_cls()] = new_tool_class.get_name_from_cls()
+            result[tool_class.get_name_from_cls()] = tool_class.get_name_from_cls()
         return result
 
     @staticmethod
@@ -1247,13 +1210,12 @@ class SerenaAgent:
                     msg = f"Created and activated a new project with name '{proj.project_name}' at {proj.project_root}.\n"
                 else:
                     msg = f"The project with name '{proj.project_name}' at {proj.project_root} is activated.\n"
-                if self._language_backend == LanguageBackend.LSP:
-                    language_servers_str = ", ".join([ls.value for ls in proj.project_config.language_servers]) or "none"
-                    auto_detection = "enabled" if proj.project_config.auto_detect_language_servers else "disabled"
-                    msg += (
-                        f"Configured language servers: {language_servers_str}; automatic detection: {auto_detection}. "
-                        "Language servers start lazily when semantic tools need them.\n"
-                    )
+                language_servers_str = ", ".join([ls.value for ls in proj.project_config.language_servers]) or "none"
+                auto_detection = "enabled" if proj.project_config.auto_detect_language_servers else "disabled"
+                msg += (
+                    f"Configured language servers: {language_servers_str}; automatic detection: {auto_detection}. "
+                    "Language servers start lazily when semantic tools need them.\n"
+                )
                 msg += f"File encoding: {proj.project_config.encoding}.\n"
 
                 if active_tools.contains_tool_class(ReadMemoryTool):
@@ -1279,11 +1241,7 @@ class SerenaAgent:
 
     def _create_active_modes_for_project(self, project: Project | None) -> ActiveModes:
         """Builds the effective mode selection for one project without mutating agent-global state."""
-        background_base_modes = []
-        if self._language_backend.is_jetbrains():
-            background_base_modes.append(SerenaAgentMode.from_name_internal("jetbrains"))
-
-        active_modes = ActiveModes(background_base_modes=background_base_modes)
+        active_modes = ActiveModes()
         active_modes.apply(self.serena_config)
         if project is not None:
             active_modes.apply(project.project_config)
@@ -1322,11 +1280,11 @@ class SerenaAgent:
         )
 
     def _start_project_runtime_initialization(self, runtime: ProjectRuntime) -> None:
-        """Starts one runtime's activation command and language backend initialisation exactly once."""
+        """Starts one runtime's activation command and language-server initialisation exactly once."""
 
         def initialize() -> None:
             self._run_project_activation_command(runtime.project)
-            self._init_project_language_backend(runtime.project)
+            self._init_project_language_servers(runtime.project)
 
         runtime.readiness.start(
             initialize,
@@ -1485,12 +1443,6 @@ class SerenaAgent:
         """
         self._config_changed_callbacks.append(callback)
 
-    def is_using_language_server(self) -> bool:
-        """
-        :return: whether this agent uses language server-based code analysis
-        """
-        return self._language_backend == LanguageBackend.LSP
-
     def _activate_project(self, project: Project, update_active_modes: bool = True, update_active_tools: bool = True) -> bool:
         """
         :return: True if the project was newly activated for the current session, False if it was already active
@@ -1501,15 +1453,6 @@ class SerenaAgent:
             return False
 
         log.info(f"Activating {project.project_name} at {project.project_root} for session {session_id}")
-
-        project_backend = project.project_config.language_backend
-        if project_backend is not None and project_backend != self._language_backend:
-            raise ValueError(
-                f"Cannot activate project '{project.project_name}': it requires the {project_backend.value} backend, "
-                f"but this session was initialized with {self._language_backend.value}. "
-                f"Workarounds: (1) Use project activation at startup via the --project flag, "
-                f"(2) Configure one MCP server per backend in your client."
-            )
 
         # bind non-global MCP sessions to a cached runtime and initialise that runtime once
         if session_id != "global":
@@ -1555,7 +1498,7 @@ class SerenaAgent:
 
         def initialize() -> None:
             self._run_project_activation_command(project)
-            self._init_project_language_backend(project)
+            self._init_project_language_servers(project)
 
         self._global_readiness.start(
             initialize,
@@ -1616,30 +1559,10 @@ class SerenaAgent:
         except Exception:
             log.exception(f"Unexpected error running activation_command for project '{project.project_name}'")
 
-    def _init_project_language_backend(self, project: Project) -> None:
-        """Initialises language-backend services owned by ``project``."""
-        if self.get_language_backend().is_lsp():
-            with LogTime("Language server initialization", logger=log):
-                project.create_language_server_manager()
-        elif self.get_language_backend().is_jetbrains():
-            try:
-                client = jetbrains_plugin_client.JetBrainsPluginClient.from_project(project, log_warning=False)
-                log.info("Found Serena JetBrains Plugin server: %s", client)
-            except jetbrains_plugin_client.ServerNotFoundError:
-                log.info("Serena JetBrains Plugin server not found for project %s", project.project_name)
-                if self.serena_config.jetbrains_launch_command:
-                    cmd = subprocess_util.convert_shell_cmd([self.serena_config.jetbrains_launch_command, project.project_root])
-                    log.info("Launching IDE with command: %s", cmd)
-                    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
-                    stdout, stderr = p.communicate()
-                    if p.returncode != 0:
-                        log.error(f"Failed to launch JetBrains IDE: {stderr.decode('utf-8')}")
-
-    def _init_active_project_language_backend(self) -> None:
-        """Initialises the active project's language backend."""
-        project = self.get_active_project()
-        assert project is not None
-        self._init_project_language_backend(project)
+    def _init_project_language_servers(self, project: Project) -> None:
+        """Initialises language-server services owned by ``project``."""
+        with LogTime("Language server initialization", logger=log):
+            project.create_language_server_manager()
 
     def activate_project_from_path_or_name(
         self, project_root_or_name: str, update_active_modes: bool = True, update_active_tools: bool = True
@@ -1699,11 +1622,7 @@ class SerenaAgent:
             result_str += f"Active project: {active_project.project_name}\n"
         else:
             result_str += "No active project\n"
-        result_str += f"Language backend: {self._language_backend.value}"
-        if active_project is not None and active_project.project_config.language_backend is not None:
-            result_str += " (project override)"
-        result_str += f" (global default: {self.serena_config.language_backend.value})\n"
-        if self._language_backend.is_lsp() and active_project is not None:
+        if active_project is not None:
             result_str += f"Language server status: {active_project.get_language_server_manager_status()}\n"
         result_str += "Available projects:\n" + "\n".join(list(self.serena_config.project_names)) + "\n"
         result_str += f"Active context: {self._context.name}\n"

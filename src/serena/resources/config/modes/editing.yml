@@ -4,7 +4,7 @@ prompt: |
 
   **Refactoring tools**
   For operations on existing symbols, prefer the dedicated refactoring tools over hand-edits:
-  `{{ tool_names['rename_symbol'] }}` and `{{ tool_names['safe_delete_symbol'] }}`{% if 'jet_brains_move' in available_tools %}, plus `jet_brains_move` and `jet_brains_inline_symbol`{% endif %} —
+  `{{ tool_names['rename_symbol'] }}` and `{{ tool_names['safe_delete_symbol'] }}` —
   they are reference-aware and update or check all usages atomically. When such a tool returns success, the
   refactoring is already complete and consistent across all declarations, references, overrides and imports —
   trust it: do not re-read the changed files or re-run the build / test suite just to confirm the refactor

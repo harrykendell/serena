@@ -25,12 +25,6 @@ Given your preferred method of running Serena, you can start the MCP server usin
 Note that no matter how you run the MCP server, Serena will, by default, start a web-based dashboard on localhost that will allow you to inspect
 the server's operations, logs, and configuration.
 
-:::{tip}
-By default, Serena will use language servers for code understanding and analysis.    
-With the [Serena JetBrains Plugin](025_jetbrains_plugin), we recently introduced a powerful alternative,
-which has several advantages over the language server-based approach.
-:::
-
 ### Standard I/O Mode
 
 The typical usage involves the client (e.g. Claude Code, Codex or Cursor) running
@@ -97,7 +91,6 @@ Some useful options include:
     to the worktree itself rather than the ancestor project.
     This option is intended for CLI-based agents like Claude Code, Gemini and Codex, which are typically started from within the project directory
     and which do not change directories during their operation.
-  * `--language-backend JetBrains`: use the Serena JetBrains Plugin as the language backend (overriding the default backend configured in the central configuration)
   * `--context <context>`: specify the operation [context](contexts) in which Serena shall operate
   * `--mode <mode>`: specify one or more [modes](modes) to enable (can be passed several times)
   * `--open-web-dashboard <true|false>`: whether to open the web dashboard on startup (enabled by default)

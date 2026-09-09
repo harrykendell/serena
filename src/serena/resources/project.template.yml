@@ -34,7 +34,6 @@ project_name: "project_name"
 #   See here for details: https://oraios.github.io/serena/01-about/020_programming-languages.html#language-servers
 # When using multiple language servers, the first language server that supports a given file will be used for that file.
 # The first language server is the default language and the respective language server will be used as a fallback.
-# Note that when using the JetBrains backend, language servers are not used and this list is correspondingly ignored.
 language_servers: ["python"]
 
 # whether Serena should automatically detect additional applicable language servers for this project.
@@ -46,7 +45,7 @@ auto_detect_language_servers: true
 # For a list of possible encodings, see https://docs.python.org/3.11/library/codecs.html#standard-encodings
 encoding: "utf-8"
 
-# optional shell command to run before the language backend (LSP or JetBrains) is initialised.
+# optional shell command to run before language-server services are initialised.
 # the command runs in the project root directory and is only executed if the project is trusted
 # (see trusted_project_path_patterns in the global configuration).
 # serena waits for the command to exit: a non-zero exit code is logged as an error but does not
@@ -63,13 +62,6 @@ activation_command_timeout: 180
 # Possible values: unset (use global setting), "lf", "crlf", or "native" (platform default)
 # This does not affect Serena's own files (e.g. memories and configuration files), which always use native line endings.
 line_ending:
-
-# The language backend to use for this project.
-# If not set, the global setting from serena_config.yml is used.
-# Valid values: LSP, JetBrains
-# Note: the backend is fixed at startup. If a project with a different backend
-# is activated post-init, an error will be returned.
-language_backend:
 
 # whether to use project's .gitignore files to ignore files
 ignore_all_files_in_gitignore: true

@@ -2,7 +2,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from serena.jetbrains.jetbrains_types import SymbolDTO, SymbolDTOKey
 from serena.project import Project
 from serena.symbol import LanguageServerSymbol, LanguageServerSymbolRetriever, NamePathComponent, NamePathMatcher
 from test.solidlsp.conftest import PYTHON_BACKEND_LANGUAGES
@@ -259,9 +258,6 @@ class TestSymbolDictTypes:
 
     def test_ls_symbol_dict_type(self):
         self.check_key_type(LanguageServerSymbol.OutputDict, LanguageServerSymbol.OutputDictKey)
-
-    def test_jb_symbol_dict_type(self):
-        self.check_key_type(SymbolDTO, SymbolDTOKey)
 
 
 def _make_mock_symbols(count: int, *, relative_path: str = "test_repo/services.py") -> list[MagicMock]:

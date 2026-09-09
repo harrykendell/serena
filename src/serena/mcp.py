@@ -31,7 +31,7 @@ from serena.agent import (
     SerenaAgent,
 )
 from serena.config.context_mode import SerenaAgentContext
-from serena.config.serena_config import LanguageBackend, ModeSelectionDefinition, SerenaConfig
+from serena.config.serena_config import ModeSelectionDefinition, SerenaConfig
 from serena.constants import DEFAULT_CONTEXT, SERENA_LOG_FORMAT
 from serena.execution import ExecutionAccess, bind_execution_id, get_current_execution_id, reset_execution_id
 from serena.session import get_mcp_session_id
@@ -694,7 +694,6 @@ class SerenaMCPFactory:
         port: int = 8000,
         streamable_http_path: str = "/mcp",
         mode_selection_def: ModeSelectionDefinition | None = None,
-        language_backend: LanguageBackend | None = None,
         enable_web_dashboard: bool | None = None,
         web_dashboard_port: int | None = None,
         enable_gui_log_window: bool | None = None,
@@ -711,7 +710,6 @@ class SerenaMCPFactory:
         :param port: The port to bind to
         :param streamable_http_path: Streamable HTTP endpoint path exposed by the server.
         :param mode_selection_def: the mode selection definition to apply
-        :param language_backend: the language backend to use, overriding the configuration setting.
         :param enable_web_dashboard: Whether to enable the web dashboard. If not specified, will take the value from the serena configuration.
         :param web_dashboard_port: Exact dashboard port to bind. If omitted, secondary dashboard instances start searching at port 24283.
         :param enable_gui_log_window: Whether to enable the GUI log window. It currently does not work on macOS, and setting this to True will be ignored then.
@@ -741,9 +739,6 @@ class SerenaMCPFactory:
                 config.trace_lsp_communication = trace_lsp_communication
             if tool_timeout is not None:
                 config.tool_timeout = tool_timeout
-            if language_backend is not None:
-                config.language_backend = language_backend
-
             self.agent = self._create_serena_agent(
                 config,
                 modes=mode_selection_def,

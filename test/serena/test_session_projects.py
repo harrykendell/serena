@@ -303,7 +303,7 @@ def test_new_runtime_initializes_once_before_first_project_tool(
         init_entered.set()
         assert release_init.wait(timeout=5)
 
-    monkeypatch.setattr(agent, "_init_project_language_backend", blocking_init)
+    monkeypatch.setattr(agent, "_init_project_language_servers", blocking_init)
     _activate(agent, "session-a", "project_a")
     assert init_entered.wait(timeout=5)
     _activate(agent, "session-b", "project_a")
@@ -348,7 +348,7 @@ def test_project_runtime_initialization_is_independent_across_projects(
         elif project.project_name == "project_b":
             project_b_initialized.set()
 
-    monkeypatch.setattr(agent, "_init_project_language_backend", controlled_init)
+    monkeypatch.setattr(agent, "_init_project_language_servers", controlled_init)
     _activate(agent, "session-a", "project_a")
     assert project_a_init_entered.wait(timeout=5)
 
@@ -384,7 +384,7 @@ def test_runtime_initialization_failure_is_shared_by_bound_sessions(
         init_failed.set()
         raise RuntimeError("runtime initialization failed")
 
-    monkeypatch.setattr(agent, "_init_project_language_backend", failing_init)
+    monkeypatch.setattr(agent, "_init_project_language_servers", failing_init)
     _activate(agent, "session-a", "project_a")
     assert init_entered.wait(timeout=5)
     _activate(agent, "session-b", "project_a")

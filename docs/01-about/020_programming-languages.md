@@ -7,13 +7,7 @@ making use of an IDE's capabilities would.
 Serena can efficiently find the right context and do the right thing even in very large and
 complex projects!
 
-There are two alternative technologies powering these capabilities:
-
-* **Language servers** implementing the language server Protocol (LSP) — the free/open-source alternative.
-* **The Serena JetBrains Plugin**, which leverages the powerful code analysis and editing
-  capabilities of your JetBrains IDE.
-
-See the [Features](025_features) section for a detailed comparison of the capabilities provided by the JetBrains Plugin vs. language servers.
+These capabilities are powered by language servers implementing the Language Server Protocol (LSP).
 
 (language-servers)=
 ## Language Servers
@@ -189,23 +183,3 @@ Some languages require additional installations or setup steps, as noted.
 
 Support for further languages can easily be added by providing a shallow adapter for a new language server implementation,
 see Serena's [memory on that](https://github.com/oraios/serena/blob/main/.serena/memories/adding_new_language_support_guide.md).
-
-## The Serena JetBrains Plugin
-
-The [Serena JetBrains Plugin](https://plugins.jetbrains.com/plugin/28946-serena/) leverages the powerful code analysis capabilities of JetBrains IDEs. 
-The plugin naturally supports all programming languages and frameworks that are supported by JetBrains IDEs.
-
-When using the plugin, Serena connects to an instance of your JetBrains IDE via the plugin. For users who already
-work in a JetBrains IDE, this means Serena seamlessly integrates with the IDE instance you typically have open anyway,
-requiring no additional setup or configuration beyond the plugin itself.
-
-* See the [JetBrains Plugin documentation](../02-usage/025_jetbrains_plugin) for a high-level overview of its benefits and usage details.
-* See the [Features](025_features) section for a detailed comparison of the capabilities provided by the JetBrains Plugin vs. language servers.
-
-```{raw} html
-<p>
-<a href="https://plugins.jetbrains.com/plugin/28946-serena/">
-<img style="background-color:transparent;" src="../_static/images/jetbrains-marketplace-button.png">
-</a>
-</p>
-```

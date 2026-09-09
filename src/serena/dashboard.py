@@ -70,7 +70,6 @@ class ResponseConfigOverview(BaseModel):
     available_modes: list[dict[str, str | bool]]
     available_contexts: list[dict[str, str | bool]]
     available_memories: list[str] | None
-    jetbrains_mode: bool
     languages: list[str]
     encoding: str | None
     current_client: str | None
@@ -656,7 +655,6 @@ class SerenaDashboardAPI:
             available_modes=available_modes,
             available_contexts=available_contexts,
             available_memories=available_memories,
-            jetbrains_mode=self._agent.get_language_backend().is_jetbrains(),
             languages=languages,
             encoding=encoding,
             current_client=Tool.get_last_tool_call_client_str(),

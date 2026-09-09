@@ -33,7 +33,6 @@ project_name: "serena"
 #   See here for details: https://oraios.github.io/serena/01-about/020_programming-languages.html#language-servers
 # When using multiple language servers, the first language server that supports a given file will be used for that file.
 # The first language server is the default language and the respective language server will be used as a fallback.
-# Note that when using the JetBrains backend, language servers are not used and this list is correspondingly ignored.
 language_servers: ["python", "typescript", "html", "scss", "yaml"]
 auto_detect_language_servers: true
 
@@ -98,13 +97,6 @@ fixed_tools: []
 # If null or missing, use the setting from the global configuration.
 symbol_info_budget:
 
-# The language backend to use for this project.
-# If not set, the global setting from serena_config.yml is used.
-# Valid values: LSP, JetBrains
-# Note: the backend is fixed at startup. If a project with a different backend
-# is activated post-init, an error will be returned.
-language_backend:
-
 # list of regex patterns which, when matched, mark a memory entry as read‑only.
 # Extends the list from the global configuration, merging the two lists.
 read_only_memory_patterns: []
@@ -133,7 +125,7 @@ ls_specific_settings: {}
 # See https://oraios.github.io/serena/02-usage/050_configuration.html#modes
 added_modes:
 
-# optional shell command to run before the language backend (LSP or JetBrains) is initialised.
+# optional shell command to run before language-server services are initialised.
 # the command runs in the project root directory and is only executed if the project is trusted
 # (see trusted_project_path_patterns in the global configuration).
 # serena waits for the command to exit: a non-zero exit code is logged as an error but does not

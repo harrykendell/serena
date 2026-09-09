@@ -12,12 +12,10 @@ from typing import Any, Generic, Literal, NotRequired, Self, TypedDict, TypeVar
 
 from sensai.util.string import ToStringMixin
 
-import serena.jetbrains.jetbrains_types as jb
 from solidlsp import SolidLanguageServer, ls_types
 from solidlsp.ls import LSPFileBuffer
 from solidlsp.ls import ReferenceInSymbol as LSPReferenceInSymbol
 from solidlsp.ls_types import Position, SymbolKind, UnifiedSymbolInformation
-from solidlsp.ls_utils import TextUtils
 
 from .ls_manager import LanguageServerManager
 from .project import Project
@@ -1148,82 +1146,6 @@ class LanguageServerSymbolRetriever:
         return {k: [LanguageServerSymbol(us) for us in v] for k, v in path_to_unified_symbols.items()}
 
 
-class JetBrainsSymbol(Symbol):
-    def __init__(self, symbol_dict: jb.SymbolDTO, project: Project) -> None:
-        """
-        :param symbol_dict: dictionary as returned by the JetBrains plugin client.
-        """
-        self._project = project
-        self._dict = symbol_dict
-        self._cached_file_content: str | None = None
-        self._cached_body_start_position: PositionInFile | None = None
-        self._cached_body_end_position: PositionInFile | None = None
-        self._cached_body = symbol_dict.get("body")
-
-    def _tostring_includes(self) -> list[str]:
-        return []
-
-    def _tostring_additional_entries(self) -> dict[str, Any]:
-        return dict(name_path=self.get_name_path(), relative_path=self.get_relative_path(), type=self._dict["type"])
-
-    def get_name_path(self) -> str:
-        return self._dict["name_path"]
-
-    def get_relative_path(self) -> str:
-        return self._dict["relative_path"]
-
-    def get_file_content(self) -> str:
-        if self._cached_file_content is None:
-            path = os.path.join(self._project.project_root, self.get_relative_path())
-            with open(path, encoding=self._project.project_config.encoding) as f:
-                self._cached_file_content = f.read()
-        return self._cached_file_content
-
-    def is_position_in_file_available(self) -> bool:
-        return "text_range" in self._dict
-
-    def get_body_start_position(self) -> PositionInFile | None:
-        if not self.is_position_in_file_available():
-            return None
-        if self._cached_body_start_position is None:
-            pos = self._dict["text_range"]["start_pos"]
-            line, col = pos["line"], pos["col"]
-            self._cached_body_start_position = PositionInFile(line=line, col=col)
-        return self._cached_body_start_position
-
-    def get_body_end_position(self) -> PositionInFile | None:
-        if not self.is_position_in_file_available():
-            return None
-        if self._cached_body_end_position is None:
-            pos = self._dict["text_range"]["end_pos"]
-            line, col = pos["line"], pos["col"]
-            self._cached_body_end_position = PositionInFile(line=line, col=col)
-        return self._cached_body_end_position
-
-    @property
-    def body(self) -> str | None:
-        if self._cached_body is not None:
-            return self._cached_body
-        start_position = self.get_body_start_position()
-        if start_position is None:
-            return None
-        end_position = self.get_body_end_position()
-        assert end_position is not None, "If start position is available, end position should also be available. Symbol: {self}"
-        file_content = self.get_file_content()
-        self._cached_body = TextUtils.get_text_in_range(
-            file_content, start_position.line, start_position.col, end_position.line, end_position.col
-        )
-        return self._cached_body
-
-    @property
-    def name(self) -> str:
-        return self._dict["name_path"].split("/")[-1]
-
-    def is_neighbouring_definition_separated_by_empty_line(self) -> bool:
-        # NOTE: Symbol types cannot really be differentiated, because types are not handled in a language-agnostic way.
-        return False
-
-
 TSymbolDict = TypeVar("TSymbolDict")
 GroupedSymbolDict = dict[str, list[dict] | dict[str, dict]]
 
@@ -1352,32 +1274,3 @@ class LanguageServerSymbolDictGrouper(SymbolDictGrouper[LanguageServerSymbol.Out
         collapse_singleton: bool = False,
     ) -> None:
         super().__init__(LanguageServerSymbol.OutputDict, "children", group_keys, group_children_keys, collapse_singleton)
-
-
-class JetBrainsSymbolDictGrouper(SymbolDictGrouper[jb.SymbolDTO]):
-    def __init__(
-        self,
-        group_keys: list[jb.SymbolDTOKey],
-        group_children_keys: list[jb.SymbolDTOKey],
-        collapse_singleton: bool = False,
-        map_name_path_to_name: bool = False,
-    ) -> None:
-        """
-        :param group_keys: keys to group main symbols by
-        :param group_children_keys: keys to group child symbols by
-        :param collapse_singleton: whether to collapse singleton symbol dictionaries
-        :param map_name_path_to_name: whether to transform the "name_path" key of child symbols to the bare "name"
-        """
-        super().__init__(jb.SymbolDTO, "children", group_keys, group_children_keys, collapse_singleton)
-        self._map_name_path_to_name = map_name_path_to_name
-
-    def _transform_item(self, item: dict, is_child: bool) -> dict:
-        if self._map_name_path_to_name and is_child:
-            # {"name_path: "Class/myMethod"} -> {"name: "myMethod"}
-            new_item = dict(item)
-            if "name_path" in item:
-                name_path = new_item.pop("name_path")
-                new_item["name"] = name_path.split("/")[-1]
-            return super()._transform_item(new_item, is_child)
-        else:
-            return super()._transform_item(item, is_child)

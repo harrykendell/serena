@@ -23,8 +23,6 @@ The global configuration file allows you to change general settings and defaults
 ### Settings
 
 Some of the configurable settings include:
-  * the language backend to use by default (i.e., the JetBrains plugin or language servers);
-    this can also be [overridden per project](per-project-language-backend)
   * UI settings affecting the [Serena Dashboard and GUI tool](060_dashboard.md)
   * the set of tools to enable/disable by default
   * the set of [modes](modes) to use by default
@@ -176,7 +174,7 @@ The following variables can be used in all of the above templates:
 |---------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `available_tools`   | the list of names of the tools that are currently exposed to the LLM. Use it to include content conditionally, e.g. `{% if 'replace_content' in available_tools %}…{% endif %}`.                                                                                                                                                                           |
 | `available_markers` | the list of names of the tool markers (tool categories, e.g. `ToolMarkerSymbolicRead`) for which at least one tool is exposed; useful for conditioning on entire groups of tools.                                                                                                                                                                          |
-| `tool_names`        | a mapping from canonical tool names to effective tool names, which accounts for legacy tool renames as well as for tools being functionally replaced due to the active language backend (e.g. `find_symbol` being replaced by `jet_brains_find_symbol` when the JetBrains backend is active). Prefer `{{ tool_names['find_symbol'] }}` over hard-coded names. |
+| `tool_names`        | a mapping from canonical tool names to effective tool names, including legacy tool renames. Prefer `{{ tool_names['find_symbol'] }}` over hard-coded names. |
 
 Context, mode and project prompts (but not Serena's system prompt) additionally support the following function:
 
@@ -1323,7 +1321,7 @@ It is advisable to use the default prompt as a starting point and modify it to s
 ### Usage Reporting
 
 On startup, Serena reports anonymous usage data to help us understand Serena usage.
-Specifically, we collect the Serena version, the operating system & language backend being used as well as the dashboard enabled status.
+Specifically, we collect the Serena version, operating system and dashboard enabled status.
 No personally identifiable information or project-specific information is collected.
 
 If you want to opt out of usage reporting, set the environment variable `SERENA_USAGE_REPORTING` to `false`.

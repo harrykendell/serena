@@ -6,7 +6,7 @@ Serena is an MCP-based "IDE for coding agents": semantic code retrieval/editing/
 
 - `src/serena/` — agent, MCP server, tools, project/config layer
   - `agent.py`, `mcp.py`, `cli.py`, `hooks.py` — entrypoints/wiring
-  - `tools/` — tool implementations (memory_tools, symbol_tools, file_tools, workflow_tools, config_tools, cmd_tools, jetbrains_tools)
+  - `tools/` — tool implementations (memory_tools, symbol_tools, file_tools, workflow_tools, config_tools, cmd_tools)
   - `tools/tools_base.py` — base classes for all tools
   - `config/` — `serena_config.py`, `context_mode.py`, `client_setup.py`
   - `resources/config/contexts/*.yml`, `resources/config/modes/*.yml` — context/mode definitions

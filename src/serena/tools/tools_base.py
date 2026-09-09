@@ -13,7 +13,6 @@ from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata, func_metada
 from sensai.util import logging
 from sensai.util.string import dict_string
 
-from serena.config.serena_config import LanguageBackend
 from serena.execution import ExecutionAccess
 from serena.memories.memory_manager import MemoryManager
 from serena.project import Project
@@ -55,7 +54,6 @@ class Component(ABC):
     def create_language_server_symbol_retriever(self) -> "LanguageServerSymbolRetriever":
         from serena.symbol import LanguageServerSymbolRetriever
 
-        assert self.agent.get_language_backend().is_lsp(), "Language server symbol retriever can only be created for LSP language backend"
         return LanguageServerSymbolRetriever(self.project)
 
     @property
@@ -63,21 +61,11 @@ class Component(ABC):
         return self.agent.get_active_project_or_raise()
 
     def create_code_editor(self) -> "CodeEditor":
-        from ..code_editor import JetBrainsCodeEditor
-
-        match self.agent.get_language_backend():
-            case LanguageBackend.LSP:
-                return self.create_ls_code_editor()
-            case LanguageBackend.JETBRAINS:
-                return JetBrainsCodeEditor(project=self.project)
-            case _:
-                raise ValueError
+        return self.create_ls_code_editor()
 
     def create_ls_code_editor(self) -> "LanguageServerCodeEditor":
         from ..code_editor import LanguageServerCodeEditor
 
-        if not self.agent.is_using_language_server():
-            raise Exception("Cannot create LanguageServerCodeEditor; agent is not in language server mode.")
         return LanguageServerCodeEditor(self.create_language_server_symbol_retriever())
 
 
@@ -579,7 +567,7 @@ class EditingToolWithDiagnostics(Tool, ToolMarkerCanEdit):
     class DiagnosticsContext:
         def __init__(self, tool: "EditingToolWithDiagnostics", *edited_relative_paths: str) -> None:
             self._tool = tool
-            self._is_diagnostics_enabled = tool.ENABLE_DIAGNOSTICS and tool.agent.is_using_language_server()
+            self._is_diagnostics_enabled = tool.ENABLE_DIAGNOSTICS
             self._edited_files = [EditedFilePath(path, path) for path in edited_relative_paths]
             self._before_edit_diagnostics_snapshot: PublishedDiagnosticsSnapshot | None = None
             self._symbol_retriever: Optional["LanguageServerSymbolRetriever"] | None = None

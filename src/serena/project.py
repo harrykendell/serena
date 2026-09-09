@@ -10,7 +10,6 @@ from sensai.util.logging import LogTime
 from sensai.util.string import TextBuilder, ToStringMixin
 
 from serena.config.serena_config import (
-    LanguageBackend,
     ProjectConfig,
     ProjectConfigAutoGenerationMode,
     SerenaConfig,
@@ -125,16 +124,6 @@ class Project(ToStringMixin):
     def project_name(self) -> str:
         return self.project_config.project_name
 
-    @property
-    def language_backend(self) -> LanguageBackend:
-        # The backend configuration is fundamentally owned by the agent, so it takes
-        # precedence. (Note: The agent does not necessary honour the project's choice,
-        # as it may be invalid.)
-        if self._agent is not None:
-            return self._agent.get_language_backend()
-        else:
-            return self.serena_config.determine_language_backend(self.project_config)
-
     @classmethod
     def load(
         cls,
@@ -234,20 +223,16 @@ class Project(ToStringMixin):
             log.debug(f"Path {abs_path} does not exist, skipping ignore check")
             return False
 
-        # check code file restriction (depending on backend)
-        if ignore_non_source_files:
-            # apply restriction only for LSP backend, which enumerates known languages
-            # and therefore can determine whether a file is a source file or not
-            if self.language_backend.is_lsp():
-                if os.path.isfile(abs_path):
-                    is_file_in_supported_language = False
-                    for language in self._language_server_candidates:
-                        fn_matcher = language.get_source_fn_matcher()
-                        if fn_matcher.is_relevant_filename(abs_path):
-                            is_file_in_supported_language = True
-                            break
-                    if not is_file_in_supported_language:
-                        return True
+        # check code file restriction using the configured language-server candidates
+        if ignore_non_source_files and os.path.isfile(abs_path):
+            is_file_in_supported_language = False
+            for language in self._language_server_candidates:
+                fn_matcher = language.get_source_fn_matcher()
+                if fn_matcher.is_relevant_filename(abs_path):
+                    is_file_in_supported_language = True
+                    break
+            if not is_file_in_supported_language:
+                return True
 
         # Create normalized path for consistent handling
         rel_path = Path(relative_path)
@@ -336,9 +321,6 @@ class Project(ToStringMixin):
         :param relative_path: the path to validate, relative to the project root
         :param require_not_ignored: if True, the path must not be ignored according to the project's ignore settings
         """
-        if FileProxy.is_external_path(relative_path):
-            return
-
         if not self.is_path_in_project(relative_path):
             raise ValueError(f"{relative_path=} points outside the project root ({self.project_root})")
 
@@ -385,40 +367,33 @@ class Project(ToStringMixin):
 
     def _create_file_collection(self, relative_path: str, *, code_files_only: bool, skip_ignored_files: bool) -> FileCollection:
         """
-        Creates the file collection for the given relative path.
+        Creates the file collection for the given project-relative path.
 
         :param relative_path: the relative path to create the file collection for, relative to the project root
         :param code_files_only: whether to include only (non-ignored) code files
         :param skip_ignored_files: whether to skip ignored files; has no effect if `code_files_only` is True
-        :return:
+        :return: the selected local project files
         """
-        if FileProxy.is_external_path(relative_path):
-            # single external path: create appropriate proxy
-            file_collection = FileCollection([FileProxy.from_project_relative_path(self, relative_path)])
-        else:
-            # path is a local project path
-            abs_path = os.path.join(self.project_root, relative_path)
-            if not os.path.exists(abs_path):
-                raise FileNotFoundError(f"Relative path {relative_path} does not exist.")
+        abs_path = os.path.join(self.project_root, relative_path)
+        if not os.path.exists(abs_path):
+            raise FileNotFoundError(f"Relative path {relative_path} does not exist.")
 
-            if code_files_only:
-                relative_file_paths = self.gather_source_files(relative_path=relative_path)
-                file_collection = FileCollection.from_local_project_paths(relative_file_paths, self)
-            else:
-                abs_path = os.path.join(self.project_root, relative_path)
-                if os.path.isfile(abs_path):
-                    rel_paths_to_search = [relative_path]
-                else:
-                    is_ignored_path_fn = self.get_is_ignored_path_fn(base_path=relative_path, skip_ignored_paths=skip_ignored_files)
-                    _dirs, rel_paths_to_search = scan_directory(
-                        path=abs_path,
-                        recursive=True,
-                        is_ignored_dir=is_ignored_path_fn,
-                        is_ignored_file=is_ignored_path_fn,
-                        relative_to=self.project_root,
-                    )
-                file_collection = FileCollection.from_local_project_paths(rel_paths_to_search, self)
-        return file_collection
+        if code_files_only:
+            relative_file_paths = self.gather_source_files(relative_path=relative_path)
+            return FileCollection.from_local_project_paths(relative_file_paths, self)
+
+        if os.path.isfile(abs_path):
+            rel_paths_to_search = [relative_path]
+        else:
+            is_ignored_path_fn = self.get_is_ignored_path_fn(base_path=relative_path, skip_ignored_paths=skip_ignored_files)
+            _dirs, rel_paths_to_search = scan_directory(
+                path=abs_path,
+                recursive=True,
+                is_ignored_dir=is_ignored_path_fn,
+                is_ignored_file=is_ignored_path_fn,
+                relative_to=self.project_root,
+            )
+        return FileCollection.from_local_project_paths(rel_paths_to_search, self)
 
     def search_project_files_for_pattern(
         self,

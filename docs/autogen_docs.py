@@ -158,7 +158,7 @@ def autogen_tool_list(target_filename = "01-about/035_tools.md"):
         f.write("Tools marked as *optional* are disabled by default.\n\n")
         f.write("Tools marked as [BETA] were recently introduced and may not be fully robust yet.\n\n")
         tools_by_module = ToolRegistry().get_registered_tools_by_module()
-        priority_modules = {"serena.tools.symbol_tools": 1, "serena.tools.jetbrains_tools": 2}
+        priority_modules = {"serena.tools.symbol_tools": 1}
 
         text = TextBuilder()
         sorted_modules = sorted(tools_by_module.keys(), key=lambda m: (priority_modules.get(m, 3), m))
@@ -218,17 +218,11 @@ def autogen_about_intro_features():
 
         f.write(f"{about_text}\n\n")
 
-    jetbrains_marketplace_link = ('```{raw} html\n'
-        '<p><a href="https://plugins.jetbrains.com/plugin/28946-serena/">'
-        '<img style="background-color:transparent;" src="../_static/images/jetbrains-marketplace-button.png">'
-        '</a></p>\n```')
-
     with open(Path(__file__).parent / "01-about" / "025_features.md", "w", encoding="utf-8") as f:
         f.write(autogen_info)
         features_text = re.subn(r"^#", r"", features_text, flags=re.MULTILINE)[0]
         features_text = re.subn(r"</?details>", "", features_text, flags=re.MULTILINE)[0]
         features_text = re.subn(r"<summary>.*?</summary>", "", features_text, flags=re.MULTILINE)[0]
-        features_text = re.sub(r'<a href="https://plugins.jetbrains.com.*?</a>', jetbrains_marketplace_link, features_text, flags=re.DOTALL)
         f.write(f"{features_text}\n\n")
 
 

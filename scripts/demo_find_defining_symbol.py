@@ -8,7 +8,7 @@ from pathlib import Path
 from pprint import pprint
 
 from serena.agent import SerenaAgent
-from serena.config.serena_config import LanguageBackend, ProjectConfig, RegisteredProject, SerenaConfig
+from serena.config.serena_config import ProjectConfig, RegisteredProject, SerenaConfig
 from serena.constants import REPO_ROOT
 from serena.project import Project
 from serena.tools import FindDeclarationTool
@@ -23,7 +23,6 @@ def make_agent(project_root: Path, language: LanguageServerId, project_name: str
     """Create an LSP-backed Serena agent for a single explicit project."""
     serena_config = SerenaConfig.from_config_file()
     serena_config.web_dashboard = False
-    serena_config.language_backend = LanguageBackend.LSP
 
     project = Project(
         project_root=str(project_root),

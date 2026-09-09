@@ -45,15 +45,14 @@ within the project directory.
 
 The file allows you to configure ...
   * the name by which you want to refer to the project (relevant when telling the LLM to dynamically activate the project)
-  * the set of programming languages for which language servers are spawned (not relevant when using the JetBrains plugin)
+  * the set of programming languages for which language servers are spawned.
     Note that you can dynamically add/remove language servers while Serena is running via the [Dashboard](060_dashboard).
-  * the [language backend](per-project-language-backend) to use for this project (overriding the global setting)
   * the encoding used in source files
   * ignore rules
   * write access
-  * the list of workspace folders to be processed by language servers (when using the LSP backend)
+  * the list of workspace folders to be processed by language servers
   * an initial prompt that shall be passed to the LLM whenever the project is activated
-  * a shell command to run upon project activation (prior to language backend initialisation)
+  * a shell command to run upon project activation before language-server initialisation
   * the set of tools and modes to use for the project
   * and some other settings.
 
@@ -72,10 +71,6 @@ Any keys defined therein will override the respective key in `project.yml`.
 
 (indexing)=
 ## Indexing
-
-:::{note}
-Indexing is not a relevant operation when using the JetBrains plugin, as indexing is handled by the IDE.
-:::
 
 Especially for larger project, it can be advisable to index the project after creation, pre-caching 
 symbol information provided by the language server(s). This will avoid delays during the first tool invocation
@@ -104,9 +99,6 @@ You can either choose to do this
 
  * when the MCP server starts, by passing the project path or name as a command-line argument
    (e.g. when using a single-project mode like `ide` or `claude-code`): `--project <path|name>`
-
-When working with the JetBrains plugin, be sure to have the same project folder open as a project in your IDE,
-i.e. the folder that is activated in Serena should correspond to the root folder of the project in your IDE.
 
 ## Onboarding & Memories
 
@@ -184,8 +176,7 @@ If fulfilling a task requires a single agent to edit code in multiple projects, 
 i.e. a folder that contains all the projects as sub-folders, and open that monorepo folder as a project in Serena.
 You may also use symbolic links to create a monorepo folder if the projects are located in different places on your filesystem.
 
-If several languages are used across the projects, specify all of them as needed when using the LSP backend;
-For JetBrains mode, make sure that your IDE is configured to work with all the languages used across the projects (e.g. by installing the respective language plugins).
+If several languages are used across the projects, specify all of them as needed for the project language-server configuration.
 
 ### Multiple Agents Accessing a Single Serena Instance
 

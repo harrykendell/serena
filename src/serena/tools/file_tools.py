@@ -211,23 +211,16 @@ class ReplaceContentTool(EditingToolWithDiagnostics):
             self.project.validate_relative_path(relative_path)
             replacer = ContentReplacer(mode=mode, allow_multiple_occurrences=allow_multiple_occurrences)
 
-            # preserve JetBrains editor-buffer semantics when that backend is active
-            if self.project.language_backend.is_jetbrains():
-                with EditedFileContext(relative_path, self.create_code_editor()) as context:
-                    original_content = context.get_original_content()
-                    updated_content = replacer.replace(original_content, needle, repl)
-                    context.set_updated_content(updated_content)
-            else:
-                # perform file-level edits directly so the tool does not depend on an LSP
-                original_content = self.project.read_file(relative_path)
-                updated_content = replacer.replace(original_content, needle, repl)
-                abs_path = Path(self.get_project_root()) / relative_path
-                abs_path.write_text(
-                    updated_content,
-                    encoding=self.project.project_config.encoding,
-                    newline=self.project.line_ending.newline_str,
-                )
-                self.project.ls_sync_file_system_changes()
+            # perform file-level edits directly so the tool does not require semantic analysis
+            original_content = self.project.read_file(relative_path)
+            updated_content = replacer.replace(original_content, needle, repl)
+            abs_path = Path(self.get_project_root()) / relative_path
+            abs_path.write_text(
+                updated_content,
+                encoding=self.project.project_config.encoding,
+                newline=self.project.line_ending.newline_str,
+            )
+            self.project.ls_sync_file_system_changes()
 
             return diagnostics_context.format_result(SUCCESS_RESULT)
 

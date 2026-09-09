@@ -2,23 +2,19 @@
 Demonstrates the progressive shortening of tool results when max_answer_chars is exceeded.
 It exercises all tools that use _limit_length with shortened_results,
 printing the full result, then progressively tighter max_answer_chars
-to show the successive shortening stages. Both LSP and JetBrains backends
-are tested (JB is skipped if no IDE is running).
+to show the successive shortening stages for Serena's LSP-based tools.
 """
 
 import json
 from pprint import pprint
 
 from serena.agent import SerenaAgent
-from serena.config.serena_config import LanguageBackend, SerenaConfig
+from serena.config.serena_config import SerenaConfig
 from serena.constants import REPO_ROOT
 from serena.tools import (
     FindReferencingSymbolsTool,
     FindSymbolTool,
     GetSymbolsOverviewTool,
-    JetBrainsFindReferencingSymbolsTool,
-    JetBrainsFindSymbolTool,
-    JetBrainsGetSymbolsOverviewTool,
     SearchForPatternTool,
 )
 
@@ -116,76 +112,16 @@ def run_backend_independent_tools(agent: SerenaAgent) -> None:
     )
 
 
-def run_jb_tools(agent: SerenaAgent) -> None:
-    print("\n\n### JETBRAINS BACKEND ###\n")
-
-    # JB: FindReferencingSymbolsTool — two shortening stages:
-    #   1. per-file counts  2. total summary
-    jb_refs = agent.get_tool(JetBrainsFindReferencingSymbolsTool)
-    run_with_shrinking(
-        agent,
-        "JB FindReferencingSymbolsTool",
-        lambda lim: jb_refs.apply(REF_SYMBOL, REF_FILE, max_answer_chars=lim),
-        char_limits=[50000, 500, 200],
-    )
-
-    # JB: FindSymbolTool — one shortening stage: names with kind only
-    jb_find = agent.get_tool(JetBrainsFindSymbolTool)
-    run_with_shrinking(
-        agent,
-        "JB FindSymbolTool (depth=1)",
-        lambda lim: jb_find.apply("Tool", relative_path=REF_FILE, depth=1, max_answer_chars=lim),
-        char_limits=[50000, 200],
-    )
-
-    # JB: FindSymbolTool with max_matches exceeded — tests the early-return shortened path
-    print(f"\n{SEPARATOR}")
-    print("JB FindSymbolTool (max_matches=1, broad search)")
-    print(SEPARATOR)
-    result = agent.execute_task(lambda: jb_find.apply("apply", max_matches=1))
-    print(f"[length={len(result)}]")
-    print(result)
-
-    # JB: GetSymbolsOverviewTool — two shortening stages for depth>0:
-    #   1. depth-0 overview  2. counts by type
-    # two stages for depth==0: grouped symbols, then counts by type
-    jb_overview = agent.get_tool(JetBrainsGetSymbolsOverviewTool)
-    run_with_shrinking(
-        agent,
-        "JB GetSymbolsOverviewTool (depth=1)",
-        lambda lim: jb_overview.apply(OVERVIEW_FILE, depth=1, max_answer_chars=lim),
-        char_limits=[50000, 500, 200],
-    )
-    run_with_shrinking(
-        agent,
-        "JB GetSymbolsOverviewTool (depth=0)",
-        lambda lim: jb_overview.apply(OVERVIEW_FILE, depth=0, max_answer_chars=lim),
-        char_limits=[50000, 200],
-    )
-
-
-def make_agent(backend: LanguageBackend) -> SerenaAgent:
+def make_agent() -> SerenaAgent:
     config = SerenaConfig.from_config_file()
     config.web_dashboard = False
-    config.language_backend = backend
     return SerenaAgent(project=REPO_ROOT, serena_config=config)
 
 
 if __name__ == "__main__":
-    # LSP backend
-    lsp_agent = make_agent(LanguageBackend.LSP)
+    agent = make_agent()
     try:
-        run_lsp_tools(lsp_agent)
-        run_backend_independent_tools(lsp_agent)
+        run_lsp_tools(agent)
+        run_backend_independent_tools(agent)
     finally:
-        lsp_agent.on_shutdown()
-
-    # JetBrains backend (requires a running IDE)
-    try:
-        jb_agent = make_agent(LanguageBackend.JETBRAINS)
-        try:
-            run_jb_tools(jb_agent)
-        finally:
-            jb_agent.on_shutdown()
-    except Exception as e:
-        print(f"\nJetBrains backend not available, skipping: {e}")
+        agent.on_shutdown()

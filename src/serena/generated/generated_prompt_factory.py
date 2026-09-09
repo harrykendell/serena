@@ -13,12 +13,6 @@ class PromptFactory(PromptFactoryBase):
     A class for retrieving and rendering prompt templates and prompt lists.
     """
 
-    def get_info_jet_brains_debug_repl_template_string(self) -> str:
-        return self.get_prompt_template_string("info_jet_brains_debug_repl")
-
-    def create_info_jet_brains_debug_repl(self) -> str:
-        return self._render_prompt("info_jet_brains_debug_repl", locals())
-
     def get_onboarding_prompt_template_string(self) -> str:
         return self.get_prompt_template_string("onboarding_prompt")
 

@@ -249,7 +249,6 @@ class Dashboard {
         this.currentPage = 'overview';
         this.configData = null;
         this.lastConfigDataJson = null; // Cache for comparison
-        this.jetbrainsMode = false;
         this.activeProjectName = null;
         this.languageToRemove = null;
         this.currentMemoryName = null;
@@ -582,7 +581,6 @@ class Dashboard {
                     console.log('Config has changed, updating display');
                     self.lastConfigDataJson = currentConfigJson;
                     self.configData = response;
-                    self.jetbrainsMode = response.jetbrains_mode;
                     self.activeProjectName = response.active_project.name;
                     self.displayConfig(response);
                     self.displayBasicStats(response.tool_stats_summary);
@@ -648,39 +646,35 @@ class Dashboard {
             }
 
             html += '<div class="config-label">Languages:</div>';
-            if (this.jetbrainsMode) {
-                html += '<div class="config-value">Using JetBrains backend</div>';
-            } else {
-                html += '<div class="config-value">';
-                if (config.languages && config.languages.length > 0) {
-                    html += '<div class="languages-container">';
-                    config.languages.forEach(function (language, index) {
-                        const isRemovable = config.languages.length > 1;
-                        html += '<div class="language-badge' + (isRemovable ? ' removable' : '') + '">';
-                        html += language;
-                        if (isRemovable) {
-                            html += '<span class="language-remove" data-language="' + language + '">&times;</span>';
-                        }
-                        html += '</div>';
-                    });
-                    // Add the "Add Language" button inline with language badges (only if active project exists)
-                    if (config.active_project && config.active_project.name) {
-                        // TODO: address after refactoring, it's not awesome to keep depending on state
-                        if (this.isAddingLanguage) {
-                            html += '<div id="add-language-spinner" class="language-spinner">';
-                        } else {
-                            html += '<button id="add-language-btn" class="btn language-add-btn">+ Add Language</button>';
-                            html += '<div id="add-language-spinner" class="language-spinner" style="display:none;">';
-                        }
-                        html += '<div class="spinner"></div>';
-                        html += '</div>';
+            html += '<div class="config-value">';
+            if (config.languages && config.languages.length > 0) {
+                html += '<div class="languages-container">';
+                config.languages.forEach(function (language, index) {
+                    const isRemovable = config.languages.length > 1;
+                    html += '<div class="language-badge' + (isRemovable ? ' removable' : '') + '">';
+                    html += language;
+                    if (isRemovable) {
+                        html += '<span class="language-remove" data-language="' + language + '">&times;</span>';
                     }
                     html += '</div>';
-                } else {
-                    html += 'N/A';
+                });
+                // Add the "Add Language" button inline with language badges (only if active project exists)
+                if (config.active_project && config.active_project.name) {
+                    // TODO: address after refactoring, it's not awesome to keep depending on state
+                    if (this.isAddingLanguage) {
+                        html += '<div id="add-language-spinner" class="language-spinner">';
+                    } else {
+                        html += '<button id="add-language-btn" class="btn language-add-btn">+ Add Language</button>';
+                        html += '<div id="add-language-spinner" class="language-spinner" style="display:none;">';
+                    }
+                    html += '<div class="spinner"></div>';
+                    html += '</div>';
                 }
                 html += '</div>';
+            } else {
+                html += 'N/A';
             }
+            html += '</div>';
 
             // Context info
             html += '<div class="config-label">Context:</div>';

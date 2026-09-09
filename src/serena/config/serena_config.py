@@ -44,7 +44,6 @@ from ..util.dataclass import get_dataclass_default
 
 if TYPE_CHECKING:
     from ..project import Project
-    from ..tools.tools_base import Tool
 
 log = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -195,54 +194,6 @@ class ModeSelectionDefinitionWithAddedModes(ModeSelectionDefinition):
     added_modes: Sequence[str] | None = None
 
 
-class LanguageBackend(Enum):
-    LSP = "LSP"
-    """
-    Use the language server protocol (LSP), spawning freely available language servers
-    via the SolidLSP library that is part of Serena
-    """
-    JETBRAINS = "JetBrains"
-    """
-    Use the Serena plugin in your JetBrains IDE.
-    (requires the plugin to be installed and the project being worked on to be open in your IDE)
-    """
-
-    @staticmethod
-    def from_str(backend_str: str) -> "LanguageBackend":
-        for backend in LanguageBackend:
-            if backend.value.lower() == backend_str.lower():
-                return backend
-        raise ValueError(f"Unknown language backend '{backend_str}': valid values are {[b.value for b in LanguageBackend]}")
-
-    def is_lsp(self) -> bool:
-        return self == LanguageBackend.LSP
-
-    def is_jetbrains(self) -> bool:
-        return self == LanguageBackend.JETBRAINS
-
-    def get_lsp_tool_class_replacements(self) -> "dict[type[Tool], type[Tool]]":
-        """
-        :return: mapping from LSP tool classes to replacement tool classes (functional replacements)
-        """
-        match self:
-            case LanguageBackend.LSP:
-                return {}
-            case LanguageBackend.JETBRAINS:
-                from ..tools import jetbrains_tools, symbol_tools
-
-                return {
-                    symbol_tools.FindSymbolTool: jetbrains_tools.JetBrainsFindSymbolTool,
-                    symbol_tools.GetSymbolsOverviewTool: jetbrains_tools.JetBrainsGetSymbolsOverviewTool,
-                    symbol_tools.FindReferencingSymbolsTool: jetbrains_tools.JetBrainsFindReferencingSymbolsTool,
-                    symbol_tools.FindImplementationsTool: jetbrains_tools.JetBrainsFindImplementationsTool,
-                    symbol_tools.FindDeclarationTool: jetbrains_tools.JetBrainsFindDeclarationTool,
-                    symbol_tools.RenameSymbolTool: jetbrains_tools.JetBrainsRenameTool,
-                    symbol_tools.SafeDeleteSymbol: jetbrains_tools.JetBrainsSafeDeleteTool,
-                }
-            case _:
-                raise NotImplementedError()
-
-
 class LineEnding(Enum):
     """Line ending convention for file writes."""
 
@@ -280,7 +231,6 @@ class SharedConfig(ToolInclusionDefinition, ToStringMixin):
     """
 
     symbol_info_budget: float | None = None
-    language_backend: LanguageBackend | None = None
     line_ending: LineEnding | None = None
     read_only_memory_patterns: list[str] = field(default_factory=list)
     ignored_memory_patterns: list[str] = field(default_factory=list)
@@ -592,9 +542,6 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
             if symbol_info_budget < 0:
                 raise ValueError(f"symbol_info_budget cannot be negative, got: {symbol_info_budget}")
 
-        language_backend_value = data.get("language_backend")
-        language_backend = LanguageBackend.from_str(language_backend_value) if language_backend_value else None
-
         line_ending_value = data.get("line_ending")
         line_ending = LineEnding.from_str(line_ending_value) if line_ending_value else None
 
@@ -625,7 +572,6 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
             initial_prompt=data["initial_prompt"],
             encoding=data["encoding"],
             line_ending=line_ending,
-            language_backend=language_backend,
             added_modes=data["added_modes"],
             default_modes=data["default_modes"],
             symbol_info_budget=symbol_info_budget,
@@ -649,7 +595,6 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
 
         # map fields using non-primitive types to a YAML-compatible representation
         d["language_servers"] = [lang.value for lang in self.language_servers]
-        d["language_backend"] = self.language_backend.value if self.language_backend is not None else None
         d["line_ending"] = self.line_ending.value if self.line_ending is not None else None
 
         return d
@@ -861,11 +806,6 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
     web_dashboard_interface: str | None = None
     web_dashboard_listen_address: str = "127.0.0.1"
     web_dashboard_trusted_hosts: list[str] = field(default_factory=lambda: ["127.0.0.1", "localhost"])
-    jetbrains_plugin_server_address: str = "127.0.0.1"
-    jetbrains_launch_command: str | None = None
-    """
-    JetBrains IDE launch command, which can be used to auto-start an IDE instance on demand.
-    """
     tool_timeout: float = DEFAULT_TOOL_TIMEOUT
     """
     timeout for tool calls in seconds; if a tool takes longer than this, it is aborted and an error is returned.
@@ -921,10 +861,6 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
 
     # settings with overridden defaults
 
-    language_backend: LanguageBackend = LanguageBackend.LSP
-    """
-    the language backend to use for code understanding features
-    """
     line_ending: LineEnding = LineEnding.NATIVE
     symbol_info_budget: float = 10.0
     """
@@ -947,7 +883,7 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
     # *** static members ***
 
     CONFIG_FILE = "serena_config.yml"
-    CONFIG_FIELDS_WITH_TYPE_CONVERSION = {"projects", "language_backend", "line_ending"}
+    CONFIG_FIELDS_WITH_TYPE_CONVERSION = {"projects", "line_ending"}
 
     # *** methods ***
     @classmethod
@@ -1081,20 +1017,6 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
             )
             instance.projects.append(project)
 
-        # determine language backend
-        language_backend = get_dataclass_default(SerenaConfig, "language_backend")
-        if "language_backend" in loaded_commented_yaml:
-            backend_str = loaded_commented_yaml["language_backend"]
-            language_backend = LanguageBackend.from_str(backend_str)
-        else:
-            # backward compatibility (migrate Boolean field "jetbrains")
-            if "jetbrains" in loaded_commented_yaml:
-                num_migrations += 1
-                if loaded_commented_yaml["jetbrains"]:
-                    language_backend = LanguageBackend.JETBRAINS
-                del loaded_commented_yaml["jetbrains"]
-        instance.language_backend = language_backend
-
         # determine line ending
         line_ending_value = loaded_commented_yaml.get("line_ending")
         if line_ending_value:
@@ -1150,18 +1072,9 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
             return None
 
     @classmethod
-    def init(cls, language_backend: LanguageBackend) -> "SerenaConfig":
-        """
-        Supports the config initialisation CLI command, allowing the user to configure fundamental settings before
-        the first launch.
-
-        :param language_backend: the language backend to use
-        :return: the created SerenaConfig instance
-        """
-        config = cls.from_config_file()
-        config.language_backend = language_backend
-        config._save()
-        return config
+    def init(cls) -> "SerenaConfig":
+        """Initialises Serena's global configuration file and returns the loaded configuration."""
+        return cls.from_config_file()
 
     def with_headless_mode_overrides(self) -> "SerenaConfig":
         """
@@ -1173,7 +1086,6 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
         """
         self.gui_log_window = False
         self.web_dashboard = False
-        self.jetbrains_launch_command = None
         return self
 
     @cached_property
@@ -1319,9 +1231,6 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
         # convert project objects into list of paths
         commented_yaml["projects"] = sorted({str(project.project_root) for project in self.projects})
 
-        # convert language backend to string
-        commented_yaml["language_backend"] = self.language_backend.value
-
         # convert line ending to string
         commented_yaml["line_ending"] = self.line_ending.value
 
@@ -1407,14 +1316,6 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
         serena_folder = self.get_project_serena_folder(project_root)
         return os.path.join(serena_folder, ProjectConfig.SERENA_PROJECT_FILE)
 
-    def propagate_settings(self) -> None:
-        """
-        Propagate settings from this configuration to individual components that are statically configured
-        """
-        from serena.tools import JetBrainsPluginClient
-
-        JetBrainsPluginClient.set_server_address(self.jetbrains_plugin_server_address)
-
     def is_trusted_project_path(self, project_root: str | Path) -> bool:
         """
         Checks if the given project root path matches any of the trusted project root patterns.
@@ -1427,17 +1328,6 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
             if GlobMatcher(pattern).matches(project_root_str):
                 return True
         return False
-
-    def determine_language_backend(self, project_config: ProjectConfig | None = None, log_choice: bool = False):
-        language_backend = self.language_backend
-        if project_config and project_config.language_backend is not None:
-            language_backend = project_config.language_backend
-            if log_choice:
-                log.info(f"Using language backend as configured in project: {language_backend.name}")
-        else:
-            if log_choice:
-                log.info(f"Using language backend from global configuration: {language_backend.name}")
-        return language_backend
 
     def get_ls_priority(self, ls_id: LanguageServerId) -> int:
         """

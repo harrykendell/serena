@@ -21,7 +21,6 @@ from serena import serena_version
 from serena.config.client_setup import client_setup_handlers
 from serena.config.context_mode import SerenaAgentContext, SerenaAgentMode
 from serena.config.serena_config import (
-    LanguageBackend,
     ModeSelectionDefinition,
     ModeSelectionDefinitionWithAddedModes,
     ProjectConfig,
@@ -173,22 +172,13 @@ class TopLevelCommands(AutoRegisteringGroup):
     @staticmethod
     @click.command(
         "init",
-        help="Initialize Serena by creating a global config file with the specified default language backend.",
+        help="Initialize Serena by creating a global configuration file.",
         context_settings={"max_content_width": _MAX_CONTENT_WIDTH},
     )
-    @click.option(
-        "--language-backend",
-        "-b",
-        type=click.Choice([b.value for b in LanguageBackend]),
-        default=LanguageBackend.LSP.value,
-        show_default=True,
-        help="Default code intelligence backend (can be overridden in the project config).",
-    )
-    def init(language_backend: Literal["LSP", "JetBrains"] = "LSP") -> None:
+    def init() -> None:
         click.echo(f"\nSerena version: {serena_version()}\n")
-        serena_config = SerenaConfig.init(language_backend=LanguageBackend(language_backend))
+        serena_config = SerenaConfig.init()
         click.echo(f"Configuration file: {serena_config.config_file_path}")
-        click.echo(f"Language backend: {language_backend}")
 
         # check for auto-configurable clients
         applicable_setup_handlers = []
@@ -255,12 +245,6 @@ class TopLevelCommands(AutoRegisteringGroup):
         default=(),
         show_default=False,
         help=_ADD_MODES_EXPLANATION,
-    )
-    @click.option(
-        "--language-backend",
-        type=click.Choice([lb.value for lb in LanguageBackend]),
-        default=None,
-        help="Override the configured language backend.",
     )
     @click.option(
         "--transport",
@@ -336,7 +320,6 @@ class TopLevelCommands(AutoRegisteringGroup):
         context: str,
         default_modes: Sequence[str],
         added_modes: Sequence[str],
-        language_backend: str | None,
         transport: Literal["stdio", "sse", "streamable-http"],
         host: str,
         port: int,
@@ -399,7 +382,6 @@ class TopLevelCommands(AutoRegisteringGroup):
             port=port,
             streamable_http_path=streamable_http_path,
             mode_selection_def=mode_selection_def,
-            language_backend=LanguageBackend.from_str(language_backend) if language_backend else None,
             enable_web_dashboard=enable_web_dashboard,
             web_dashboard_port=web_dashboard_port,
             open_web_dashboard=open_web_dashboard,
@@ -901,7 +883,6 @@ class ProjectCommands(AutoRegisteringGroup):
         logging.configure(level=logging.INFO)
         project_path = os.path.abspath(project)
         serena_config = SerenaConfig.from_config_file().with_headless_mode_overrides()
-        serena_config.language_backend = LanguageBackend.LSP
         proj = Project.load(project_path, serena_config=serena_config)
 
         # Create log file with timestamp
