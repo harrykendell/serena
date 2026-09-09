@@ -9,7 +9,6 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -60,11 +59,6 @@ def configure_logging(*args, **kwargs) -> None:
 
 # patch the logging configuration function in fastmcp, because it's hard-coded and broken
 server.configure_logging = configure_logging  # type: ignore
-
-
-@dataclass
-class SerenaMCPRequestContext:
-    agent: SerenaAgent
 
 
 class SerenaFastMCPTool(FastMCPTool):

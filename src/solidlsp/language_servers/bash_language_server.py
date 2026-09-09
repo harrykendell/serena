@@ -8,14 +8,9 @@ import os
 import shutil
 import threading
 
+from solidlsp.dependency_provider import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath
 from solidlsp.language_servers.common import RuntimeDependency, RuntimeDependencyCollection, build_npm_install_command
-from solidlsp.ls import (
-    DocumentSymbols,
-    LanguageServerDependencyProvider,
-    LanguageServerDependencyProviderSinglePath,
-    LSPFileBuffer,
-    SolidLanguageServer,
-)
+from solidlsp.ls import DocumentSymbols, LSPFileBuffer, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.ls_utils import FileUtils, PlatformId, PlatformUtils
 from solidlsp.settings import SolidLSPSettings
@@ -41,8 +36,7 @@ _SHELLCHECK_ALLOWED_HOSTS = (
     "objects.githubusercontent.com",
     "release-assets.githubusercontent.com",
 )
-# Per-platform archive metadata: tar.xz on POSIX (extracts to shellcheck-v<ver>/shellcheck),
-# zip on Windows (extracts to shellcheck.exe at archive root).
+# Linux ShellCheck release metadata for the architectures supported by the runtime.
 _SHELLCHECK_DEPENDENCIES: dict[PlatformId, dict[str, str]] = {
     PlatformId.LINUX_x64: {
         "url": f"{_SHELLCHECK_RELEASE_BASE}/shellcheck-v{_SHELLCHECK_VERSION}.linux.x86_64.tar.xz",
@@ -52,18 +46,6 @@ _SHELLCHECK_DEPENDENCIES: dict[PlatformId, dict[str, str]] = {
         "url": f"{_SHELLCHECK_RELEASE_BASE}/shellcheck-v{_SHELLCHECK_VERSION}.linux.aarch64.tar.xz",
         "sha256": "324a7e89de8fa2aed0d0c28f3dab59cf84c6d74264022c00c22af665ed1a09bb",
     },
-    PlatformId.OSX_x64: {
-        "url": f"{_SHELLCHECK_RELEASE_BASE}/shellcheck-v{_SHELLCHECK_VERSION}.darwin.x86_64.tar.xz",
-        "sha256": "ef27684f23279d112d8ad84e0823642e43f838993bbb8c0963db9b58a90464c2",
-    },
-    PlatformId.OSX_arm64: {
-        "url": f"{_SHELLCHECK_RELEASE_BASE}/shellcheck-v{_SHELLCHECK_VERSION}.darwin.aarch64.tar.xz",
-        "sha256": "bbd2f14826328eee7679da7221f2bc3afb011f6a928b848c80c321f6046ddf81",
-    },
-    PlatformId.WIN_x64: {
-        "url": f"{_SHELLCHECK_RELEASE_BASE}/shellcheck-v{_SHELLCHECK_VERSION}.zip",
-        "sha256": "eb6cd53a54ea97a56540e9d296ce7e2fa68715aa507ff23574646c1e12b2e143",
-    },
 }
 
 
@@ -72,14 +54,8 @@ def _shellcheck_install_dir(bash_ls_dir: str) -> str:
 
 
 def _shellcheck_binary_path(bash_ls_dir: str) -> str:
-    """
-    Returns the path to the extracted ShellCheck binary. POSIX archives extract under
-    ``shellcheck-v<ver>/shellcheck``; the Windows zip drops ``shellcheck.exe`` at archive root.
-    """
-    install_dir = _shellcheck_install_dir(bash_ls_dir)
-    if os.name == "nt":
-        return os.path.join(install_dir, "shellcheck.exe")
-    return os.path.join(install_dir, f"shellcheck-v{_SHELLCHECK_VERSION}", "shellcheck")
+    """Return the extracted Linux ShellCheck binary path."""
+    return os.path.join(_shellcheck_install_dir(bash_ls_dir), f"shellcheck-v{_SHELLCHECK_VERSION}", "shellcheck")
 
 
 class BashLanguageServer(SolidLanguageServer):
@@ -96,7 +72,6 @@ class BashLanguageServer(SolidLanguageServer):
         super().__init__(
             config,
             repository_root_path,
-            None,
             "bash",
             solidlsp_settings,
         )
@@ -122,8 +97,6 @@ class BashLanguageServer(SolidLanguageServer):
             bash_ls_dir = self._resolve_bash_ls_dir(bash_language_server_version)
             managed_bin_dir = os.path.join(bash_ls_dir, "node_modules", ".bin")
             bash_executable_path = os.path.join(managed_bin_dir, "bash-language-server")
-            if os.name == "nt":
-                bash_executable_path += ".cmd"
 
             # install bash-language-server via npm
             if not os.path.exists(bash_executable_path):
@@ -167,7 +140,7 @@ class BashLanguageServer(SolidLanguageServer):
             if release is None:
                 raise RuntimeError(f"ShellCheck has no upstream binary release for platform {PlatformUtils.get_platform_id().value}")
 
-            archive_type = "zip" if os.name == "nt" else "xztar"
+            archive_type = "xztar"
             log.info(f"Downloading ShellCheck v{_SHELLCHECK_VERSION} for {PlatformUtils.get_platform_id().value}")
             FileUtils.download_and_extract_archive_verified(
                 release["url"],
@@ -180,10 +153,8 @@ class BashLanguageServer(SolidLanguageServer):
             if not os.path.exists(binary_path):
                 raise FileNotFoundError(f"ShellCheck binary not found at {binary_path} after extraction; archive layout may have changed.")
 
-            # ensure the binary is executable on POSIX (zip extraction does not preserve perms)
-            if os.name != "nt":
-                current = os.stat(binary_path).st_mode
-                os.chmod(binary_path, current | 0o111)
+            current = os.stat(binary_path).st_mode
+            os.chmod(binary_path, current | 0o111)
 
         def create_launch_command_env(self) -> dict[str, str]:
             bash_language_server_version = self._custom_settings.get("bash_language_server_version", DEFAULT_BASH_LANGUAGE_SERVER_VERSION)

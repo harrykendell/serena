@@ -25,8 +25,9 @@ import threading
 
 from overrides import override
 
+from solidlsp.dependency_provider import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath
 from solidlsp.language_servers.common import RuntimeDependency, RuntimeDependencyCollection, build_npm_install_command
-from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
+from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.settings import SolidLSPSettings
 
@@ -53,7 +54,6 @@ class VsCodeHtmlLanguageServer(SolidLanguageServer):
         super().__init__(
             config,
             repository_root_path,
-            None,
             "html",
             solidlsp_settings,
         )
@@ -82,8 +82,6 @@ class VsCodeHtmlLanguageServer(SolidLanguageServer):
             ls_dirname = f"vscode-langservers-html-{package_version}"
             install_dir = os.path.join(self._ls_resources_dir, ls_dirname)
             executable_path = os.path.join(install_dir, "node_modules", ".bin", LS_BIN_NAME)
-            if os.name == "nt":
-                executable_path += ".cmd"
 
             if not os.path.exists(executable_path):
                 expected_version = f"{package_name}@{package_version}"

@@ -45,21 +45,6 @@ class ActivateProjectTool(Tool, ToolMarkerDoesNotRequireActiveProject):
         return result
 
 
-class RemoveProjectTool(Tool, ToolMarkerDoesNotRequireActiveProject):
-    """
-    Removes a project from the Serena configuration.
-    """
-
-    def apply(self, project_name: str) -> str:
-        """
-        Removes a project from the Serena configuration.
-
-        :param project_name: Name of the project to remove
-        """
-        self.agent.serena_config.remove_project(project_name)
-        return f"Successfully removed project '{project_name}' from configuration."
-
-
 class GetCurrentConfigTool(Tool):
     """Prints Serena's current fixed-runtime configuration and project/tool state."""
 

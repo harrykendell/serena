@@ -29,7 +29,7 @@ class LSPConstants:
     # key for the textDocument field in the request
     TEXT_DOCUMENT = "textDocument"
 
-    # key used to represent the language a document is in - "java", "csharp", etc.
+    # key used to represent the language a document is in - "python", "cpp", etc.
     LANGUAGE_ID = "languageId"
 
     # key used to represent the version of a document (a shared value between the client and server)

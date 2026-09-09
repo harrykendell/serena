@@ -8,10 +8,9 @@ import os
 
 from overrides import override
 
+from solidlsp.dependency_provider import LanguageServerDependencyProviderSinglePath
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
-from solidlsp.ls_utils import PlatformUtils
-from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
 
 from .common import RuntimeDependency, RuntimeDependencyCollection
@@ -26,11 +25,8 @@ TEXLAB_ALLOWED_HOSTS = (
     "objects.githubusercontent.com",
 )
 TEXLAB_SHA256_BY_PLATFORM = {
-    "osx-arm64": "3755e9d1d4ad0b25135bdacd2fb453a612e88f48133185f96d660fa550398f66",
-    "osx-x64": "11289a231f0cf382857a6a4a2eda1ba9f4f4e950af343b455797e3922d13b1ea",
     "linux-arm64": "e0d8e0b27b2e6e3526fa5019323bb3fddb1202a0f0049e527672b5ff323cc15e",
     "linux-x64": "c8260b2fd2849cbad7d1f54c4ffa0389f34664b049392107bc4f7f9c8ec542ba",
-    "win-x64": "aa5fc1fe6004c17cd83086a57a8c8f28bb3f360914872711bfbb83490dc3c19e",
 }
 
 
@@ -46,32 +42,11 @@ class TexlabLanguageServer(SolidLanguageServer):
     def is_ignored_dirname(self, dirname: str) -> bool:
         return super().is_ignored_dirname(dirname) or dirname in ["_minted", "_build", "build", "out", "auto"]
 
-    @classmethod
-    def _setup_runtime_dependencies(cls, solidlsp_settings: SolidLSPSettings) -> str:
-        """Download and install texlab for the current platform if not already present."""
-        platform_id = PlatformUtils.get_platform_id()
+    @staticmethod
+    def _setup_runtime_dependencies(ls_resources_dir: str) -> str:
+        """Download and install texlab for the supported Linux host."""
         deps = RuntimeDependencyCollection(
             [
-                RuntimeDependency(
-                    id="Texlab",
-                    description="texlab for macOS (ARM64)",
-                    url=f"{TEXLAB_BASE_URL}/texlab-aarch64-macos.tar.gz",
-                    platform_id="osx-arm64",
-                    archive_type="gztar",
-                    binary_name="texlab",
-                    sha256=TEXLAB_SHA256_BY_PLATFORM["osx-arm64"],
-                    allowed_hosts=TEXLAB_ALLOWED_HOSTS,
-                ),
-                RuntimeDependency(
-                    id="Texlab",
-                    description="texlab for macOS (x64)",
-                    url=f"{TEXLAB_BASE_URL}/texlab-x86_64-macos.tar.gz",
-                    platform_id="osx-x64",
-                    archive_type="gztar",
-                    binary_name="texlab",
-                    sha256=TEXLAB_SHA256_BY_PLATFORM["osx-x64"],
-                    allowed_hosts=TEXLAB_ALLOWED_HOSTS,
-                ),
                 RuntimeDependency(
                     id="Texlab",
                     description="texlab for Linux (ARM64)",
@@ -92,45 +67,32 @@ class TexlabLanguageServer(SolidLanguageServer):
                     sha256=TEXLAB_SHA256_BY_PLATFORM["linux-x64"],
                     allowed_hosts=TEXLAB_ALLOWED_HOSTS,
                 ),
-                RuntimeDependency(
-                    id="Texlab",
-                    description="texlab for Windows (x64)",
-                    url=f"{TEXLAB_BASE_URL}/texlab-x86_64-windows.zip",
-                    platform_id="win-x64",
-                    archive_type="zip",
-                    binary_name="texlab.exe",
-                    sha256=TEXLAB_SHA256_BY_PLATFORM["win-x64"],
-                    allowed_hosts=TEXLAB_ALLOWED_HOSTS,
-                ),
             ]
         )
         dependency = deps.get_single_dep_for_current_platform()
-        install_dir = os.path.join(cls.ls_resources_dir(solidlsp_settings), f"texlab-{TEXLAB_VERSION}")
+        install_dir = os.path.join(ls_resources_dir, f"texlab-{TEXLAB_VERSION}")
         texlab_executable_path = deps.binary_path(install_dir)
         if not os.path.exists(texlab_executable_path):
             log.info(f"Downloading texlab from {dependency.url}")
             deps.install(install_dir)
 
         assert os.path.exists(texlab_executable_path), f"texlab executable not found at {texlab_executable_path}"
-
-        if platform_id.value != "win-x64":
-            os.chmod(texlab_executable_path, 0o755)
-
+        os.chmod(texlab_executable_path, 0o755)
         return texlab_executable_path
 
+    class DependencyProvider(LanguageServerDependencyProviderSinglePath):
+        def _get_or_install_core_dependency(self) -> str:
+            return TexlabLanguageServer._setup_runtime_dependencies(self._ls_resources_dir)
+
+        def _create_launch_command(self, core_path: str) -> list[str]:
+            return [core_path]
+
+    def _create_dependency_provider(self) -> LanguageServerDependencyProviderSinglePath:
+        return self.DependencyProvider(self._custom_settings, self._ls_resources_dir)
+
     def __init__(self, config: LanguageServerConfig, repository_root_path: str, solidlsp_settings: SolidLSPSettings):
-        """
-        Creates a TexlabLanguageServer instance. This class is not meant to be instantiated directly.
-        Use LanguageServer.create() instead.
-        """
-        texlab_executable_path = self._setup_runtime_dependencies(solidlsp_settings)
-        super().__init__(
-            config,
-            repository_root_path,
-            ProcessLaunchInfo(cmd=texlab_executable_path, cwd=repository_root_path),
-            "latex",
-            solidlsp_settings,
-        )
+        """Create the retained Texlab language server."""
+        super().__init__(config, repository_root_path, "latex", solidlsp_settings)
 
     def _create_base_initialize_params(self) -> dict:
         """Returns the initialize params for the texlab Language Server."""

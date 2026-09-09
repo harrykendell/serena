@@ -151,8 +151,8 @@ def _manager(
 def _job_tool_agent(project: MagicMock) -> MagicMock:
     agent = MagicMock()
     agent.get_active_project_or_raise.return_value = project
-    agent.tool_is_active.return_value = False
-    agent.serena_config.default_max_tool_answer_chars = 150_000
+    agent.tool_is_active.return_value = True
+    agent.serena_config.default_max_tool_answer_tokens = 37_500
     return agent
 
 

@@ -2,9 +2,7 @@
 
 Per the LSP spec, ``ContentModified`` (-32801) means the server discarded a stale, in-flight
 computation because the workspace changed underneath it, not that the request itself is
-invalid -- clients are expected to retry. This is what caused issue #1724 (flaky
-``test_find_symbol[rust_add_function]`` on windows-latest): rust-analyzer returns
-``ContentModified`` for cancelled hover requests, and Serena surfaced it as a hard error.
+invalid. Clients may retry methods they declared as safe to retry.
 
 Retrying is only spec-compliant for methods the client actually declared, via
 ``general.staleRequestSupport.retryOnContentModified`` in its InitializeParams, that it will

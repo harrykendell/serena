@@ -144,7 +144,7 @@ class NamePathMatcher(ToStringMixin):
 
     A name path is a path in the symbol tree *within a source file*.
     For example, the method `my_method` defined in class `MyClass` would have the name path `MyClass/my_method`.
-    If a symbol is overloaded (e.g., in Java), a 0-based index is appended (e.g. "MyClass/my_method[0]") to
+    If a symbol is overloaded (e.g., in C++), a 0-based index is appended (e.g. "MyClass/my_method[0]") to
     uniquely identify it.
 
     A matching pattern can be:

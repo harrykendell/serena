@@ -42,7 +42,6 @@ from serena.tools import (
     OnboardingTool,
     OpenDashboardTool,
     ReadMemoryTool,
-    ReplaceContentTool,
     Tool,
     ToolRegistry,
 )
@@ -149,7 +148,6 @@ class SerenaAgent:
         log.info("Available projects: %s", ", ".join(self.serena_config.project_names))
         log.info("Exposed ChatGPT tools (%s): %s", len(self._exposed_tools), ", ".join(self._exposed_tools.tool_names))
 
-        self._check_shell_settings()
         self._prompt_tool_names_mapping = self._create_prompt_tool_names_mapping()
         self._unscoped_execution_coordinator = ProjectExecutionCoordinator()
         self.prompt_factory = SerenaPromptFactory()
@@ -204,16 +202,6 @@ class SerenaAgent:
                 return f"Find the current log file here: {log_path}"
             else:
                 return "Unfortunately, logs are not available. We recommend enabling the web dashboard/logging in general."
-
-    def _check_shell_settings(self) -> None:
-        # On Windows, Claude Code sets COMSPEC to Git-Bash (often even with a path containing spaces),
-        # which causes all sorts of trouble, preventing language servers from being launched correctly.
-        # So we make sure that COMSPEC is unset if it has been set to bash specifically.
-        if platform.system() == "Windows":
-            comspec = os.environ.get("COMSPEC", "")
-            if "bash" in comspec:
-                os.environ["COMSPEC"] = ""  # force use of default shell
-                log.info("Adjusting COMSPEC environment variable to use the default shell instead of '%s'", comspec)
 
     def retain_tool_output(self, tool_name: str, content: str) -> str:
         """Retains one complete tool result and returns its stable identifier."""
@@ -360,12 +348,8 @@ class SerenaAgent:
 
     @staticmethod
     def _create_prompt_tool_names_mapping() -> dict[str, str]:
-        """Creates the prompt mapping for canonical and retained legacy tool names."""
-        result = {"replace_regex": ReplaceContentTool.get_name_from_cls()}
-        for tool_class in ToolRegistry().get_all_tool_classes():
-            tool_name = tool_class.get_name_from_cls()
-            result[tool_name] = tool_name
-        return result
+        """Creates the prompt mapping for canonical tool names."""
+        return {tool_class.get_name_from_cls(): tool_class.get_name_from_cls() for tool_class in ToolRegistry().get_all_tool_classes()}
 
     @staticmethod
     def _format_prompt_tag(text: str, tag: str, tag_name_attr: str | None = None) -> str:

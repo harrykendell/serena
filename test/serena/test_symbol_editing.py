@@ -7,7 +7,6 @@ import logging
 import os
 import shutil
 import tempfile
-import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -194,17 +193,10 @@ class EditingTest(ABC):
         try:
             print(f"Copying repo from {self.original_repo_path} to {self.repo_path}")
             shutil.copytree(self.original_repo_path, self.repo_path)
-            # prevent deadlock on Windows due to file locks caused by antivirus or some other external software
-            # wait for a long time here
-            if os.name == "nt":
-                time.sleep(0.1)
             log.info(f"Creating language server for {self.ls_id} {self.rel_path}")
             with project_with_ls_context(self.ls_id, str(self.repo_path)) as project:
                 yield LanguageServerSymbolRetriever(project)
         finally:
-            # prevent deadlock on Windows due to lingering file locks
-            if os.name == "nt":
-                time.sleep(0.1)
             log.info(f"Removing temp directory {temp_dir}")
             shutil.rmtree(temp_dir, ignore_errors=True)
             log.info(f"Temp directory {temp_dir} removed")

@@ -79,21 +79,10 @@ def find_project_root(root: str | Path | None = None) -> str | None:
 
 
 def _open_in_editor(path: str) -> None:
-    """Open the given file in the system's default editor or viewer."""
-    editor = os.environ.get("EDITOR")
-    run_kwargs = subprocess_kwargs()
+    """Open the given file in the configured editor or Linux desktop opener."""
+    command = [os.environ.get("EDITOR") or "xdg-open", path]
     try:
-        if editor:
-            subprocess.run([editor, path], check=False, **run_kwargs)
-        elif sys.platform.startswith("win"):
-            try:
-                os.startfile(path)
-            except OSError:
-                subprocess.run(["notepad.exe", path], check=False, **run_kwargs)
-        elif sys.platform == "darwin":
-            subprocess.run(["open", path], check=False, **run_kwargs)
-        else:
-            subprocess.run(["xdg-open", path], check=False, **run_kwargs)
+        subprocess.run(command, check=False, **subprocess_kwargs())
     except Exception as e:
         print(f"Failed to open {path}: {e}")
 
@@ -157,8 +146,6 @@ class TopLevelCommands(AutoRegisteringGroup):
     @staticmethod
     @click.command("start-mcp-server", help="Starts the Serena MCP server.", context_settings={"max_content_width": _MAX_CONTENT_WIDTH})
     @click.option("--project", "project", type=PROJECT_TYPE, default=None, help="Path or name of project to activate at startup.")
-    @click.option("--project-file", "project", type=PROJECT_TYPE, default=None, help="[DEPRECATED] Use --project instead.")
-    @click.argument("project_file_arg", type=PROJECT_TYPE, required=False, default=None, metavar="")
     @click.option(
         "--transport",
         type=click.Choice(["stdio", "sse", "streamable-http"]),
@@ -219,7 +206,6 @@ class TopLevelCommands(AutoRegisteringGroup):
     )
     def start_mcp_server(
         project: str | None,
-        project_file_arg: str | None,
         project_from_cwd: bool | None,
         transport: Literal["stdio", "sse", "streamable-http"],
         host: str,
@@ -250,8 +236,8 @@ class TopLevelCommands(AutoRegisteringGroup):
 
         project_activation_error: str | None = None
         if project_from_cwd:
-            if project is not None or project_file_arg is not None:
-                raise click.UsageError("--project-from-cwd cannot be used with --project or positional project argument")
+            if project is not None:
+                raise click.UsageError("--project-from-cwd cannot be used with --project")
             project = find_project_root()
             if project is not None:
                 log.info("Auto-detected project root: %s", project)
@@ -263,8 +249,7 @@ class TopLevelCommands(AutoRegisteringGroup):
                 )
                 log.warning(project_activation_error)
 
-        project_file = project_file_arg or project
-        factory = SerenaMCPFactory(transport=transport, project=project_file)
+        factory = SerenaMCPFactory(transport=transport, project=project)
         server = factory.create_mcp_server(
             host=host,
             port=port,
@@ -277,8 +262,6 @@ class TopLevelCommands(AutoRegisteringGroup):
             tool_timeout=tool_timeout,
             project_activation_error=project_activation_error,
         )
-        if project_file_arg:
-            log.warning("Positional project arg is deprecated; use --project instead. Used: %s", project_file)
         log.info("Starting MCP server …")
         server.run(transport=transport)
 

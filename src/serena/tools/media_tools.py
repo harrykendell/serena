@@ -58,15 +58,6 @@ class _NativeMediaResult:
     file_link: ResourceLink
 
 
-def get_result_media(result: object) -> Image | Audio | None:
-    """Returns native media carried by one media-tool result, if present."""
-    if isinstance(result, Image | Audio):
-        return result
-    if isinstance(result, _NativeMediaResult):
-        return result.media
-    return None
-
-
 def get_result_file_link(result: object) -> ResourceLink | None:
     """Returns the transferable project-file link carried by one media-tool result, if present."""
     if isinstance(result, ResourceLink):

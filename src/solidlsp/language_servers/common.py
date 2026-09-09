@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import os
 import pathlib
-import platform
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -102,10 +101,9 @@ class RuntimeDependencyCollection:
     @staticmethod
     def _run_command(command: str | list[str], cwd: str) -> None:
         kwargs = subprocess_util.subprocess_kwargs()
-        if not PlatformUtils.get_platform_id().is_windows():
-            import pwd
+        import pwd
 
-            kwargs["user"] = pwd.getpwuid(os.getuid()).pw_name
+        kwargs["user"] = pwd.getpwuid(os.getuid()).pw_name
 
         command = subprocess_util.convert_shell_cmd(command)
         log.info("Running command %s in '%s'", f"'{command}'" if isinstance(command, str) else command, cwd)
@@ -158,29 +156,6 @@ def build_npm_install_command(package_name: str, version: str, registry: str | N
         command.extend(["--registry", registry])
     command.append(f"{package_name}@{version}")
     return command
-
-
-def quote_windows_path(path: str) -> str:
-    """
-    Quote a path for Windows command execution if needed.
-
-    On Windows, paths need to be quoted for proper command execution.
-    The function checks if the path is already quoted to avoid double-quoting.
-    On other platforms, the path is returned unchanged.
-
-    Args:
-        path: The file path to potentially quote
-
-    Returns:
-        The quoted path on Windows (if not already quoted), unchanged path on other platforms
-
-    """
-    if platform.system() == "Windows":
-        # Check if already quoted to avoid double-quoting
-        if path.startswith('"') and path.endswith('"'):
-            return path
-        return f'"{path}"'
-    return path
 
 
 UE_IGNORED_DIRNAMES = frozenset({"Binaries", "DerivedDataCache", "Intermediate", "Saved"})

@@ -1,7 +1,6 @@
-"""Regression tests for issue #1818: LSP process-group cleanup must not require enumerating
-the system process table (``psutil.Process.children(recursive=True)``), which can be denied
-even for processes we started and own (``Operation not permitted`` from
-``sysctl(KERN_PROC_ALL)`` in a sandboxed macOS environment).
+"""LSP process-group cleanup must not require enumerating the system process table
+(``psutil.Process.children(recursive=True)``), which can fail even for processes Serena
+started and owns.
 
 ``StdioLanguageServer`` already starts every LSP process in its own session
 (``start_independent_lsp_process`` defaults to True, see ``ls_config.py``), which makes the
@@ -15,7 +14,6 @@ instead of walking the tree with ``psutil``. No language markers: these exercise
 from __future__ import annotations
 
 import os
-import platform
 import signal
 import subprocess
 import sys
@@ -26,8 +24,6 @@ import psutil
 import pytest
 
 from solidlsp.util.subprocess_util import _signal_process_group, terminate_process_tree_with_kill_fallback
-
-pytestmark = pytest.mark.skipif(platform.system() == "Windows", reason="process groups / os.killpg are POSIX-specific")
 
 
 def _group_is_gone(pgid: int) -> bool:
@@ -160,9 +156,8 @@ class TestTerminateProcessTreeWithKillFallback:
 
 
 class TestPsutilDenialConsequences:
-    """Demonstrates the actual production consequence when process-table enumeration is denied,
-    without depending on macOS: ``psutil.AccessDenied`` is the same exception class regardless of
-    which syscall the platform used to deny it. Without a known ``process_group_id``,
+    """Demonstrates the production consequence when process-table enumeration is denied.
+    Without a known ``process_group_id``,
     ``_signal_process_tree`` falls back to signaling only the ``Popen`` object it was given (see
     its ``except (psutil.NoSuchProcess, psutil.AccessDenied, Exception): pass`` branch), so a
     child the leader spawned itself leaks. Passing the group id (this fix) avoids psutil

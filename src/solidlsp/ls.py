@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import pathlib
-import shutil
 import threading
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -17,19 +16,13 @@ from time import monotonic, perf_counter, sleep
 from typing import Any, Self, Union, cast
 
 import pathspec
-from sensai.util.helper import mark_used
 from sensai.util.pickle import getstate, load_pickle
 from sensai.util.string import ToStringMixin
 
 from serena.util.file_system import match_path
 from serena.util.text_utils import MatchedConsecutiveLines
 from solidlsp import ls_types
-from solidlsp.dependency_provider import (
-    LanguageServerDependencyProvider,
-    LanguageServerDependencyProviderBaseCommand,
-    LanguageServerDependencyProviderSinglePath,
-    LanguageServerDependencyProviderUvx,
-)
+from solidlsp.dependency_provider import LanguageServerDependencyProvider
 from solidlsp.initialize_params import DefaultInitializeParamsBuilder, InitializeParamsBuilder
 from solidlsp.ls_config import FilenameMatcher, LanguageServerConfig, LanguageServerId
 from solidlsp.ls_exceptions import InvalidTextLocationError, SolidLSPException
@@ -66,14 +59,6 @@ The `DocumentSymbol` is the preferred type, but the legacy type `SymbolInformati
 """
 
 log = logging.getLogger(__name__)
-
-# backward compatibility (support old imports of these classes from this module)
-mark_used(
-    LanguageServerDependencyProvider,
-    LanguageServerDependencyProviderBaseCommand,
-    LanguageServerDependencyProviderUvx,
-    LanguageServerDependencyProviderSinglePath,
-)
 
 _debug_enabled = log.isEnabledFor(logging.DEBUG)
 """Serves as a flag that triggers additional computation when debug logging is enabled."""
@@ -330,9 +315,7 @@ class DocumentSymbols:
 
     def get_all_symbols_and_roots(self) -> tuple[list[ls_types.UnifiedSymbolInformation], list[ls_types.UnifiedSymbolInformation]]:
         """
-        This function returns all symbols in the document as a flat list and the root symbols.
-        It exists to facilitate migration from previous versions, where this was the return interface of
-        the LS method that obtained document symbols.
+        Return both the flattened document symbols and the root symbol list.
 
         :return: A tuple containing a list of all symbols in the document and a list of root symbols.
         """
@@ -428,21 +411,8 @@ class SolidLanguageServer(ABC):
 
     @classmethod
     def ls_resources_dir(cls, solidlsp_settings: SolidLSPSettings, mkdir: bool = True) -> str:
-        """
-        Returns the directory where the language server resources are downloaded.
-        This is used to store language server binaries, configuration files, etc.
-        """
+        """Return the owned directory for this language server's downloaded resources."""
         result = os.path.join(solidlsp_settings.ls_resources_dir, cls.__name__)
-
-        # Migration of previously downloaded LS resources that were downloaded to a subdir of solidlsp instead of to the user's home
-        pre_migration_ls_resources_dir = os.path.join(os.path.dirname(__file__), "language_servers", "static", cls.__name__)
-        if os.path.exists(pre_migration_ls_resources_dir):
-            if os.path.exists(result):
-                # if the directory already exists, we just remove the old resources
-                shutil.rmtree(result, ignore_errors=True)
-            else:
-                # move old resources to the new location
-                shutil.move(pre_migration_ls_resources_dir, result)
         if mkdir:
             os.makedirs(result, exist_ok=True)
         return result
@@ -458,12 +428,10 @@ class SolidLanguageServer(ABC):
         """
         Creates a language specific LanguageServer instance based on the given configuration, and appropriate settings for the programming language.
 
-        If language is Java, then ensure that jdk-17.0.6 or higher is installed, `java` is in PATH, and JAVA_HOME is set to the installation directory.
-        If language is JS/TS, then ensure that node (v18.16.0 or higher) is installed and in PATH.
+        Node-based retained language servers require Node.js/npm where their dependency provider documents it.
 
         :param repository_root_path: The root path of the repository.
         :param config: language server configuration.
-        :param logger: The logger to use.
         :param timeout: the timeout, in seconds, for requests to the language server; if None, use no timeout
         :param solidlsp_settings: additional settings
         :return LanguageServer: A language specific LanguageServer instance.
@@ -486,7 +454,6 @@ class SolidLanguageServer(ABC):
         self,
         config: LanguageServerConfig,
         repository_root_path: str,
-        process_launch_info: ProcessLaunchInfo | None,
         language_id: str,
         solidlsp_settings: SolidLSPSettings,
         cache_version_raw_document_symbols: Hashable = 1,
@@ -498,10 +465,6 @@ class SolidLanguageServer(ABC):
 
         :param config: the language server's configuration.
         :param repository_root_path: the root path of the repository.
-        :param process_launch_info: (DEPRECATED: pass None and implement _create_dependency_provider instead)
-            the command used to start the actual language server.
-            The command must pass appropriate flags to the binary, so that it runs in the stdio mode,
-            as opposed to HTTP, TCP modes supported by some language servers.
         :param language_id: The language identifier which will be passed to the language server in the `textDocument/didOpen`
             notification by default.
             If the language server uses multiple language identifiers, it must override the method `get_language_id_for_file`
@@ -524,9 +487,7 @@ class SolidLanguageServer(ABC):
         self._encoding = config.encoding
         self.repository_root_path: str = repository_root_path
 
-        log.debug(
-            f"Creating language server instance for {repository_root_path=} with {language_id=} and process launch info: {process_launch_info}"
-        )
+        log.debug(f"Creating language server instance for {repository_root_path=} with {language_id=}")
 
         self.language_id = language_id
         """
@@ -572,7 +533,7 @@ class SolidLanguageServer(ABC):
             logging_fn = None
 
         # create the low-level server interface, potentially installing dependencies and launching a subprocess
-        self._process_launch_info: ProcessLaunchInfo | None = process_launch_info
+        self._process_launch_info: ProcessLaunchInfo | None = None
         self._dependency_provider: LanguageServerDependencyProvider | None = None
         self.server = self._create_language_server_interface(logging_fn)
         """
@@ -601,15 +562,8 @@ class SolidLanguageServer(ABC):
         return self._custom_settings
 
     def _create_dependency_provider(self) -> LanguageServerDependencyProvider:
-        """
-        Creates the dependency provider for this language server.
-
-        Subclasses should override this method to provide their specific dependency provider.
-        This method is only called if process_launch_info is not passed to __init__.
-        """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} must implement _create_dependency_provider() or pass process_launch_info to __init__()"
-        )
+        """Create this adapter's dependency provider."""
+        raise NotImplementedError(f"{self.__class__.__name__} must implement _create_dependency_provider()")
 
     def _get_dependency_provider(self) -> LanguageServerDependencyProvider:
         if self._dependency_provider is None:
@@ -700,7 +654,7 @@ class SolidLanguageServer(ABC):
 
         # canonicalize the key so lookups using URIs produced by pathlib.Path.as_uri() match
         # what servers publish (e.g. file:///c%3A/... or file:///c:/... vs. file:///C:/...)
-        key = self._canonicalize_published_diagnostics_uri(uri)
+        key = uri
 
         with self._published_diagnostics_condition:
             self._published_diagnostics_generation += 1
@@ -708,37 +662,8 @@ class SolidLanguageServer(ABC):
             self._published_diagnostics_generation_by_uri[key] = self._published_diagnostics_generation
             self._published_diagnostics_condition.notify_all()
 
-    @staticmethod
-    def _canonicalize_published_diagnostics_uri(uri: str) -> str:
-        """
-        Canonicalizes a ``file://`` URI so that diagnostics published by language servers
-        and lookups based on ``pathlib.Path.as_uri()`` agree on the same key.
-
-        On Windows, servers may publish under ``file:///c%3A/...`` or ``file:///c:/...`` while
-        ``pathlib.Path.as_uri()`` produces ``file:///C:/...``. The canonical form uses an
-        upper-case drive letter and a plain colon.
-        """
-        if os.name != "nt" or not uri.startswith("file:///"):
-            return uri
-
-        # extract the segment after "file:///" up to the next slash and look for a drive letter
-        prefix = "file:///"
-        rest = uri[len(prefix) :]
-        slash = rest.find("/")
-        head = rest if slash < 0 else rest[:slash]
-        tail = "" if slash < 0 else rest[slash:]
-
-        if (len(head) >= 2 and head[0].isalpha() and head[1] == ":") or (
-            len(head) >= 4 and head[0].isalpha() and head[1:4].lower() == "%3a"
-        ):
-            head = head[0].upper() + ":"
-        else:
-            return uri
-
-        return prefix + head + tail
-
     def _get_published_diagnostics_generation(self, uri: str) -> int:
-        key = self._canonicalize_published_diagnostics_uri(uri)
+        key = uri
         with self._published_diagnostics_condition:
             return self._published_diagnostics_generation_by_uri.get(key, -1)
 
@@ -748,7 +673,7 @@ class SolidLanguageServer(ABC):
         after_generation: int,
         timeout: float,
     ) -> list[ls_types.Diagnostic] | None:
-        key = self._canonicalize_published_diagnostics_uri(uri)
+        key = uri
         deadline = perf_counter() + timeout
         with self._published_diagnostics_condition:
             while True:
@@ -762,7 +687,7 @@ class SolidLanguageServer(ABC):
                 self._published_diagnostics_condition.wait(timeout=remaining_timeout)
 
     def _get_cached_published_diagnostics(self, uri: str) -> list[ls_types.Diagnostic] | None:
-        key = self._canonicalize_published_diagnostics_uri(uri)
+        key = uri
         with self._published_diagnostics_condition:
             diagnostics = self._published_diagnostics.get(key)
             if diagnostics is None:
@@ -2221,7 +2146,7 @@ class SolidLanguageServer(ABC):
             if symbol["kind"] == ls_types.SymbolKind.File:
                 # For file symbols, process their children (top-level symbols)
                 for child in symbol["children"]:
-                    # Handle cross-platform path resolution (fixes Docker/macOS path issues)
+                    # Handle alternate workspace roots, for example container path mappings.
                     absolute_path = Path(child["location"]["absolutePath"]).resolve()
                     repository_root = Path(self.repository_root_path).resolve()
 

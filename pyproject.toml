@@ -9,7 +9,6 @@ description = "Standalone Serena and Orchestrator MCP runtime for the Kendell Ch
 readme = "README.md"
 requires-python = ">=3.13, <3.14"
 dependencies = [
-  "beautifulsoup4==4.14.2",
   "charset-normalizer==3.4.6",
   "click==8.3.1",
   "docstring-parser==0.17.0",

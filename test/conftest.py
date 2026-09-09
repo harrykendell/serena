@@ -1,5 +1,4 @@
 import os
-import platform
 import re
 import shutil as _sh
 from collections.abc import Iterator
@@ -275,10 +274,6 @@ is_ci = os.getenv("CI") == "true" or os.getenv("GITHUB_ACTIONS") == "true"
 Flag indicating whether the tests are running in the GitHub CI environment.
 """
 
-is_windows = platform.system() == "Windows"
-is_macos = platform.system() == "Darwin"
-is_linux = platform.system() == "Linux"
-
 
 _LANGUAGE_PYTEST_MARKERS: dict[LanguageServerId, list[MarkDecorator | Mark]] = {
     LanguageServerId.PYTHON: [pytest.mark.python],
@@ -311,18 +306,11 @@ def get_pytest_markers(ls_id: LanguageServerId) -> list[MarkDecorator | Mark]:
 
 
 def _is_matlab_available() -> bool:
-    """Whether a MATLAB installation can be located (env var or a known install path)."""
-    if os.environ.get("MATLAB_PATH") is not None:
-        return True
-    return any(
-        os.path.exists(p)
-        for p in (
-            "/Applications/MATLAB_R2024b.app",
-            "/Applications/MATLAB_R2025b.app",
-            "/Volumes/S1/Applications/MATLAB_R2024b.app",
-            "/Volumes/S1/Applications/MATLAB_R2025b.app",
-        )
-    )
+    """Whether MATLAB can be located on the supported Linux host."""
+    matlab_path = os.environ.get("MATLAB_PATH")
+    if matlab_path:
+        return Path(matlab_path).is_dir()
+    return any(any(Path(base).glob("R*")) for base in ("/usr/local/MATLAB", "/opt/MATLAB", str(Path.home() / "MATLAB")))
 
 
 def _determine_disabled_language_servers() -> list[LanguageServerId]:

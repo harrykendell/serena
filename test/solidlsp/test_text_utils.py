@@ -61,10 +61,10 @@ class TestTextUtils:
     def test_delete_text_deletes_last_line_without_trailing_newline(self) -> None:
         """Deleting the final line must work whether or not the file ends in a newline.
 
-        delete_lines(k, N-1) addresses the position one line past the last line
-        (line N, col 0). With no trailing newline there is no closing newline to
-        count, so get_index_from_line_col cannot resolve it; the delete must still
-        remove the last line instead of raising InvalidTextLocationError.
+        A range ending one line past the final line addresses (line N, col 0).
+        With no trailing newline there is no closing newline to count, so
+        get_index_from_line_col cannot resolve it; deletion must still remove the
+        last line instead of raising InvalidTextLocationError.
         """
         # File with 3 lines, no trailing newline: read_file (splitlines) shows 0='a',1='b',2='c'.
         text = "a\nb\nc"

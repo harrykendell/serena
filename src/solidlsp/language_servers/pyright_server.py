@@ -9,7 +9,8 @@ from typing import cast
 
 from overrides import override
 
-from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderUvx, SolidLanguageServer
+from solidlsp.dependency_provider import LanguageServerDependencyProvider, LanguageServerDependencyProviderUvx
+from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.settings import SolidLSPSettings
 
@@ -34,7 +35,6 @@ class PyrightServer(SolidLanguageServer):
         super().__init__(
             config,
             repository_root_path,
-            None,
             "python",
             solidlsp_settings,
         )

@@ -302,7 +302,7 @@ class TestProjectConfigYamlValidation:
         try:
             serena_dir = project_dir / SERENA_MANAGED_DIR_NAME
             serena_dir.mkdir(parents=True)
-            (serena_dir / "project.yml").write_text('project_name: "demo"\nlanguage_servers: ["csharp"]\nignored_paths:\n- **/bin/**\n')
+            (serena_dir / "project.yml").write_text('project_name: "demo"\nlanguage_servers: ["python"]\nignored_paths:\n- **/bin/**\n')
 
             with pytest.raises(ValueError) as exc_info:
                 ProjectConfig.load(project_dir, create_default_serena_config())
@@ -384,7 +384,7 @@ class TestSerenaConfigLoadSave:
         )
         bad_project = self._make_project_dir(
             "bad_project",
-            'project_name: "bad_project"\nlanguage_servers: ["csharp"]\nignored_paths:\n- **/bin/**\n',
+            'project_name: "bad_project"\nlanguage_servers: ["python"]\nignored_paths:\n- **/bin/**\n',
         )
         self._write_master_config([good_project, bad_project])
 

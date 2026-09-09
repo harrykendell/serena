@@ -14,7 +14,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pathspec
-import pytest
 
 from solidlsp import SolidLanguageServer, ls_types
 from solidlsp.ls_config import LanguageServerId
@@ -45,15 +44,6 @@ class _IgnoredPathServer(SolidLanguageServer):
 
     def _create_base_initialize_params(self) -> dict[str, object]:
         raise AssertionError("The test double must not build initialize params")
-
-
-def test_missing_lombok_class_under_target_is_ignored_not_raised(tmp_path: Path) -> None:
-    """JDTLS-style missing build artifact under target/classes -- must be ignored, never raise."""
-    ls = _IgnoredPathServer(tmp_path, LanguageServerId.PYTHON)
-    missing = "target/classes/test_repo/LombokModel$LombokModelBuilder.class"
-
-    assert not (tmp_path / missing).exists()
-    assert ls.is_ignored_path(missing) is True
 
 
 def test_missing_unsupported_extension_is_ignored(tmp_path: Path) -> None:
@@ -120,27 +110,6 @@ def test_existing_source_file_is_not_ignored(tmp_path: Path) -> None:
     src.parent.mkdir(parents=True)
     src.write_text("x = 1\n")
     assert ls.is_ignored_path("pkg/mod.py") is False
-
-
-@pytest.mark.parametrize(
-    "rel",
-    [
-        "target/classes/test_repo/LombokModel$LombokModelBuilder.class",
-        "build/classes/Foo.class",
-        "out/production/Foo.class",
-    ],
-)
-def test_java_build_output_paths_never_raise(tmp_path: Path, rel: str) -> None:
-    """Compiled-class paths classify as ignored via the unsupported-extension rule, present or not
-    (build dirnames are deliberately not hard-ignored for Java).
-    """
-    ls = _IgnoredPathServer(tmp_path, LanguageServerId.PYTHON)
-    # neither present nor absent should raise
-    assert ls.is_ignored_path(rel) is True
-    p = tmp_path / rel
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_bytes(b"")
-    assert ls.is_ignored_path(rel) is True
 
 
 class _StubSymbolLocationRequest(SolidLanguageServer.SymbolLocationRequest):

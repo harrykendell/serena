@@ -1,5 +1,5 @@
 # line ending convention to use when writing source files.
-# Possible values: "lf" (Unix), "crlf" (Windows), "native" (platform default).
+# Possible values: "lf", "crlf", or "native" (the host default).
 # Note that Serena's own files (e.g. memories and configuration files) always use native line endings.
 # This setting can be overridden on a per-project basis in project.yml files.
 line_ending: native
@@ -69,8 +69,8 @@ tool_timeout: 240
 # Set to 0 to keep language servers running until Serena shuts down.
 language_server_idle_timeout: 900
 
-# Legacy character ceiling for tools where the apply method has a default maximal answer length.
-default_max_tool_answer_chars: 150000
+# default maximum content length accepted by write_memory.
+max_memory_chars: 150000
 
 # Approximate default response budget when retained-output paging is available in the ChatGPT runtime.
 # Serena uses a deterministic four-characters-per-token approximation here. Explicit max_answer_chars tool arguments still
@@ -104,11 +104,10 @@ project_serena_folder_location: "$projectDir/.serena"
 #      **  matches any sequence of characters including path separators
 #       ?  matches any single character except path separators
 #   [abc]  matches any single character in the set (here: a, b, or c)
-# Path separators are normalised internally, so on Windows, both / and \ can be used in the patterns.
+# Project paths use the Linux '/' separator.
 # Example:
 #   trusted_project_path_patterns:
 #     - /home/user/projects/**
-#     - C:\Users\Anna\Dev\work\**
 # The pattern "**" matches any project path, so it can be used to trust all projects.
 trusted_project_path_patterns: []
 

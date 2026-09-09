@@ -273,14 +273,9 @@ class Tool(Component):
 
     def _effective_max_answer_chars(self, max_answer_chars: int) -> int:
         """Resolve one response budget while preserving explicit character overrides."""
-        if max_answer_chars != -1:
-            effective_max_answer_chars = max_answer_chars
-        elif self.agent.tool_is_active("read_tool_output") is True:
-            # use a smaller approximate token budget when exact retained paging is available
-            effective_max_answer_chars = self.agent.serena_config.default_max_tool_answer_tokens * 4
-        else:
-            effective_max_answer_chars = self.agent.serena_config.default_max_tool_answer_chars
-
+        effective_max_answer_chars = (
+            max_answer_chars if max_answer_chars != -1 else self.agent.serena_config.default_max_tool_answer_tokens * 4
+        )
         if effective_max_answer_chars <= 0:
             raise ValueError(f"Resolved maximum answer length must be positive, got: {effective_max_answer_chars}")
         return effective_max_answer_chars
@@ -291,51 +286,36 @@ class Tool(Component):
         max_answer_chars: int,
         shortened_result_factories: list[Callable[[], str]] | None = None,
     ) -> str:
-        """Limit the length of the result string, optionally trying progressively shorter versions.
+        """Limit a tool result while retaining the complete value for exact paging.
 
         :param result: the full result string
-        :param max_answer_chars: maximum allowed characters. -1 means use the context-appropriate default.
-        :param shortened_result_factories: optional list of closures, each producing a progressively shorter
-            version of the result. They are tried in order until one fits within the resolved response budget.
-        :return: the result string, potentially replaced by a shortened version
+        :param max_answer_chars: maximum allowed characters. -1 means use the configured default.
+        :param shortened_result_factories: optional closures producing progressively shorter summaries;
+            the richest summary that fits is appended to the retained-output notice.
+        :return: the original result when it fits, otherwise a bounded retained-output response
         """
         effective_max_answer_chars = self._effective_max_answer_chars(max_answer_chars)
         if (n_chars := len(result)) <= effective_max_answer_chars:
             return result
 
-        too_long_msg = (
-            f"The answer is too long ({n_chars} characters). " + "You can adjust your query or raise the max_answer_chars parameter."
+        output_id = self.agent.retain_tool_output(self.get_name(), result)
+        retained_msg = (
+            f"The answer is too long ({n_chars} characters). You can adjust your query or raise the max_answer_chars parameter.\n"
+            f"Full output retained as {output_id}.\n"
+            f"complete=false; truncated=true; total_chars={n_chars}\n"
+            f"Use read_tool_output(output_id='{output_id}', offset=<offset>) to read an exact page."
         )
-        retained_output_available = self.agent.tool_is_active("read_tool_output") is True
-        if retained_output_available:
-            output_id = self.agent.retain_tool_output(self.get_name(), result)
-            retained_msg = (
-                f"{too_long_msg}\nFull output retained as {output_id}.\n"
-                f"complete=false; truncated=true; total_chars={n_chars}\n"
-                f"Use read_tool_output(output_id='{output_id}', offset=<offset>) to read an exact page."
-            )
-            if shortened_result_factories is not None:
-                # prefer the richest compact representation that fits while preserving exact recovery
-                for make_shorter in shortened_result_factories:
-                    shortened = make_shorter()
-                    candidate = f"{retained_msg}\n{shortened}"
-                    if len(candidate) <= effective_max_answer_chars:
-                        return candidate
-            return self.agent.render_tool_output_tail(
-                output_id,
-                effective_max_answer_chars,
-                answer_chars=n_chars,
-                retained_label="Full output",
-            )
-
         if shortened_result_factories is not None:
-            # preserve legacy behaviour in contexts without retained-output paging
             for make_shorter in shortened_result_factories:
-                shortened = make_shorter()
-                candidate = f"{too_long_msg}\n{shortened}"
+                candidate = f"{retained_msg}\n{make_shorter()}"
                 if len(candidate) <= effective_max_answer_chars:
                     return candidate
-        return too_long_msg
+        return self.agent.render_tool_output_tail(
+            output_id,
+            effective_max_answer_chars,
+            answer_chars=n_chars,
+            retained_label="Full output",
+        )
 
     def is_active(self) -> bool:
         return self.agent.tool_is_active(self.get_name())
@@ -647,15 +627,6 @@ class RegisteredTool:
 
 @singleton
 class ToolRegistry:
-    _deleted_tools: list[str] = [
-        "think_about_collected_information",
-        "prepare_for_new_conversation",
-        "summarize_changes",
-        "think_about_whether_you_are_done",
-        "switch_modes",
-        "check_onboarding_performed",
-    ]
-
     def __init__(self) -> None:
         from serena.tools import MCP_TOOL_CLASSES
 
@@ -702,18 +673,3 @@ class ToolRegistry:
         for tool_name in sorted(tool_dict):
             tool = tool_dict[tool_name]
             print(f" * `{tool_name}`: {tool.get_tool_description().strip()}")
-
-    def is_valid_tool_name(self, tool_name: str) -> bool:
-        return tool_name in self._tool_dict
-
-    def check_valid_tool_name(self, tool_name: str, caller_context_for_logging: str = "") -> bool:
-        """Returns True if the tool name is valid, False if it is deleted, and raises ValueError if it is invalid."""
-        if self.is_deleted_tool_name(tool_name):
-            log.warning(f"Tool name is deleted: {tool_name}{caller_context_for_logging}")
-            return False
-        if not self.is_valid_tool_name(tool_name):
-            raise ValueError(f"Invalid tool name: {tool_name}{caller_context_for_logging}")
-        return True
-
-    def is_deleted_tool_name(self, tool_name: str) -> bool:
-        return tool_name in self._deleted_tools

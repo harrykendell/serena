@@ -8,7 +8,6 @@ import logging
 import os
 import platform
 import shutil
-import subprocess
 import tarfile
 import tempfile
 import uuid
@@ -24,18 +23,8 @@ import requests
 
 from solidlsp.ls_exceptions import InvalidTextLocationError, SolidLSPException
 from solidlsp.ls_types import UnifiedSymbolInformation
-from solidlsp.util.subprocess_util import subprocess_run
 
 log = logging.getLogger(__name__)
-
-
-def is_running_in_ci() -> bool:
-    """
-    Determines whether the current process is running in a Continuous Integration (CI) environment.
-
-    :return: True if running in CI, False otherwise
-    """
-    return os.getenv("CI") == "true" or os.getenv("GITHUB_ACTIONS") == "true"
 
 
 class TextStepper:
@@ -351,18 +340,13 @@ class PathUtils:
 
     @staticmethod
     def uri_to_path(uri: str) -> str:
-        """
-        Converts a URI to a file path. Works on both Linux and Windows.
-
-        This method was obtained from https://stackoverflow.com/a/61922504
-        """
+        """Convert a file URI to an absolute path on the supported Linux host."""
         from urllib.parse import unquote, urlparse
-        from urllib.request import url2pathname
 
         parsed = urlparse(uri)
-        host = f"{os.path.sep}{os.path.sep}{parsed.netloc}{os.path.sep}"
-        path = os.path.abspath(os.path.join(host, url2pathname(unquote(parsed.path))))
-        return path
+        if parsed.scheme not in ("", "file"):
+            raise ValueError(f"Unsupported URI scheme: {parsed.scheme}")
+        return os.path.abspath(unquote(parsed.path))
 
     @staticmethod
     def path_to_uri(path: str) -> str:
@@ -646,29 +630,11 @@ class FileUtils:
 
 
 class PlatformId(str, Enum):
-    WIN_x86 = "win-x86"
-    WIN_x64 = "win-x64"
-    WIN_arm64 = "win-arm64"
-    OSX = "osx"
-    OSX_x64 = "osx-x64"
-    OSX_arm64 = "osx-arm64"
     LINUX_x86 = "linux-x86"
     LINUX_x64 = "linux-x64"
     LINUX_arm64 = "linux-arm64"
     LINUX_MUSL_x64 = "linux-musl-x64"
     LINUX_MUSL_arm64 = "linux-musl-arm64"
-
-    def is_windows(self) -> bool:
-        return self.value.startswith("win")
-
-
-class DotnetVersion(str, Enum):
-    V4 = "4"
-    V6 = "6"
-    V7 = "7"
-    V8 = "8"
-    V9 = "9"
-    VMONO = "mono"
 
 
 class PlatformUtils:
@@ -701,46 +667,6 @@ class PlatformUtils:
             if libc and libc != "glibc":
                 platform_id = f"linux-{libc}-{machine_map[machine]}"
         return PlatformId(platform_id)
-
-    @staticmethod
-    def get_dotnet_version() -> DotnetVersion:
-        """
-        Returns the dotnet version for the current system
-        """
-        try:
-            result = subprocess_run(["dotnet", "--list-runtimes"], capture_output=True, check=True)
-            available_version_cmd_output = []
-            for line in result.stdout.split("\n"):
-                if line.startswith("Microsoft.NETCore.App"):
-                    version_cmd_output = line.split(" ")[1]
-                    available_version_cmd_output.append(version_cmd_output)
-
-            if not available_version_cmd_output:
-                raise SolidLSPException("dotnet not found on the system")
-
-            # Check for supported versions in order of preference (latest first)
-            for version_cmd_output in available_version_cmd_output:
-                if version_cmd_output.startswith("9"):
-                    return DotnetVersion.V9
-                if version_cmd_output.startswith("8"):
-                    return DotnetVersion.V8
-                if version_cmd_output.startswith("7"):
-                    return DotnetVersion.V7
-                if version_cmd_output.startswith("6"):
-                    return DotnetVersion.V6
-                if version_cmd_output.startswith("4"):
-                    return DotnetVersion.V4
-
-            # If no supported version found, raise exception with all available versions
-            raise SolidLSPException(
-                f"No supported dotnet version found. Available versions: {', '.join(available_version_cmd_output)}. Supported versions: 4, 6, 7, 8, 9"
-            )
-        except (FileNotFoundError, subprocess.CalledProcessError):
-            try:
-                result = subprocess_run(["mono", "--version"], capture_output=True, check=True)
-                return DotnetVersion.VMONO
-            except (FileNotFoundError, subprocess.CalledProcessError):
-                raise SolidLSPException("dotnet or mono not found on the system")
 
 
 class SymbolUtils:

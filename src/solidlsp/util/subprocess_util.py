@@ -1,6 +1,5 @@
 import logging
 import os
-import platform
 import queue
 import signal
 import subprocess
@@ -83,7 +82,7 @@ class ManagedSubprocess(Generic[TStream], ToStringMixin):
         self._name = name
 
         # a process launched with start_new_session=True is its own group leader, so its PGID is its PID
-        self._process_group_id = popen.pid if (start_new_session and os.name == "posix") else None
+        self._process_group_id = popen.pid if start_new_session else None
 
     def _tostring_includes(self) -> list[str]:
         return ["_name"]
@@ -163,15 +162,10 @@ class ManagedSubprocessLauncher:
 
     @staticmethod
     def _load_libc() -> "ctypes.CDLL | None":
-        """
-        Loads libc if on Linux, where it is needed for pdeathsig protection.
-        """
-        if platform.system() != "Linux":
-            return None
+        """Load libc for Linux parent-death-signal protection."""
         import ctypes
 
         try:
-            # resolve libc, passing None to resolve symbols from the current process image (which is linked against libc on any Linux)
             return ctypes.CDLL(None)
         except OSError as e:
             log.warning(
@@ -347,8 +341,7 @@ def terminate_process_tree_with_kill_fallback(
     :param process_group_id: if given, the POSIX process group ID that ``process`` leads (i.e. it was
         launched with ``start_new_session=True``, so its PGID equals its PID). When set, cleanup
         signals the whole group directly via ``os.killpg`` instead of walking the process tree with
-        ``psutil``, which requires system-wide process-table enumeration (``sysctl(KERN_PROC_ALL)`` on
-        macOS) that can be denied even for processes we started and own. Only pass this for a process
+        ``psutil``. Only pass this for a process
         that was started in its own session: signaling the group of a process that shares ours would
         also signal us.
     """

@@ -9,13 +9,8 @@ from collections.abc import Hashable
 
 from overrides import override
 
-from solidlsp.ls import (
-    DocumentSymbols,
-    LanguageServerDependencyProvider,
-    LanguageServerDependencyProviderSinglePath,
-    LSPFileBuffer,
-    SolidLanguageServer,
-)
+from solidlsp.dependency_provider import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath
+from solidlsp.ls import DocumentSymbols, LSPFileBuffer, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.ls_types import SymbolKind, UnifiedSymbolInformation
 from solidlsp.settings import SolidLSPSettings
@@ -26,24 +21,17 @@ log = logging.getLogger(__name__)
 
 MARKSMAN_ALLOWED_HOSTS = ("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com")
 
-# Version pinning convention (see eclipse_jdtls.py for the full spec):
-#   INITIAL_* — frozen forever; legacy unversioned install dir is reserved for it.
-#   DEFAULT_* — bumped on upgrades; goes into a versioned subdir.
+# Version pinning convention: INITIAL_* remains frozen for the existing unversioned
+# install directory; DEFAULT_* may advance and uses a versioned subdirectory.
 INITIAL_MARKSMAN_VERSION = "2024-12-18"
 INITIAL_MARKSMAN_SHA256_BY_PLATFORM = {
     "linux-x64": "b9cb666c643dfd9b699811fdfc445ed4c56be65c1d878c21d46847f0d7b0e475",
     "linux-arm64": "b8d6972a56f3f9b7bbbf7c77ef8998e3b66fa82fb03c01398e224144486c9e73",
-    "osx-x64": "7e18803966231a33ee107d0d26f69b41f2f0dc1332c52dd9729c2e29fb77be83",
-    "osx-arm64": "7e18803966231a33ee107d0d26f69b41f2f0dc1332c52dd9729c2e29fb77be83",
-    "win-x64": "39de9df039c8b0d627ac5918a9d8792ad20fc49e2461d1f5c906975c016799ec",
 }
 DEFAULT_MARKSMAN_VERSION = "2024-12-18"
 DEFAULT_MARKSMAN_SHA256_BY_PLATFORM = {
     "linux-x64": "b9cb666c643dfd9b699811fdfc445ed4c56be65c1d878c21d46847f0d7b0e475",
     "linux-arm64": "b8d6972a56f3f9b7bbbf7c77ef8998e3b66fa82fb03c01398e224144486c9e73",
-    "osx-x64": "7e18803966231a33ee107d0d26f69b41f2f0dc1332c52dd9729c2e29fb77be83",
-    "osx-arm64": "7e18803966231a33ee107d0d26f69b41f2f0dc1332c52dd9729c2e29fb77be83",
-    "win-x64": "39de9df039c8b0d627ac5918a9d8792ad20fc49e2461d1f5c906975c016799ec",
 }
 
 
@@ -88,33 +76,6 @@ class Marksman(SolidLanguageServer):
                         sha256=_marksman_sha(version, "linux-arm64"),
                         allowed_hosts=MARKSMAN_ALLOWED_HOSTS,
                     ),
-                    RuntimeDependency(
-                        id="marksman",
-                        url=f"{marksman_releases}/marksman-macos",
-                        platform_id="osx-x64",
-                        archive_type="binary",
-                        binary_name="marksman",
-                        sha256=_marksman_sha(version, "osx-x64"),
-                        allowed_hosts=MARKSMAN_ALLOWED_HOSTS,
-                    ),
-                    RuntimeDependency(
-                        id="marksman",
-                        url=f"{marksman_releases}/marksman-macos",
-                        platform_id="osx-arm64",
-                        archive_type="binary",
-                        binary_name="marksman",
-                        sha256=_marksman_sha(version, "osx-arm64"),
-                        allowed_hosts=MARKSMAN_ALLOWED_HOSTS,
-                    ),
-                    RuntimeDependency(
-                        id="marksman",
-                        url=f"{marksman_releases}/marksman.exe",
-                        platform_id="win-x64",
-                        archive_type="binary",
-                        binary_name="marksman.exe",
-                        sha256=_marksman_sha(version, "win-x64"),
-                        allowed_hosts=MARKSMAN_ALLOWED_HOSTS,
-                    ),
                 ]
             )
 
@@ -152,7 +113,6 @@ class Marksman(SolidLanguageServer):
         super().__init__(
             config,
             repository_root_path,
-            None,
             "markdown",
             solidlsp_settings,
         )

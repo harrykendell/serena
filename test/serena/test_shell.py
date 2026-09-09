@@ -87,7 +87,6 @@ def test_shell_tool_oversize_response_reuses_live_transcript_id(tmp_path) -> Non
     store = ToolOutputStore()
     agent = MagicMock()
     agent.get_active_project_or_raise.return_value = SimpleNamespace(project_root=str(tmp_path))
-    agent.serena_config.default_max_tool_answer_chars = 400
     agent.serena_config.default_max_tool_answer_tokens = 100
     agent.serena_config.tool_timeout = 30
     agent.open_tool_output.side_effect = store.open

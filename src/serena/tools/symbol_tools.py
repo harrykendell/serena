@@ -21,17 +21,6 @@ from serena.util.text_utils import find_text_coordinates
 from solidlsp.ls_types import SymbolKind
 
 
-class RestartLanguageServerTool(Tool):
-    """Restarts the language server(s)."""
-
-    def apply(self) -> str:
-        """Use this tool only on explicit user request or after confirmation.
-        It may be necessary to restart the language server if it hangs.
-        """
-        self.agent.reset_language_server_manager()
-        return SUCCESS_RESULT
-
-
 class GetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead):
     """
     Gets an overview of the top-level symbols defined in a given file.
@@ -47,7 +36,7 @@ class GetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead):
 
         :param relative_path: the relative path to the file to get the overview of
         :param depth: depth up to which descendants shall be retrieved.
-            Default (-1) results in a language specific choice: 1 for java and kotlin and 0 for other languages
+            Default (-1) uses depth 0.
         :param max_answer_chars: if the overview is longer than this number of characters,
             no content will be returned. -1 means the default value from the config will be used.
             Don't adjust unless there is really no other way to get the content required for the task.
@@ -56,10 +45,7 @@ class GetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead):
         # Note: file system sync not required (relevant file is opened in the language server explicitly)
 
         if depth == -1:
-            if relative_path.endswith((".java", ".kt")):
-                depth = 1
-            else:
-                depth = 0
+            depth = 0
 
         result = self.get_symbol_overview(relative_path, depth=depth)
 
@@ -161,7 +147,7 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead):
 
         A name path is a path in the symbol tree *within a source file*.
         For example, the method `my_method` defined in class `MyClass` would have the name path `MyClass/my_method`.
-        If a symbol is overloaded (e.g., in Java), a 0-based index is appended (e.g. "MyClass/my_method[0]") to
+        If a symbol is overloaded (e.g., in C++), a 0-based index is appended (e.g. "MyClass/my_method[0]") to
         uniquely identify it.
 
         To search for a symbol, you provide a name path pattern that is used to match against name paths.
@@ -560,55 +546,6 @@ class GetDiagnosticsForFileTool(Tool, ToolMarkerSymbolicRead):
         return self._limit_length(result, max_answer_chars)
 
 
-class GetDiagnosticsForSymbolTool(Tool, ToolMarkerSymbolicRead):
-    """
-    Gets diagnostics for a symbol and, optionally, for symbols that reference it.
-    """
-
-    def apply(
-        self,
-        name_path: str,
-        reference_file: str = "",
-        check_symbol_references: bool = False,
-        min_severity: int = 4,
-        max_answer_chars: int = -1,
-    ) -> str:
-        """
-        Gets diagnostics for the specified symbol. When `check_symbol_references` is true, diagnostics for all
-        referencing symbols are also included. The result is grouped as
-        `relative_path -> severity -> name_path -> diagnostics_results`.
-
-        :param name_path: the name path of the symbol to inspect.
-        :param reference_file: optional file path used to disambiguate the symbol search.
-        :param check_symbol_references: whether to additionally collect diagnostics for symbols that reference the symbol.
-        :param min_severity: minimum LSP severity to include, where 1=Error, 2=Warning, 3=Information, 4=Hint.
-            Diagnostics with lower-or-equal numeric severity are returned.
-        :param max_answer_chars: max result length; -1 for default
-        :return: grouped diagnostics for the requested symbol and, optionally, its referencing symbols.
-        """
-        self.project.ls_sync_file_system_changes()
-
-        symbol_retriever = self.create_language_server_symbol_retriever()
-        diagnostics_by_symbol = symbol_retriever.get_symbol_diagnostics(
-            name_path=name_path,
-            reference_file=reference_file or None,
-            check_symbol_references=check_symbol_references,
-            min_severity=min_severity,
-        )
-
-        grouped_diagnostics = GroupedDiagnostics()
-        for symbol, diagnostics in diagnostics_by_symbol.items():
-            relative_path = symbol.relative_path
-            if relative_path is None:
-                continue
-            symbol_name_path = symbol.get_name_path()
-            for diagnostic in diagnostics:
-                grouped_diagnostics.add(relative_path, symbol_name_path, diagnostic)
-
-        result = self._to_json(grouped_diagnostics.get_dict())
-        return self._limit_length(result, max_answer_chars)
-
-
 class ReplaceSymbolBodyTool(EditingToolWithDiagnostics):
     """
     Replaces the full definition of a symbol using the language server backend.
@@ -708,7 +645,7 @@ class RenameSymbolTool(Tool, ToolMarkerSymbolicEdit):
     ) -> str:
         """
         Renames the symbol with the given `name_path` to `new_name` throughout the entire codebase.
-        Note: for languages with method overloading, like Java, name_path may have to include a method's
+        Note: for languages with method overloading, like C++, name_path may have to include a method's
         signature to uniquely identify a method.
 
         :param name_path: name path of the symbol to rename

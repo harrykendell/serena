@@ -1,7 +1,6 @@
 import logging
 import os
 import tempfile
-import time
 from collections.abc import Sequence
 from enum import Enum
 from typing import Any
@@ -44,11 +43,6 @@ class YamlCommentNormalisation(Enum):
     """
     Document is assumed to have leading comments only, i.e. comments before keys, only full-line comments.
     This normalisation achieves that comments are properly associated with keys as leading comments.
-    """
-    LEADING_WITH_CONVERSION_FROM_TRAILING = "leading_with_conversion_from_trailing"
-    """
-    Document is assumed to have a mixture of leading comments (before keys) and trailing comments (after values), only full-line comments.
-    This normalisation achieves that all comments are converted to leading comments and properly associated with keys.
     """
     # NOTE: Normalisation for trailing comments was attempted but is extremely hard, because
     #  it is difficult to position the comments properly after values, especially for complex values.
@@ -151,7 +145,7 @@ def normalise_yaml_comments(commented_map: CommentedMap, comment_normalisation: 
     match comment_normalisation:
         case YamlCommentNormalisation.NONE:
             pass
-        case YamlCommentNormalisation.LEADING | YamlCommentNormalisation.LEADING_WITH_CONVERSION_FROM_TRAILING:
+        case YamlCommentNormalisation.LEADING:
             # Comments are supposed to be leading comments (i.e., before a key and associated with the key).
             # When ruamel parses a YAML, however, comments belonging to a key may be stored as trailing
             # comments of the previous key or as a document-level comment.
@@ -174,35 +168,6 @@ def normalise_yaml_comments(commented_map: CommentedMap, comment_normalisation: 
                         preceding_comment[ITEM_COMMENT_INDEX_AFTER] = None
                 preceding_comment = current_comment
 
-            if comment_normalisation == YamlCommentNormalisation.LEADING_WITH_CONVERSION_FROM_TRAILING:
-                # Second pass: conversion of trailing comments
-                # If a leading comment ends with "\n\n", i.e. it has an empty line between the comment and the key,
-                # it was actually intended as a trailing comment for the preceding key, so we associate it with
-                # the preceding key instead (if the preceding key has no leading comment already).
-                preceding_comment = None
-                for key in keys:
-                    current_comment = comment_items.get(key, [None] * 4)
-                    if current_comment[ITEM_COMMENT_INDEX_BEFORE] is not None:
-                        token_list = make_list(current_comment[ITEM_COMMENT_INDEX_BEFORE])
-                        if len(token_list) > 0:
-                            last_token = token_list[-1]
-                            if isinstance(last_token, CommentToken) and last_token.value.endswith("\n\n"):
-                                # move comment to preceding key, removing the empty line,
-                                # and adding an empty line at the beginning instead
-                                if preceding_comment is not None and yaml_comment_entry_is_empty(
-                                    preceding_comment[ITEM_COMMENT_INDEX_BEFORE]
-                                ):
-                                    last_token.value = last_token.value[:-1]
-
-                                    first_token = token_list[0]
-                                    if isinstance(first_token, CommentToken):
-                                        if not first_token.value.startswith("\n"):
-                                            first_token.value = "\n" + first_token.value
-
-                                    preceding_comment[ITEM_COMMENT_INDEX_BEFORE] = token_list
-                                    current_comment[ITEM_COMMENT_INDEX_BEFORE] = None
-                    preceding_comment = current_comment
-
             # remove nested comments, as we assume that only top-level keys are supposed to be commented
             remove_nested_comments()
         case _:
@@ -223,7 +188,7 @@ def save_yaml(path: str, data: dict | CommentedMap, preserve_comments: bool = Tr
     try:
         with os.fdopen(fd, "w", encoding=SERENA_FILE_ENCODING) as f:
             yaml.dump(data, f)
-        _replace_with_retry(tmp, path)
+        _replace_atomically(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)
@@ -232,22 +197,9 @@ def save_yaml(path: str, data: dict | CommentedMap, preserve_comments: bool = Tr
         raise
 
 
-def _replace_with_retry(src: str, dst: str, *, attempts: int = 10, delay_s: float = 0.05) -> None:
-    """``os.replace(src, dst)`` with a short retry on a Windows sharing violation.
-
-    On Windows the atomic rename fails with ``PermissionError`` (WinError 5/32) if another process
-    momentarily holds ``dst`` open — e.g. a second Serena process reading or replacing the same
-    config. A brief bounded retry rides out that contention; the temp file is still complete, so we
-    never fall back to a non-atomic write.
-    """
-    for attempt in range(attempts):
-        try:
-            os.replace(src, dst)
-            return
-        except PermissionError:
-            if attempt == attempts - 1:
-                raise
-            time.sleep(delay_s)
+def _replace_atomically(src: str, dst: str) -> None:
+    """Atomically replace ``dst`` with ``src`` on the supported Linux host."""
+    os.replace(src, dst)
 
 
 def yaml_comment_entry_is_empty(comment_entry: Any) -> bool:
@@ -313,7 +265,7 @@ def transfer_yaml_comments(
     match comment_normalisation:
         case YamlCommentNormalisation.NONE:
             pass
-        case YamlCommentNormalisation.LEADING | YamlCommentNormalisation.LEADING_WITH_CONVERSION_FROM_TRAILING:
+        case YamlCommentNormalisation.LEADING:
             transfer_yaml_comments_by_index(
                 source, target, [ITEM_COMMENT_INDEX_BEFORE], forced_update_keys=forced_update_keys, force_update_all=force_update_all
             )

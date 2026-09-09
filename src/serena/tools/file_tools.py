@@ -266,7 +266,7 @@ class ReplaceInFilesTool(EditingToolWithDiagnostics):
             specified as $!1, $!2, etc.
         :param mode: either "literal" or "regex", specifying how `needle` is to be interpreted
         :param relative_path: only consider this file or directory (default: the whole project)
-        :param paths_include_glob: optional glob (relative to the project root, e.g. "src/**/*.java")
+        :param paths_include_glob: optional glob (relative to the project root, e.g. "src/**/*.cpp")
             restricting which files are considered
         :param paths_exclude_glob: optional glob of files to exclude; takes precedence over the include glob
         :param dry_run: if True, do not modify anything; return the prospective changes as a list of
@@ -456,98 +456,6 @@ class ReplaceInFilesTool(EditingToolWithDiagnostics):
             per_file = "\n".join(f"  {path}: {len(occs)}" for path, occs in occurrences_by_file.items())
             summary = f"Replaced {len(occurrences)} occurrence(s) in {len(occurrences_by_file)} file(s):\n{per_file}"
             return diagnostics_context.format_result(summary)
-
-
-class DeleteLinesTool(EditingToolWithDiagnostics):
-    """
-    Deletes a range of lines within a file.
-    """
-
-    def apply(
-        self,
-        relative_path: str,
-        start_line: int,
-        end_line: int,
-    ) -> str:
-        """
-        Deletes the given lines in the file.
-        Requires that the same range of lines was previously read using the `read_file` tool to verify correctness
-        of the operation.
-
-        :param relative_path: the relative path to the file
-        :param start_line: the 0-based index of the first line to be deleted
-        :param end_line: the 0-based index of the last line to be deleted
-        """
-        with self.DiagnosticsContext(self, relative_path) as diagnostics_context:
-            code_editor = self.create_code_editor()
-            code_editor.delete_lines(relative_path, start_line, end_line)
-            return diagnostics_context.format_result(SUCCESS_RESULT)
-
-
-class ReplaceLinesTool(EditingToolWithDiagnostics):
-    """
-    Replaces a range of lines within a file with new content.
-    """
-
-    def apply(
-        self,
-        relative_path: str,
-        start_line: int,
-        end_line: int,
-        content: str,
-    ) -> str:
-        """
-        Replaces the given range of lines in the given file.
-        Requires that the same range of lines was previously read using the `read_file` tool to verify correctness
-        of the operation.
-
-        :param relative_path: the relative path to the file
-        :param start_line: the 0-based index of the first line to be deleted
-        :param end_line: the 0-based index of the last line to be deleted
-        :param content: the content to insert
-        """
-        # normalizing the replacement content
-        if not content.endswith("\n"):
-            content += "\n"
-
-        with self.DiagnosticsContext(self, relative_path) as diagnostics_context:
-            code_editor = self.create_code_editor()
-            code_editor.delete_lines(relative_path, start_line, end_line)
-            code_editor.insert_at_line(relative_path, start_line, content)
-
-            return diagnostics_context.format_result(SUCCESS_RESULT)
-
-
-class InsertAtLineTool(EditingToolWithDiagnostics):
-    """
-    Inserts content at a given line in a file.
-    """
-
-    def apply(
-        self,
-        relative_path: str,
-        line: int,
-        content: str,
-    ) -> str:
-        """
-        Inserts the given content at the given line in the file, pushing existing content of the line down.
-        In general, symbolic insert operations like insert_after_symbol or insert_before_symbol should be preferred if you know which
-        symbol you are looking for.
-        However, this can also be useful for small targeted edits of the body of a longer symbol (without replacing the entire body).
-
-        :param relative_path: the relative path to the file
-        :param line: the 0-based index of the line to insert content at
-        :param content: the content to be inserted
-        """
-        # normalizing the inserted content
-        if not content.endswith("\n"):
-            content += "\n"
-
-        with self.DiagnosticsContext(self, relative_path) as diagnostics_context:
-            code_editor = self.create_code_editor()
-            code_editor.insert_at_line(relative_path, line, content)
-
-            return diagnostics_context.format_result(SUCCESS_RESULT)
 
 
 class SearchForPatternTool(Tool):

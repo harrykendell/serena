@@ -198,11 +198,7 @@ class GitignoreParser:
         while queue:
             next_abs_path = queue.pop(0)
             if next_abs_path != self.repo_root:
-                try:
-                    rel_path = os.path.relpath(next_abs_path, self.repo_root)
-                except ValueError:
-                    # If the path is on a different drive (Windows) or cannot be made relative for another reason, we ignore it
-                    continue
+                rel_path = os.path.relpath(next_abs_path, self.repo_root)
                 if self.should_ignore(rel_path):
                     continue
             yield from scan(next_abs_path)
@@ -236,13 +232,9 @@ class GitignoreParser:
         """
         patterns = []
 
-        # Get the relative path from repo root to the gitignore directory. Normalize to
-        # forward slashes immediately: os.path.relpath returns native separators, but
-        # gitignore/pathspec patterns are always POSIX-style, and on Windows os.sep is
-        # backslash -- the same character pathspec uses as its escape character. Building
-        # the pattern with any raw os.sep would make a later blanket backslash->slash
-        # normalization indistinguishable from the escape backslashes below.
-        rel_dir = os.path.relpath(gitignore_dir, self.repo_root).replace(os.sep, "/")
+        # Gitignore/pathspec patterns use POSIX separators; the supported Linux host already
+        # yields that form from os.path.relpath.
+        rel_dir = os.path.relpath(gitignore_dir, self.repo_root)
         if rel_dir == ".":
             rel_dir = ""
 
@@ -279,10 +271,7 @@ class GitignoreParser:
             if is_anchored:
                 line = line[1:]
 
-            # Adjust pattern based on gitignore file location. Joined with a literal "/",
-            # never os.path.join/os.sep: gitignore patterns are always POSIX-style, and on
-            # Windows os.sep is backslash, indistinguishable from the escape backslashes
-            # rel_dir_pattern may already contain.
+            # Join pattern components with a literal "/" because gitignore patterns use POSIX syntax.
             if rel_dir:
                 if is_anchored:
                     # Anchored patterns are relative to the gitignore directory

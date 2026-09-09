@@ -21,21 +21,14 @@ def read_file_tool(tmp_path: Path) -> ReadFileTool:
     return tool
 
 
-def _deleted_by_delete_lines(content: str, line: int) -> str:
-    """
-    :return: the text that `delete_lines(line, line)` removes from the given content, which is
-        computed via the same primitive the tool uses (`code_editor.delete_lines` deletes the text
-        between (line, 0) and (line + 1, 0)).
-    """
-    _, deleted_text = TextUtils.delete_text_between_positions(content, start_line=line, start_col=0, end_line=line + 1, end_col=0)
-    return deleted_text
+def _line_at_lsp_index(content: str, line: int) -> str:
+    """Return one line using the same LSP position semantics as symbolic editing."""
+    _, line_text = TextUtils.delete_text_between_positions(content, start_line=line, start_col=0, end_line=line + 1, end_col=0)
+    return line_text.rstrip("\r\n")
 
 
 class TestReadFileToolLineNumbering:
-    """
-    `delete_lines`/`replace_lines` require the same range of lines to have been read via `read_file`
-    beforehand, so the line indices reported by `read_file` must be the ones the editing tools apply to.
-    """
+    """Read-file line indices must follow LSP line semantics used by symbolic editing."""
 
     @pytest.mark.parametrize(
         "content",
@@ -53,12 +46,12 @@ class TestReadFileToolLineNumbering:
             "line0\n\u2028line1\nline2\n",
         ],
     )
-    def test_read_file_lines_match_lines_targeted_by_delete_lines(self, read_file_tool: ReadFileTool, tmp_path: Path, content: str) -> None:
+    def test_read_file_lines_follow_lsp_line_indices(self, read_file_tool: ReadFileTool, tmp_path: Path, content: str) -> None:
         (tmp_path / "file.txt").write_text(content, newline="", encoding=DEFAULT_SOURCE_FILE_ENCODING)
 
         for line in range(len(TextUtils.split_lines(content.rstrip("\n")))):
             read_line = read_file_tool.apply("file.txt", start_line=line, end_line=line)
-            assert read_line == _deleted_by_delete_lines(content, line).rstrip("\r\n")
+            assert read_line == _line_at_lsp_index(content, line)
 
     def test_form_feed_does_not_shift_reported_line_indices(self, read_file_tool: ReadFileTool, tmp_path: Path) -> None:
         # a form feed is a page-break convention within a line, not a line break

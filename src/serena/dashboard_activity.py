@@ -80,15 +80,6 @@ class DashboardActivitySessionSummary:
         )
 
 
-@dataclass(frozen=True)
-class _SessionSummaryCacheEntry:
-    """Cached summary tied to one durable session file revision."""
-
-    mtime_ns: int
-    size: int
-    summary: DashboardActivitySessionSummary
-
-
 class DashboardActivityArchive:
     """Projects canonical execution-store state into the existing Serena dashboard session shape."""
 

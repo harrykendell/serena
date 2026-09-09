@@ -3,7 +3,6 @@
 import os
 import shutil
 import tempfile
-import time
 from pathlib import Path
 
 import pytest
@@ -34,9 +33,6 @@ def temp_project_dir():
     try:
         yield tmpdir
     finally:
-        # if windows, wait a bit to avoid PermissionError on cleanup
-        if os.name == "nt":
-            time.sleep(0.2)
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
@@ -51,9 +47,6 @@ def temp_project_dir_with_python_file():
             f.write("def hello():\n    pass\n")
         yield tmpdir
     finally:
-        # if windows, wait a bit to avoid PermissionError on cleanup
-        if os.name == "nt":
-            time.sleep(0.2)
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
@@ -212,8 +205,6 @@ class TestProjectIndex:
 
     def test_index_is_equivalent_to_create_with_index(self, cli_runner, temp_project_dir_with_python_file):
         """Test that 'index' behaves like 'create --index' for new projects."""
-        # Use manual temp directory creation with Windows-safe cleanup
-        # to avoid PermissionError on Windows CI when language servers hold file locks
         dir1 = tempfile.mkdtemp()
         dir2 = tempfile.mkdtemp()
 
@@ -243,10 +234,6 @@ class TestProjectIndex:
             assert os.path.exists(os.path.join(dir1, ".serena", "cache"))
             assert os.path.exists(os.path.join(dir2, ".serena", "cache"))
         finally:
-            # Windows-safe cleanup: wait for file handles to be released
-            if os.name == "nt":
-                time.sleep(0.2)
-            # Use ignore_errors to handle lingering file locks on Windows
             shutil.rmtree(dir1, ignore_errors=True)
             shutil.rmtree(dir2, ignore_errors=True)
 

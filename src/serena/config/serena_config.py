@@ -162,11 +162,6 @@ class ProjectConfig(SharedConfig):
     the comment normalisation strategy to use when loading/saving project configuration files.
     The template file must match this configuration (i.e. it must use leading comments if this is set to LEADING).
     """
-    _async_completion_events = {}
-    """
-    maps the object id of a ProjectConfig instance to an event which is set when the asynchronous auto-generation of 
-    the configuration is complete (if applicable).
-    """
     _save_lock = threading.Lock()
 
     def _tostring_includes(self) -> list[str]:
@@ -241,14 +236,11 @@ class ProjectConfig(SharedConfig):
         :param local_override_keys: the list of keys that have been overridden from project.local.yml
         """
         # map languages to list of enum items, checking for errors
-        lang_name_mapping = {"javascript": "typescript"}
         ls_ids: list[LanguageServerId] = []
         for ls_str in data["language_servers"]:
             orig_language_str = ls_str
             try:
                 ls_str = ls_str.lower()
-                if ls_str in lang_name_mapping:
-                    ls_str = lang_name_mapping[ls_str]
                 ls_id = LanguageServerId(ls_str)
                 ls_ids.append(ls_id)
             except ValueError as e:
@@ -511,8 +503,8 @@ class SerenaConfig(SharedConfig):
     language_server_idle_timeout: float = 900.0
     """Idle seconds after which lazily managed language servers are stopped and cached."""
 
-    default_max_tool_answer_chars: int = 150_000
-    """Used as the legacy character ceiling for tools with bounded answers."""
+    max_memory_chars: int = 150_000
+    """Default maximum content length accepted by ``write_memory``."""
     default_max_tool_answer_tokens: int = 4_000
     """Approximate default response budget when retained output paging is available.
 
@@ -538,9 +530,8 @@ class SerenaConfig(SharedConfig):
     trusted_project_path_patterns: list[str] = field(default_factory=lambda: ["**"])
     """
     list of glob patterns for project root directories that are considered trusted.
-    The default "**" considers all project roots as trusted, which is necessary for backward compatibility.
-    The default will apply if a user does not yet have the setting, while new users will get the value
-    defined in the configuration template file. 
+    The dataclass default "**" trusts all roots when no persisted setting is available; generated
+    configuration files use the explicit value from the template.
     """
 
     ls_priorities: dict[str, int] | None = None
@@ -746,16 +737,6 @@ class SerenaConfig(SharedConfig):
         self.add_registered_project(RegisteredProject.from_project_instance(new_project))
         return new_project
 
-    def remove_project(self, project_name: str) -> None:
-        # find the index of the project with the desired name and remove it
-        for i, project in enumerate(list(self.projects)):
-            if project.project_name == project_name:
-                del self.projects[i]
-                break
-        else:
-            raise ValueError(f"Project '{project_name}' not found in Serena configuration; valid project names: {self.project_names}")
-        self._persist_projects()
-
     def _persist_projects(self) -> None:
         """
         Persists the list of registered projects, merging it with the list currently found on disk
@@ -800,10 +781,7 @@ class SerenaConfig(SharedConfig):
         commented_yaml["line_ending"] = self.line_ending.value
 
         # transfer comments from the template file
-        # NOTE: The template file now uses leading comments, but we previously used trailing comments,
-        #       so we apply a conversion, which detects the old style and transforms it.
-        # For some keys, we force updates, because old comments are problematic/misleading.
-        normalise_yaml_comments(commented_yaml, YamlCommentNormalisation.LEADING_WITH_CONVERSION_FROM_TRAILING)
+        normalise_yaml_comments(commented_yaml, YamlCommentNormalisation.LEADING)
         template_yaml = load_yaml(SERENA_CONFIG_TEMPLATE_FILE, comment_normalisation=YamlCommentNormalisation.LEADING)
         transfer_yaml_comments(template_yaml, commented_yaml, YamlCommentNormalisation.LEADING, force_update_all=True)
 

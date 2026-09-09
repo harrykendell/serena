@@ -8,8 +8,9 @@ import os
 import shutil
 from typing import Any
 
+from solidlsp.dependency_provider import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath
 from solidlsp.language_servers.common import RuntimeDependency, RuntimeDependencyCollection, build_npm_install_command
-from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
+from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.settings import SolidLSPSettings
 
@@ -40,7 +41,6 @@ class JsonLanguageServer(SolidLanguageServer):
         super().__init__(
             config,
             repository_root_path,
-            None,
             "json",
             solidlsp_settings,
         )
@@ -80,9 +80,6 @@ class JsonLanguageServer(SolidLanguageServer):
             )
             json_ls_dir = os.path.join(self._ls_resources_dir, ls_dirname)
             json_executable_path = os.path.join(json_ls_dir, "node_modules", ".bin", "vscode-json-languageserver")
-
-            if os.name == "nt":
-                json_executable_path += ".cmd"
 
             if not os.path.exists(json_executable_path):
                 log.info(f"JSON Language Server executable not found at {json_executable_path}. Installing...")

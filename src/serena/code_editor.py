@@ -203,33 +203,6 @@ class CodeEditor(Generic[TSymbol], ABC):
         with self.edited_file_context(relative_file_path) as edited_file:
             edited_file.insert_text_at_position(PositionInFile(line=line, col=col), body)
 
-    def insert_at_line(self, relative_path: str, line: int, content: str) -> None:
-        """
-        Inserts content at the given line in the given file.
-
-        :param relative_path: the relative path of the file in which to insert content
-        :param line: the 0-based index of the line to insert content at
-        :param content: the content to insert
-        """
-        with self.edited_file_context(relative_path) as edited_file:
-            edited_file.insert_text_at_position(PositionInFile(line, 0), content)
-
-    def delete_lines(self, relative_path: str, start_line: int, end_line: int) -> None:
-        """
-        Deletes lines in the given file.
-
-        :param relative_path: the relative path of the file in which to delete lines
-        :param start_line: the 0-based index of the first line to delete (inclusive)
-        :param end_line: the 0-based index of the last line to delete (inclusive)
-        """
-        start_col = 0
-        end_line_for_delete = end_line + 1
-        end_col = 0
-        with self.edited_file_context(relative_path) as edited_file:
-            start_pos = PositionInFile(line=start_line, col=start_col)
-            end_pos = PositionInFile(line=end_line_for_delete, col=end_col)
-            edited_file.delete_text_between_positions(start_pos, end_pos)
-
     def delete_symbol(self, name_path: str, relative_file_path: str) -> None:
         """
         Deletes the symbol with the given name in the given file.

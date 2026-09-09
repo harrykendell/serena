@@ -8,16 +8,15 @@ import re
 import shutil
 import threading
 import time
-from typing import Any
 
 from overrides import override
 from sensai.util.logging import LogTime
 
 from solidlsp import ls_types
-from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
+from solidlsp.dependency_provider import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath
+from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.ls_exceptions import SolidLSPException
-from solidlsp.ls_utils import PlatformId, PlatformUtils
 from solidlsp.lsp_protocol_handler.lsp_types import MessageType
 from solidlsp.settings import SolidLSPSettings
 
@@ -32,21 +31,6 @@ INITIAL_TYPESCRIPT_VERSION = "5.9.3"
 DEFAULT_TYPESCRIPT_VERSION = "5.9.3"
 INITIAL_TYPESCRIPT_LANGUAGE_SERVER_VERSION = "5.1.3"
 DEFAULT_TYPESCRIPT_LANGUAGE_SERVER_VERSION = "5.1.3"
-
-# Platform-specific imports
-if os.name != "nt":  # Unix-like systems
-    import pwd
-else:
-    # Dummy pwd module for Windows
-    class pwd:
-        @staticmethod
-        def getpwuid(uid: Any) -> Any:
-            return type("obj", (), {"pw_name": os.environ.get("USERNAME", "unknown")})()
-
-
-# Conditionally import pwd module (Unix-only)
-if not PlatformUtils.get_platform_id().value.startswith("win"):
-    pass
 
 
 def prefer_non_node_modules_definition(definitions: list[ls_types.Location]) -> ls_types.Location:
@@ -117,7 +101,6 @@ class TypeScriptLanguageServer(SolidLanguageServer):
         super().__init__(
             config,
             repository_root_path,
-            None,
             "typescript",
             solidlsp_settings,
         )
@@ -267,21 +250,6 @@ class TypeScriptLanguageServer(SolidLanguageServer):
             """
             Setup runtime dependencies for TypeScript Language Server and return the path to the executable.
             """
-            platform_id = PlatformUtils.get_platform_id()
-
-            valid_platforms = [
-                PlatformId.LINUX_x64,
-                PlatformId.LINUX_arm64,
-                PlatformId.OSX,
-                PlatformId.OSX_x64,
-                PlatformId.OSX_arm64,
-                PlatformId.WIN_x64,
-                PlatformId.WIN_arm64,
-            ]
-            assert platform_id in valid_platforms, (
-                f"Platform {platform_id} is not supported for multilspy javascript/typescript at the moment"
-            )
-
             # Get version settings from ls_specific_settings or use defaults
             language_specific_config = self._custom_settings
             typescript_version = language_specific_config.get("typescript_version", DEFAULT_TYPESCRIPT_VERSION)
@@ -569,16 +537,6 @@ class TypeScriptLanguageServer(SolidLanguageServer):
                 timeout,
                 self.describe_indexing_state(),
             )
-
-    @override
-    def _get_published_diagnostics_uri(self, request_uri: str) -> str:
-        if os.name != "nt" or not request_uri.startswith("file:///"):
-            return request_uri
-
-        path_part = request_uri[len("file:///") :]
-        if len(path_part) >= 2 and path_part[0].isalpha() and path_part[1] == ":":
-            return f"file:///{path_part[0].lower()}%3A{path_part[2:]}"
-        return request_uri
 
     @override
     def _get_published_diagnostics_wait_timeout(self, pull_diagnostics_failed: bool) -> float:

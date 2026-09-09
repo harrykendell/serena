@@ -26,7 +26,7 @@ class WriteMemoryTool(Tool, ToolMarkerCanEdit):
         """
         # NOTE: utf-8 encoding is configured in the MemoriesManager
         if max_chars == -1:
-            max_chars = self.agent.serena_config.default_max_tool_answer_chars
+            max_chars = self.agent.serena_config.max_memory_chars
         if len(content) > max_chars:
             raise ValueError(
                 f"Content for {memory_name} is too long. Max length is {max_chars} characters. " + "Please make the content shorter."

@@ -16,7 +16,8 @@ from typing import Any
 
 from overrides import override
 
-from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
+from solidlsp.dependency_provider import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath
+from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.ls_utils import FileUtils
 from solidlsp.settings import SolidLSPSettings
@@ -31,20 +32,12 @@ TAPLO_ALLOWED_HOSTS = ("github.com", "release-assets.githubusercontent.com", "ob
 # To update: download each release file and run: sha256sum <filename>, copy values into DEFAULT_*.
 INITIAL_TAPLO_VERSION = "0.10.0"
 INITIAL_TAPLO_SHA256_CHECKSUMS: dict[str, str] = {
-    "taplo-windows-x86_64.zip": "1615eed140039bd58e7089109883b1c434de5d6de8f64a993e6e8c80ca57bdf9",
-    "taplo-windows-x86.zip": "b825701daab10dcfc0251e6d668cd1a9c0e351e7f6762dd20844c3f3f3553aa0",
-    "taplo-darwin-x86_64.gz": "898122cde3a0b1cd1cbc2d52d3624f23338218c91b5ddb71518236a4c2c10ef2",
-    "taplo-darwin-aarch64.gz": "713734314c3e71894b9e77513c5349835eefbd52908445a0d73b0c7dc469347d",
     "taplo-linux-x86_64.gz": "8fe196b894ccf9072f98d4e1013a180306e17d244830b03986ee5e8eabeb6156",
     "taplo-linux-aarch64.gz": "033681d01eec8376c3fd38fa3703c79316f5e14bb013d859943b60a07bccdcc3",
     "taplo-linux-armv7.gz": "6b728896afe2573522f38b8e668b1ff40eb5928fd9d6d0c253ecae508274d417",
 }
 DEFAULT_TAPLO_VERSION = "0.10.0"
 DEFAULT_TAPLO_SHA256_CHECKSUMS: dict[str, str] = {
-    "taplo-windows-x86_64.zip": "1615eed140039bd58e7089109883b1c434de5d6de8f64a993e6e8c80ca57bdf9",
-    "taplo-windows-x86.zip": "b825701daab10dcfc0251e6d668cd1a9c0e351e7f6762dd20844c3f3f3553aa0",
-    "taplo-darwin-x86_64.gz": "898122cde3a0b1cd1cbc2d52d3624f23338218c91b5ddb71518236a4c2c10ef2",
-    "taplo-darwin-aarch64.gz": "713734314c3e71894b9e77513c5349835eefbd52908445a0d73b0c7dc469347d",
     "taplo-linux-x86_64.gz": "8fe196b894ccf9072f98d4e1013a180306e17d244830b03986ee5e8eabeb6156",
     "taplo-linux-aarch64.gz": "033681d01eec8376c3fd38fa3703c79316f5e14bb013d859943b60a07bccdcc3",
     "taplo-linux-armv7.gz": "6b728896afe2573522f38b8e668b1ff40eb5928fd9d6d0c253ecae508274d417",
@@ -60,41 +53,25 @@ def _taplo_sha(version: str, archive_filename: str) -> str | None:
 
 
 def _get_taplo_download_url(version: str = DEFAULT_TAPLO_VERSION) -> tuple[str, str]:
-    """
-    Get the appropriate Taplo download URL for the current platform.
+    """Return the Taplo release URL for the supported Linux host."""
+    if platform.system() != "Linux":
+        raise RuntimeError("The standalone runtime supports Taplo on Linux only")
 
-    Returns:
-        Tuple of (download_url, executable_name)
-
-    """
-    system = platform.system().lower()
-    machine = platform.machine().lower()
-
-    # Map machine architecture to Taplo naming convention
     arch_map = {
         "x86_64": "x86_64",
         "amd64": "x86_64",
-        "x86": "x86",
-        "i386": "x86",
-        "i686": "x86",
         "aarch64": "aarch64",
         "arm64": "aarch64",
         "armv7l": "armv7",
     }
+    machine = platform.machine().lower()
+    try:
+        arch = arch_map[machine]
+    except KeyError as exc:
+        raise RuntimeError(f"Unsupported Linux architecture for Taplo: {machine}") from exc
 
-    arch = arch_map.get(machine, "x86_64")  # Default to x86_64
-
-    if system == "windows":
-        filename = f"taplo-windows-{arch}.zip"
-        executable = "taplo.exe"
-    elif system == "darwin":
-        filename = f"taplo-darwin-{arch}.gz"
-        executable = "taplo"
-    else:  # Linux and others
-        filename = f"taplo-linux-{arch}.gz"
-        executable = "taplo"
-
-    return f"https://github.com/tamasfe/taplo/releases/download/{version}/{filename}", executable
+    filename = f"taplo-linux-{arch}.gz"
+    return f"https://github.com/tamasfe/taplo/releases/download/{version}/{filename}", "taplo"
 
 
 class TaploServer(SolidLanguageServer):
@@ -127,7 +104,6 @@ class TaploServer(SolidLanguageServer):
         super().__init__(
             config,
             repository_root_path,
-            None,
             "toml",
             solidlsp_settings,
         )
@@ -185,8 +161,8 @@ class TaploServer(SolidLanguageServer):
 
             try:
                 log.info(f"Downloading Taplo from: {download_url}")
-                archive_type = "zip" if archive_filename.endswith(".zip") else "gz"
-                target_path = install_dir if archive_type == "zip" else executable_path
+                archive_type = "gz"
+                target_path = executable_path
                 FileUtils.download_and_extract_archive_verified(
                     download_url,
                     target_path,
@@ -195,9 +171,7 @@ class TaploServer(SolidLanguageServer):
                     allowed_hosts=TAPLO_ALLOWED_HOSTS,
                 )
 
-                # Make executable on Unix systems
-                if os.name != "nt":
-                    os.chmod(executable_path, os.stat(executable_path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                os.chmod(executable_path, os.stat(executable_path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
                 log.info(f"Taplo installed successfully at: {executable_path}")
 

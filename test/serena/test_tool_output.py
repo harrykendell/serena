@@ -24,7 +24,6 @@ class OverflowProbeTool(Tool):
 def _agent_with_store(store: ToolOutputStore) -> MagicMock:
     agent = MagicMock()
     agent.tool_is_active.return_value = True
-    agent.serena_config.default_max_tool_answer_chars = 1_000
     agent.serena_config.default_max_tool_answer_tokens = 100
     agent.retain_tool_output.side_effect = store.retain
     agent.retain_tool_output_with_tail.side_effect = store.retain_with_tail
@@ -73,7 +72,7 @@ def test_overflow_returns_identified_tail_and_full_output_can_be_paged() -> None
         store.close()
 
 
-def test_implicit_budget_uses_approximate_tokens_only_when_retained_paging_is_available() -> None:
+def test_implicit_budget_uses_approximate_tokens_with_canonical_retained_paging() -> None:
     store = ToolOutputStore()
     agent = _agent_with_store(store)
     overflow_tool = OverflowProbeTool(agent)
@@ -82,11 +81,6 @@ def test_implicit_budget_uses_approximate_tokens_only_when_retained_paging_is_av
     try:
         retained_response = overflow_tool.apply(content, max_answer_chars=-1)
         assert "Full output retained as" in retained_response
-
-        agent.tool_is_active.return_value = False
-        assert overflow_tool.apply(content, max_answer_chars=-1) == content
-
-        agent.tool_is_active.return_value = True
         assert overflow_tool.apply(content, max_answer_chars=500) == content
     finally:
         store.close()

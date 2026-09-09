@@ -1,7 +1,6 @@
 """Tests for SerenaAgent._run_activation_command."""
 
 import logging
-import sys
 from pathlib import Path
 
 import pytest
@@ -55,11 +54,8 @@ class TestRunActivationCommand:
 
     def test_trusted_command_runs_in_project_root(self, tmp_path: Path):
         sentinel = tmp_path / "sentinel.txt"
-        # write a sentinel file from within the command to confirm cwd is project_root
-        if sys.platform == "win32":
-            cmd = "type nul > sentinel.txt"
-        else:
-            cmd = "touch sentinel.txt"
+        # Write a sentinel file from within the command to confirm cwd is project_root.
+        cmd = "touch sentinel.txt"
         project = _make_project(tmp_path, activation_command=cmd, trusted=True)
         agent = self._make_agent(project)
         agent._run_project_activation_command(project)
@@ -67,7 +63,7 @@ class TestRunActivationCommand:
 
     def test_untrusted_project_skips_command(self, tmp_path: Path, caplog):
         sentinel = tmp_path / "sentinel.txt"
-        cmd = "touch sentinel.txt" if sys.platform != "win32" else "type nul > sentinel.txt"
+        cmd = "touch sentinel.txt"
         project = _make_project(tmp_path, activation_command=cmd, trusted=False)
         agent = self._make_agent(project)
         with caplog.at_level(logging.WARNING):
@@ -76,7 +72,7 @@ class TestRunActivationCommand:
         assert "not trusted" in caplog.text
 
     def test_failing_command_logs_error_and_continues(self, tmp_path: Path, caplog):
-        cmd = "exit 1" if sys.platform != "win32" else "cmd /c exit 1"
+        cmd = "exit 1"
         project = _make_project(tmp_path, activation_command=cmd, trusted=True)
         agent = self._make_agent(project)
         with caplog.at_level(logging.ERROR):

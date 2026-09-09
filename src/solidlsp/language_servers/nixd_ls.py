@@ -2,12 +2,11 @@
 """
 Provides Nix specific instantiation of the LanguageServer class using nixd (Nix Language Server).
 
-Note: Windows is not supported as Nix itself doesn't support Windows natively.
+The standalone runtime supports Linux hosts.
 """
 
 import json
 import logging
-import platform
 import shutil
 import subprocess
 from copy import deepcopy
@@ -36,34 +35,21 @@ class NixLanguageServer(SolidLanguageServer):
 
         @staticmethod
         def _get_nixd_path() -> str | None:
-            """Return an existing nixd executable path, if one can be found."""
+            """Return an existing nixd executable path on the supported Linux host."""
             nixd_path = shutil.which("nixd")
             if nixd_path:
                 return nixd_path
 
             home = Path.home()
-            possible_paths = [
+            for path in (
                 home / ".local" / "bin" / "nixd",
                 home / ".serena" / "language_servers" / "nixd" / "nixd",
                 home / ".nix-profile" / "bin" / "nixd",
                 Path("/usr/local/bin/nixd"),
                 Path("/run/current-system/sw/bin/nixd"),
-                Path("/opt/homebrew/bin/nixd"),
-                Path("/usr/local/opt/nixd/bin/nixd"),
-            ]
-
-            if platform.system() == "Windows":
-                possible_paths.extend(
-                    [
-                        home / "AppData" / "Local" / "nixd" / "nixd.exe",
-                        home / ".serena" / "language_servers" / "nixd" / "nixd.exe",
-                    ]
-                )
-
-            for path in possible_paths:
+            ):
                 if path.exists():
                     return str(path)
-
             return None
 
         @staticmethod
@@ -126,7 +112,7 @@ class NixLanguageServer(SolidLanguageServer):
                     "Please install nixd using one of the following methods:\n"
                     "  - Using Nix flakes: nix profile install github:nix-community/nixd\n"
                     "  - From nixpkgs: nix-env -iA nixpkgs.nixd\n"
-                    "  - On macOS with Homebrew: brew install nixd\n\n"
+                    "\n"
                     "After installation, make sure 'nixd' is in your PATH."
                 )
 
@@ -301,7 +287,7 @@ class NixLanguageServer(SolidLanguageServer):
         custom_settings = solidlsp_settings.get_ls_specific_settings(config.ls_id)
         self._nixd_settings = self._load_nixd_settings(custom_settings)
 
-        super().__init__(config, repository_root_path, None, "nix", solidlsp_settings)
+        super().__init__(config, repository_root_path, "nix", solidlsp_settings)
         self.request_id = 0
 
     def _create_dependency_provider(self) -> LanguageServerDependencyProvider:

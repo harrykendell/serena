@@ -274,23 +274,15 @@ class Project(ToStringMixin):
         return self.is_ignored_path
 
     def is_path_in_project(self, path: str | Path) -> bool:
-        """
-        Checks if the given (absolute or relative) path is inside the project directory.
+        """Check whether an absolute or project-relative path stays inside the project root.
 
-        Note: This is intended to catch cases where ".." segments would lead outside of the project directory,
-        but we intentionally allow symlinks, as the assumption is that they point to relevant project files.
+        ``..`` segments are collapsed lexically. Symlinks are intentionally allowed because
+        project links are assumed to point at relevant files.
         """
         if not os.path.isabs(path):
             path = os.path.join(self.project_root, path)
-
-        # collapse any ".." or "." segments (purely lexically)
         path = os.path.normpath(path)
-
-        try:
-            return os.path.commonpath([self.project_root, path]) == self.project_root
-        except ValueError:
-            # occurs, in particular, if paths are on different drives on Windows
-            return False
+        return os.path.commonpath([self.project_root, path]) == self.project_root
 
     def relative_path_exists(self, relative_path: str, require_file: bool = False) -> bool:
         """

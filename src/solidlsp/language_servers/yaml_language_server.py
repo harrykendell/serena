@@ -8,8 +8,9 @@ import os
 import shutil
 from typing import Any
 
+from solidlsp.dependency_provider import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath
 from solidlsp.language_servers.common import RuntimeDependency, RuntimeDependencyCollection, build_npm_install_command
-from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
+from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.settings import SolidLSPSettings
 
@@ -52,7 +53,6 @@ class YamlLanguageServer(SolidLanguageServer):
         super().__init__(
             config,
             repository_root_path,
-            None,
             "yaml",
             solidlsp_settings,
         )
@@ -92,10 +92,6 @@ class YamlLanguageServer(SolidLanguageServer):
             )
             yaml_ls_dir = os.path.join(self._ls_resources_dir, ls_dirname)
             yaml_executable_path = os.path.join(yaml_ls_dir, "node_modules", ".bin", "yaml-language-server")
-
-            # Handle Windows executable extension
-            if os.name == "nt":
-                yaml_executable_path += ".cmd"
 
             if not os.path.exists(yaml_executable_path):
                 log.info(f"YAML Language Server executable not found at {yaml_executable_path}. Installing...")
