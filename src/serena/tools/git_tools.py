@@ -3,6 +3,7 @@
 import re
 import subprocess
 
+from serena.errors import UserFacingError
 from serena.tools.tools_base import Tool, ToolMarkerCanEdit
 
 
@@ -10,17 +11,21 @@ class _GitTool(Tool):
     _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 
     def _run_git(self, args: list[str], max_answer_chars: int = -1) -> str:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=self.get_project_root(),
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=self.get_project_root(),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as error:
+            raise UserFacingError(f"Could not run Git: {error.strerror or error}") from None
+
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or f"git exited with status {result.returncode}"
-            raise RuntimeError(detail)
+            raise UserFacingError(detail)
         output = result.stdout.strip()
         if result.stderr.strip():
             output = f"{output}\n{result.stderr.strip()}".strip()
@@ -29,12 +34,12 @@ class _GitTool(Tool):
     @classmethod
     def _validate_git_name(cls, value: str, kind: str) -> str:
         if not cls._SAFE_NAME.fullmatch(value) or value.startswith("-") or ".." in value:
-            raise ValueError(f"Invalid {kind}: {value!r}")
+            raise UserFacingError(f"Invalid {kind}: {value!r}")
         return value
 
     def _validate_paths(self, paths: list[str]) -> list[str]:
         if not paths:
-            raise ValueError("At least one project-relative path is required")
+            raise UserFacingError("At least one project-relative path is required")
         for path in paths:
             self.project.validate_relative_path(path)
         return paths
@@ -78,7 +83,7 @@ class GitLogTool(_GitTool):
         :return: compact Git log output
         """
         if not 1 <= limit <= 200:
-            raise ValueError("limit must be between 1 and 200")
+            raise UserFacingError("limit must be between 1 and 200")
         args = ["log", f"-{limit}", "--date=short", "--pretty=format:%h %ad %d %s"]
         if ref is not None:
             args.append(self._validate_git_name(ref, "ref"))
@@ -123,9 +128,9 @@ class GitBranchTool(_GitTool, ToolMarkerCanEdit):
         if action == "list":
             return self._run_git(["branch", "--verbose", "--no-abbrev"], max_answer_chars)
         if action not in {"create", "switch", "delete"}:
-            raise ValueError("action must be one of: list, create, switch, delete")
+            raise UserFacingError("action must be one of: list, create, switch, delete")
         if name is None:
-            raise ValueError(f"name is required for branch action {action!r}")
+            raise UserFacingError(f"name is required for branch action {action!r}")
         name = self._validate_git_name(name, "branch name")
 
         if action == "create":
@@ -152,7 +157,7 @@ class GitCommitTool(_GitTool, ToolMarkerCanEdit):
         :return: Git commit output
         """
         if not message.strip():
-            raise ValueError("Commit message must not be empty")
+            raise UserFacingError("Commit message must not be empty")
         paths = self._validate_paths(paths)
 
         # stage the requested paths, then commit only those paths so unrelated staged work is preserved
@@ -194,7 +199,7 @@ class GitPushTool(_GitTool, ToolMarkerCanEdit):
         remote = self._validate_git_name(remote, "remote")
         branch = self._run_git(["branch", "--show-current"]).strip()
         if not branch or branch == "OK":
-            raise RuntimeError("Cannot push while HEAD is detached")
+            raise UserFacingError("Cannot push while HEAD is detached")
         self._validate_git_name(branch, "branch")
         args = ["push"]
         if set_upstream:

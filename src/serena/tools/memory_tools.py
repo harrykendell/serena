@@ -1,7 +1,8 @@
 import logging
 from typing import Literal
 
-from serena.tools import Tool, ToolMarkerCanEdit
+from serena.errors import UserFacingError
+from serena.tools import SUCCESS_RESULT, Tool, ToolMarkerCanEdit
 
 log = logging.getLogger(__name__)
 
@@ -28,11 +29,10 @@ class WriteMemoryTool(Tool, ToolMarkerCanEdit):
         if max_chars == -1:
             max_chars = self.agent.serena_config.max_memory_chars
         if len(content) > max_chars:
-            raise ValueError(
-                f"Content for {memory_name} is too long. Max length is {max_chars} characters. " + "Please make the content shorter."
-            )
+            raise UserFacingError(f"Memory content is too long; maximum length is {max_chars} characters.")
 
-        return self.memory_manager.save_memory(memory_name, content, is_tool_context=True)
+        self.memory_manager.save_memory(memory_name, content, is_tool_context=True)
+        return SUCCESS_RESULT
 
 
 class ReadMemoryTool(Tool):
@@ -78,7 +78,8 @@ class DeleteMemoryTool(Tool, ToolMarkerCanEdit):
         """
         Delete a memory, only call if instructed explicitly or permission was granted by the user.
         """
-        return self.memory_manager.delete_memory(memory_name, is_tool_context=True)
+        self.memory_manager.delete_memory(memory_name, is_tool_context=True)
+        return SUCCESS_RESULT
 
 
 class RenameMemoryTool(Tool, ToolMarkerCanEdit):
@@ -93,12 +94,11 @@ class RenameMemoryTool(Tool, ToolMarkerCanEdit):
         References to other memories that are marked with the `mem:` prefix will be updated accordingly.
         References in read-only memories are not affected.
         """
-        renaming_message, n_references_updated = self.memory_manager.rename_memory_and_propagate_references(
-            old_name, new_name, is_tool_context=True
-        )
+        _, n_references_updated = self.memory_manager.rename_memory_and_propagate_references(old_name, new_name, is_tool_context=True)
         if n_references_updated > 0:
             log.info(f"Updated {n_references_updated} references to memory {old_name} to {new_name}")
-        return renaming_message
+            return f"OK; updated {n_references_updated} reference(s)"
+        return SUCCESS_RESULT
 
 
 class EditMemoryTool(Tool, ToolMarkerCanEdit):
@@ -127,6 +127,7 @@ class EditMemoryTool(Tool, ToolMarkerCanEdit):
         :param allow_multiple_occurrences: whether to allow matching and replacing multiple occurrences.
             If false and multiple occurrences are found, an error will be returned.
         """
-        return self.memory_manager.edit_memory(
+        self.memory_manager.edit_memory(
             memory_name, needle, repl, mode, allow_multiple_occurrences, is_tool_context=True, regex_multiline=True
         )
+        return SUCCESS_RESULT

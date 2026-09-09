@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -22,6 +23,8 @@ from serena.tools import (
     CreateTextFileTool,
     ExecuteShellCommandTool,
     FindSymbolTool,
+    GitStatusTool,
+    JobStatusTool,
     ReadFileTool,
     ReadMemoryTool,
     RenameSymbolTool,
@@ -560,6 +563,87 @@ def test_mcp_user_facing_failure_has_no_additional_wrapper(
         assert str(exc_info.value) == "Expected request failure."
         record = agent.execution_store.list_session_executions("session-a")[-1]
         assert record.error == "Expected request failure."
+
+    asyncio.run(scenario())
+
+
+def test_job_status_invalid_id_is_concise_mcp_failure_and_persisted(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
+) -> None:
+    agent, _ = multi_project_agent
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(JobStatusTool))
+
+    async def scenario() -> None:
+        with pytest.raises(ToolError) as exc_info:
+            await mcp_tool.run({"job_id": "not-a-job-id"}, context=_mcp_context("session-a"))
+
+        message = str(exc_info.value)
+        assert message == "Invalid job ID 'not-a-job-id'"
+        assert "ValueError:" not in message
+        assert "Error executing tool" not in message
+        assert "\n" not in message
+
+        record = agent.execution_store.list_session_executions("session-a")[-1]
+        assert record.error == message
+
+    asyncio.run(scenario())
+
+
+def test_shell_nonzero_exit_remains_successful_mcp_result(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "session-a", "project_a")
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(ExecuteShellCommandTool))
+
+    async def scenario() -> None:
+        result = await mcp_tool.run({"command": "exit 7"}, context=_mcp_context("session-a"))
+        payload = json.loads(result)
+        assert payload["return_code"] == 7
+
+        record = agent.execution_store.list_session_executions("session-a")[-1]
+        assert record.status == "completed"
+        assert record.error is None
+
+    asyncio.run(scenario())
+
+
+def test_git_rejection_is_concise_mcp_failure(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "session-a", "project_a")
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(GitStatusTool))
+
+    async def scenario() -> None:
+        with pytest.raises(ToolError) as exc_info:
+            await mcp_tool.run({}, context=_mcp_context("session-a"))
+
+        message = str(exc_info.value)
+        assert "not a git repository" in message.lower()
+        assert "RuntimeError:" not in message
+        assert "Error executing tool" not in message
+        assert "Traceback" not in message
+
+    asyncio.run(scenario())
+
+
+def test_missing_memory_is_concise_mcp_failure(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "session-a", "project_a")
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(ReadMemoryTool))
+
+    async def scenario() -> None:
+        with pytest.raises(ToolError) as exc_info:
+            await mcp_tool.run({"memory_name": "missing"}, context=_mcp_context("session-a"))
+
+        message = str(exc_info.value)
+        assert message == "Memory named 'missing' not found"
+        assert "FileNotFoundError:" not in message
+        assert "Error executing tool" not in message
+        assert "Traceback" not in message
 
     asyncio.run(scenario())
 

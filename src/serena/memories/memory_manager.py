@@ -10,6 +10,7 @@ from serena.config.serena_config import (
     SerenaPaths,
 )
 from serena.constants import SERENA_FILE_ENCODING
+from serena.errors import UserFacingError
 from serena.util.text_utils import ContentReplacer
 
 from .memory_reference_analysis import (
@@ -62,7 +63,7 @@ class MemoryManager:
 
     def _check_not_ignored(self, name: str) -> None:
         if self._is_ignored_memory(name):
-            raise ValueError(
+            raise UserFacingError(
                 f"Memory '{name}' matches an ignored_memory_patterns pattern and cannot be accessed. "
                 f"Use the read_file tool on the raw file path instead."
             )
@@ -166,7 +167,7 @@ class MemoryManager:
         candidate = subdir / filename
         base_norm = Path(os.path.normpath(base_dir))
         if not Path(os.path.normpath(candidate)).is_relative_to(base_norm):
-            raise ValueError(f"Memory name resolves outside the memories directory. Got: {'/'.join(parts)}")
+            raise UserFacingError(f"Memory name resolves outside the memories directory. Got: {'/'.join(parts)}")
         subdir.mkdir(parents=True, exist_ok=True)
         return candidate
 
@@ -175,17 +176,17 @@ class MemoryManager:
         parts = name.split("/")
 
         if ".." in parts:
-            raise ValueError(f"Memory name cannot contain '..' segments. Got: {name}")
+            raise UserFacingError(f"Memory name cannot contain '..' segments. Got: {name}")
 
         # Reject absolute names and empty path segments: pathlib discards the base directory when
         # joined with an absolute path (e.g. "/etc/cron.d/backdoor" would reset to "/etc/cron.d"),
         # letting a memory name escape the sandbox. A leading "/" produces an empty first segment.
         if os.path.isabs(name) or "" in parts:
-            raise ValueError(f"Memory name cannot be absolute or contain empty path segments. Got: {name}")
+            raise UserFacingError(f"Memory name cannot be absolute or contain empty path segments. Got: {name}")
 
         if self._is_global(name):
             if name == self.GLOBAL_TOPIC:
-                raise ValueError(
+                raise UserFacingError(
                     f'Bare "{self.GLOBAL_TOPIC}" is not a valid memory name. Use "{self.GLOBAL_TOPIC}/<name>" to address a global memory.'
                 )
             # Strip "global/" prefix and resolve against global dir
@@ -199,14 +200,14 @@ class MemoryManager:
     def _check_write_access(self, name: str, is_tool_context: bool) -> None:
         # in tool context, memories can be read-only
         if is_tool_context and self._is_read_only_memory(name):
-            raise PermissionError(f"Attempted to write to read_only memory: '{name}')")
+            raise UserFacingError(f"Memory {name!r} is read-only.")
 
     def load_memory(self, name: str) -> str:
         name = self._sanitize_name(name)
         self._check_not_ignored(name)
         memory_file_path = self.get_memory_file_path(name)
         if not memory_file_path.exists():
-            raise FileNotFoundError(f"Memory named '{name}' not found")
+            raise UserFacingError(f"Memory named '{name}' not found")
         with open(memory_file_path, encoding=self._encoding) as f:
             return f.read()
 
@@ -297,8 +298,11 @@ class MemoryManager:
         memories: MemoryManager.MemoriesList
 
         if topic:
+            topic = self._sanitize_name(topic)
+            topic_parts = topic.split("/")
+            if os.path.isabs(topic) or ".." in topic_parts or "" in topic_parts:
+                raise UserFacingError(f"Invalid memory topic: {topic!r}")
             if self._is_global(topic):
-                topic_parts = topic.split("/")
                 subtopic = "/".join(topic_parts[1:])
                 memories = self.list_global_memories(subtopic=subtopic)
             else:
@@ -315,7 +319,7 @@ class MemoryManager:
         self._check_write_access(name, is_tool_context)
         memory_file_path = self.get_memory_file_path(name)
         if not memory_file_path.exists():
-            return f"Memory {name} not found."
+            raise UserFacingError(f"Memory {name} not found.")
         memory_file_path.unlink()
         return f"Memory {name} deleted."
 
@@ -328,15 +332,16 @@ class MemoryManager:
         new_name = self._sanitize_name(new_name)
         self._check_not_ignored(old_name)
         self._check_not_ignored(new_name)
+        self._check_write_access(old_name, is_tool_context)
         self._check_write_access(new_name, is_tool_context)
 
         old_path = self.get_memory_file_path(old_name)
         new_path = self.get_memory_file_path(new_name)
 
         if not old_path.exists():
-            raise FileNotFoundError(f"Memory {old_name} not found.")
+            raise UserFacingError(f"Memory {old_name} not found.")
         if new_path.exists():
-            raise FileExistsError(f"Memory {new_name} already exists.")
+            raise UserFacingError(f"Memory {new_name} already exists.")
 
         new_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(old_path, new_path)
@@ -394,7 +399,7 @@ class MemoryManager:
         self._check_write_access(name, is_tool_context)
         memory_file_path = self.get_memory_file_path(name)
         if not memory_file_path.exists():
-            raise FileNotFoundError(f"Memory {name} not found.")
+            raise UserFacingError(f"Memory {name} not found.")
         with open(memory_file_path, encoding=self._encoding) as f:
             original_content = f.read()
         replacer = ContentReplacer(mode=mode, allow_multiple_occurrences=allow_multiple_occurrences, regex_multiline=regex_multiline)

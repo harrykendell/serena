@@ -103,7 +103,7 @@ def test_git_branch_delete_never_force_deletes_unmerged_work(git_project: tuple[
     _run_git(repo, "commit", "-m", "branch work")
     branch_tool.apply("switch", "main")
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(UserFacingError):
         branch_tool.apply("delete", "work")
 
     assert "work" in _run_git(repo, "branch", "--list", "work")

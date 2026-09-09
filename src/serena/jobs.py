@@ -22,6 +22,7 @@ from filelock import FileLock
 
 from mcp_runtime.shell_environment import user_shell_environment
 from serena.config.serena_config import SerenaPaths
+from serena.errors import UserFacingError
 
 DEFAULT_MAX_CONCURRENT_JOBS = 12
 DEFAULT_OUTPUT_CHAR_LIMIT = 12_000
@@ -155,7 +156,7 @@ class JobSnapshot:
     output: JobOutputChunk | None = None
 
 
-class JobLimitError(RuntimeError):
+class JobLimitError(UserFacingError):
     """Raised when starting a job would exceed the concurrency limit."""
 
 
@@ -202,6 +203,14 @@ class SystemdJobBackend(JobBackend):
 
     _STOP_TIMEOUT_SECONDS = 5
 
+    @staticmethod
+    def _run_required_command(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        """Run a required system command or present an actionable operational failure."""
+        try:
+            return subprocess.run(args, check=False, **kwargs)
+        except OSError as error:
+            raise UserFacingError(f"Unable to run {args[0]}: {error.strerror or error}") from None
+
     def start(self, record: JobRecord, command_file: Path, state_file: Path) -> None:
         # construct a self-contained transient service outside Serena's own cgroup
         args = [
@@ -231,9 +240,8 @@ class SystemdJobBackend(JobBackend):
                 args.append(f"--setenv={name}={value}")
         args.extend(["--", sys.executable, "-m", "serena.job_runner", str(state_file), str(command_file)])
 
-        result = subprocess.run(
+        result = self._run_required_command(
             args,
-            check=False,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -242,12 +250,11 @@ class SystemdJobBackend(JobBackend):
         )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip()
-            raise RuntimeError(f"systemd-run failed with status {result.returncode}: {detail}")
+            raise UserFacingError(f"systemd-run failed with status {result.returncode}: {detail}")
 
     def is_running(self, record: JobRecord) -> bool:
-        result = subprocess.run(
+        result = self._run_required_command(
             ["systemctl", "--user", "is-active", "--quiet", record.unit_name],
-            check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -256,16 +263,15 @@ class SystemdJobBackend(JobBackend):
             return True
         if result.returncode in (3, 4):
             return False
-        raise RuntimeError(f"Unable to query systemd unit {record.unit_name!r} (status {result.returncode})")
+        raise UserFacingError(f"Unable to query systemd unit {record.unit_name!r} (status {result.returncode})")
 
     def cancel(self, record: JobRecord) -> None:
         # Snapshot job-owned processes before stopping the unit. Descendants may live in Snap scopes
         # or independent sessions/cgroups, but retain the inherited SERENA_JOB_ID environment marker.
         owned_processes = self._owned_job_processes(record.job_id)
 
-        result = subprocess.run(
+        result = self._run_required_command(
             ["systemctl", "--user", "stop", record.unit_name],
-            check=False,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -275,7 +281,7 @@ class SystemdJobBackend(JobBackend):
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip()
             if "not loaded" not in detail.lower() and "not found" not in detail.lower():
-                raise RuntimeError(f"Unable to stop systemd unit {record.unit_name!r}: {detail}")
+                raise UserFacingError(f"Unable to stop systemd unit {record.unit_name!r}: {detail}")
 
         # The runner should have shut its tree down cleanly. These hard-kill fallbacks catch any
         # descendants that escaped before the runner handled termination or survived a runner crash.
@@ -291,9 +297,9 @@ class SystemdJobBackend(JobBackend):
         output_mode: Literal["latest", "start"] = "latest",
     ) -> JobOutputChunk:
         if output_mode not in ("latest", "start"):
-            raise ValueError(f"Unsupported output mode {output_mode!r}")
+            raise UserFacingError(f"Unsupported output mode {output_mode!r}")
         if cursor is not None and (len(cursor) > _MAX_CURSOR_LENGTH or "\x00" in cursor or "\n" in cursor):
-            raise ValueError("Invalid journal cursor")
+            raise UserFacingError("Invalid journal cursor")
         if cursor is not None:
             return self._read_incremental_output(record, cursor, max_chars)
         if output_mode == "start":
@@ -303,10 +309,10 @@ class SystemdJobBackend(JobBackend):
     def read_output_before(self, record: JobRecord, cursor: str, max_chars: int) -> JobOutputChunk:
         """Read bounded journal output immediately preceding ``cursor``."""
         if len(cursor) > _MAX_CURSOR_LENGTH or "\x00" in cursor or "\n" in cursor:
-            raise ValueError("Invalid journal cursor")
+            raise UserFacingError("Invalid journal cursor")
         try:
             return self._read_previous_output(record, cursor, max_chars)
-        except RuntimeError as e:
+        except UserFacingError as e:
             if not self._is_stale_cursor_error(str(e)):
                 raise
             return JobOutputChunk(
@@ -443,7 +449,7 @@ class SystemdJobBackend(JobBackend):
     def _read_incremental_output(self, record: JobRecord, cursor: str, max_chars: int) -> JobOutputChunk:
         try:
             return self._read_forward_output(record, max_chars=max_chars, after_cursor=cursor)
-        except RuntimeError as e:
+        except UserFacingError as e:
             if not self._is_stale_cursor_error(str(e)):
                 raise
             recovered = self._read_recent_output(record, max_chars)
@@ -585,15 +591,18 @@ class SystemdJobBackend(JobBackend):
             args.append(f"--cursor={cursor}")
         if reverse:
             args.append("--reverse")
-        return subprocess.Popen(
-            args,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        try:
+            return subprocess.Popen(
+                args,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError as error:
+            raise UserFacingError(f"Unable to run journalctl: {error.strerror or error}") from None
 
     @staticmethod
     def _finish_journal_reader(process: subprocess.Popen[str], interrupted: bool) -> None:
@@ -611,7 +620,9 @@ class SystemdJobBackend(JobBackend):
             return
         assert process.stderr is not None
         detail = process.stderr.read().strip()
-        raise RuntimeError(f"Unable to read output for job {record.job_id!r}: {detail or f'journalctl exited with {process.returncode}'}")
+        raise UserFacingError(
+            f"Unable to read output for job {record.job_id!r}: {detail or f'journalctl exited with {process.returncode}'}"
+        )
 
     @staticmethod
     def _is_stale_cursor_error(message: str) -> bool:
@@ -766,7 +777,7 @@ class JobStore:
             job_id = path.name[1 : -len(".command")]
             try:
                 self.validate_job_id(job_id)
-            except ValueError:
+            except UserFacingError:
                 continue
             record = records.get(job_id)
             if record is None or record.status.is_terminal:
@@ -783,7 +794,7 @@ class JobStore:
         """Read one persisted job."""
         path = self.state_file(job_id)
         if not path.exists():
-            raise ValueError(f"Unknown job ID {job_id!r}")
+            raise UserFacingError(f"Unknown job ID {job_id!r}")
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
         if not isinstance(data, dict):
@@ -834,10 +845,10 @@ class JobStore:
         """Validate the externally supplied opaque job identifier."""
         try:
             parsed = UUID(job_id)
-        except (ValueError, AttributeError) as e:
-            raise ValueError(f"Invalid job ID {job_id!r}") from e
+        except (ValueError, AttributeError):
+            raise UserFacingError(f"Invalid job ID {job_id!r}") from None
         if parsed.hex != job_id:
-            raise ValueError(f"Invalid job ID {job_id!r}")
+            raise UserFacingError(f"Invalid job ID {job_id!r}")
 
     @staticmethod
     def _write_atomic(path: Path, record: JobRecord) -> None:
@@ -902,16 +913,16 @@ class JobManager:
         """Start a non-interactive command and return immediately with its durable job record."""
         command = command.strip()
         if not command:
-            raise ValueError("Command must not be empty")
+            raise UserFacingError("Command must not be empty")
         if "\x00" in command:
-            raise ValueError("Command must not contain NUL bytes")
+            raise UserFacingError("Command must not contain NUL bytes")
         label = label.strip()
         if not label:
-            raise ValueError("Job label must not be empty")
+            raise UserFacingError("Job label must not be empty")
         if len(label) > 200:
-            raise ValueError("Job label must be at most 200 characters")
+            raise UserFacingError("Job label must be at most 200 characters")
         if timeout_seconds is not None and timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive when provided")
+            raise UserFacingError("timeout_seconds must be positive when provided")
         resolved_cwd = self._resolve_cwd(project_root, cwd)
 
         # serialise starts across ChatGPT chats and Serena processes so the six-job limit is strict
@@ -947,19 +958,20 @@ class JobManager:
             try:
                 command_file = self._store.create_command_file(job_id, command)
                 self._backend.start(record, command_file, self._store.state_file(job_id))
-            except Exception as e:
+            except Exception as error:
                 if command_file is not None:
                     command_file.unlink(missing_ok=True)
+                status_message = str(error) if isinstance(error, UserFacingError) else "Job could not be started."
                 try:
                     self._store.update(
                         job_id,
                         status=JobStatus.FAILED,
                         finished_at=datetime.now(UTC).isoformat(),
-                        status_message=f"Job could not be started: {e}",
+                        status_message=status_message,
                     )
                 except Exception:
                     pass
-                raise RuntimeError(f"Failed to start job {job_id}: {e}") from e
+                raise
 
             return record, len(running) + 1
 
@@ -1077,7 +1089,7 @@ class JobManager:
             candidate = root / candidate
         candidate = candidate.resolve()
         if not candidate.is_dir():
-            raise FileNotFoundError(f"Job working directory is not a directory: {candidate}")
+            raise UserFacingError(f"Job working directory is not a directory: {candidate}")
         if candidate != root and root not in candidate.parents:
-            raise ValueError(f"Job working directory must stay within the active project: {root}")
+            raise UserFacingError("Job working directory must stay within the active project.")
         return candidate

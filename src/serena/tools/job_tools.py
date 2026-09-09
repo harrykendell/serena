@@ -6,6 +6,7 @@ import json
 import time
 from typing import Literal
 
+from serena.errors import UserFacingError
 from serena.jobs import (
     JobPersistenceInfo,
     JobRecord,
@@ -142,14 +143,14 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
         deadline: float | None = None
         if wait_for is not None and wait_for != "completed":
             if wait_for < 0 or wait_for > 60:
-                raise ValueError("numeric wait_for must be between 0 and 60 seconds")
+                raise UserFacingError("numeric wait_for must be between 0 and 60 seconds")
             deadline = time.monotonic() + wait_for
 
         if job_id is None:
             if cursor is not None:
-                raise ValueError("cursor requires job_id")
+                raise UserFacingError("cursor requires job_id")
             if wait_for is not None:
-                raise ValueError("wait_for requires job_id")
+                raise UserFacingError("wait_for requires job_id")
             snapshots = self._job_manager.list_job_snapshots()
             running_jobs = sum(snapshot.record.status is JobStatus.RUNNING for snapshot in snapshots)
             jobs: list[dict[str, object]] = []

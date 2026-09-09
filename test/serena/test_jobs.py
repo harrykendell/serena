@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from serena.errors import UserFacingError
 from serena.job_runner import run_job
 from serena.jobs import (
     DEFAULT_MAX_CONCURRENT_JOBS,
@@ -203,7 +204,7 @@ def test_job_limit_is_twelve_and_cancelled_job_frees_capacity(tmp_path: Path) ->
 def test_start_requires_distinctive_nonempty_label(tmp_path: Path) -> None:
     manager = _manager(tmp_path, FakeJobBackend())
 
-    with pytest.raises(ValueError, match="label must not be empty"):
+    with pytest.raises(UserFacingError, match="label must not be empty"):
         manager.start_job("echo hello", str(tmp_path), label="  ")
 
 
@@ -371,7 +372,7 @@ def test_start_job_rejects_working_directory_outside_project(tmp_path: Path) -> 
     project.mkdir()
     outside.mkdir()
 
-    with pytest.raises(ValueError, match="within the active project"):
+    with pytest.raises(UserFacingError, match="within the active project"):
         manager.start_job("echo nope", str(project), label="invalid cwd", cwd=str(outside))
 
 
@@ -502,9 +503,9 @@ def test_job_status_wait_validation(tmp_path: Path) -> None:
     status_tool = JobStatusTool(agent)
     status_tool._job_manager = manager
 
-    with pytest.raises(ValueError, match="between 0 and 60"):
+    with pytest.raises(UserFacingError, match="between 0 and 60"):
         status_tool.apply("missing", wait_for=61)
-    with pytest.raises(ValueError, match="requires job_id"):
+    with pytest.raises(UserFacingError, match="requires job_id"):
         status_tool.apply(wait_for=1)
 
 

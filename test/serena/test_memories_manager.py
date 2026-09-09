@@ -8,6 +8,7 @@ import os
 
 import pytest
 
+from serena.errors import UserFacingError
 from serena.memories.memory_reference_analysis import (
     HIGH_CONFIDENCE_NAME_LENGTH,
     MAX_STALE_REFERENCE_CANDIDATES,
@@ -269,6 +270,27 @@ def _write(manager: MemoryManager, name: str, content: str) -> None:
     manager.save_memory(name, content, is_tool_context=False)
 
 
+def test_memory_request_failures_are_user_facing(tmp_path) -> None:
+    manager = MemoryManager(serena_data_folder=tmp_path, read_only_memory_patterns=[r"^frozen(?:/.*)?$"])
+
+    with pytest.raises(UserFacingError, match="not found"):
+        manager.load_memory("missing")
+
+    manager.save_memory("source", "source", is_tool_context=False)
+    manager.save_memory("target", "target", is_tool_context=False)
+    with pytest.raises(UserFacingError, match="already exists"):
+        manager.move_memory("source", "target", is_tool_context=True)
+
+    manager.save_memory("frozen/notes", "locked", is_tool_context=False)
+    with pytest.raises(UserFacingError, match="read-only"):
+        manager.save_memory("frozen/notes", "changed", is_tool_context=True)
+    with pytest.raises(UserFacingError, match="read-only"):
+        manager.move_memory("frozen/notes", "moved", is_tool_context=True)
+
+    with pytest.raises(UserFacingError, match="Invalid memory topic"):
+        manager.list_memories("../outside")
+
+
 class TestListMemoriesFollowsSymlinks:
     """Regression: memories reachable only through a directory symlink (e.g. a monorepo whose
     ``.serena/memories`` symlinks each submodule's memory folder, making them addressable as
@@ -316,23 +338,23 @@ class TestGetMemoryFilePathContainment:
         # An absolute name pointing outside the memories dir. On the buggy code this silently
         # returned a path under ``escape_target`` (outside ``memories``); the fix rejects it.
         escape = str(tmp_path / "escape_target" / "backdoor")
-        with pytest.raises(ValueError):
+        with pytest.raises(UserFacingError):
             fs_manager.get_memory_file_path(escape)
 
     def test_absolute_project_memory_name_system_path_is_rejected(self, fs_manager: MemoryManager) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(UserFacingError):
             fs_manager.get_memory_file_path("/etc/cron.d/backdoor")
 
     def test_absolute_global_memory_name_is_rejected(self, fs_manager: MemoryManager, tmp_path, monkeypatch) -> None:
         # "global//etc/..." routes through the global branch; the empty segment / absolute sub-name
         # must be rejected there too. Redirect the global dir so the test never touches the real one.
         monkeypatch.setattr(fs_manager, "_global_memory_dir", tmp_path / "global")
-        with pytest.raises(ValueError):
+        with pytest.raises(UserFacingError):
             fs_manager.get_memory_file_path("global//etc/cron.d/backdoor")
 
     def test_dotdot_segment_still_rejected(self, fs_manager: MemoryManager) -> None:
         # the pre-existing guard must keep working
-        with pytest.raises(ValueError):
+        with pytest.raises(UserFacingError):
             fs_manager.get_memory_file_path("../../etc/passwd")
 
     @pytest.mark.parametrize("name", ["notes", "topic/notes", "a/b/c/deep", "mem:topic/foo.md"])
