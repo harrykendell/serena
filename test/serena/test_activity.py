@@ -11,10 +11,11 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, RequestParams, ResourceLink
 from pydantic import AnyUrl
 
-from serena.activity import ACTIVITY_RESOURCE_URI, ActivityTracker, get_mcp_session_id, register_activity_resource
+from serena.activity import ACTIVITY_RESOURCE_URI, ActivityTracker, register_activity_resource
 from serena.execution_store import ExecutionStore
 from serena.jobs import JobOutputChunk, JobRecord, JobRuntimeInfo, JobSnapshot, JobStatus
 from serena.mcp import SerenaMCPFactory
+from serena.session import get_mcp_session_id
 from serena.tools import Tool
 
 
@@ -152,7 +153,7 @@ def test_activity_tracker_records_tool_lifecycle() -> None:
 def test_activity_tracker_rehydrates_historical_turn_after_restart(tmp_path: Path) -> None:
     source = _FakeJobSource([_job_record("job-a", "retained job", JobStatus.COMPLETED)])
     store_root = tmp_path / "execution-store"
-    tracker = ActivityTracker(source, execution_store=ExecutionStore(store_root, migrate_legacy=False))
+    tracker = ActivityTracker(source, execution_store=ExecutionStore(store_root))
     run = tracker.start_run("conversation-a", "serena")
     call_id = tracker.start_tool(
         "conversation-a",
@@ -165,7 +166,7 @@ def test_activity_tracker_rehydrates_historical_turn_after_restart(tmp_path: Pat
     tracker.get_run("conversation-a", run["run_id"])
     interrupted_id = tracker.start_tool("conversation-a", "execute_shell_command", {"command": "sleep 30"})
 
-    restored = ActivityTracker(_FakeJobSource(), execution_store=ExecutionStore(store_root, migrate_legacy=False))
+    restored = ActivityTracker(_FakeJobSource(), execution_store=ExecutionStore(store_root))
     snapshot = restored.get_run("conversation-a", run["run_id"])
     detail = restored.get_call_detail("conversation-a", run["run_id"], call_id)
 

@@ -20,7 +20,7 @@ class MockAgent:
         self.project_config = None
         self.serena_config = None
         self._execution_store_dir = TemporaryDirectory(prefix="serena-mcp-test-store-")
-        self.execution_store = ExecutionStore(Path(self._execution_store_dir.name), migrate_legacy=False)
+        self.execution_store = ExecutionStore(Path(self._execution_store_dir.name))
         self.job_manager = MagicMock()
 
     @staticmethod

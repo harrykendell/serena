@@ -84,7 +84,6 @@ def test_execution_retention_evicts_oldest_session_atomically(tmp_path: Path) ->
         max_sessions=10,
         max_executions=3,
         max_activity_runs=10,
-        migrate_legacy=False,
     )
 
     store.start_execution(
@@ -134,7 +133,6 @@ def test_running_job_protects_session_until_job_is_terminal(tmp_path: Path) -> N
         max_sessions=10,
         max_executions=2,
         max_activity_runs=10,
-        migrate_legacy=False,
     )
     job_id = "1" * 32
 
@@ -175,7 +173,7 @@ def test_running_job_protects_session_until_job_is_terminal(tmp_path: Path) -> N
 
 
 def test_session_is_dropped_when_referenced_job_metadata_expires(tmp_path: Path) -> None:
-    store = ExecutionStore(tmp_path / "execution-store", migrate_legacy=False)
+    store = ExecutionStore(tmp_path / "execution-store")
     job_id = "2" * 32
     store.start_execution(
         execution_id="execution-a",
@@ -194,119 +192,13 @@ def test_session_is_dropped_when_referenced_job_metadata_expires(tmp_path: Path)
     assert store.list_executions() == []
 
 
-def test_v1_retention_migration_removes_empty_and_partial_panels(tmp_path: Path) -> None:
+def test_execution_store_rejects_pre_v2_state(tmp_path: Path) -> None:
     root = tmp_path / "execution-store"
-    store = ExecutionStore(root, max_executions=100, migrate_legacy=False)
-    store.start_execution(
-        execution_id="a-1",
-        session_id="chat-a",
-        project_name="project-a",
-        tool_name="read_file",
-        arguments="{}",
-        started_at=100.0,
-    )
-    store.finish_execution("a-1", succeeded=True, result="a-1", finished_at=101.0)
-    store.start_execution(
-        execution_id="a-2",
-        session_id="chat-a",
-        project_name="project-a",
-        tool_name="read_file",
-        arguments="{}",
-        started_at=102.0,
-    )
-    store.finish_execution("a-2", succeeded=True, result="a-2", finished_at=103.0)
-    store.start_execution(
-        execution_id="b-1",
-        session_id="chat-b",
-        project_name="project-b",
-        tool_name="read_file",
-        arguments="{}",
-        started_at=200.0,
-    )
-    store.finish_execution("b-1", succeeded=True, result="b-1", finished_at=201.0)
-    store.set_session_display_name("chat-empty", "Empty legacy panel")
-
-    state_path = root / "state.json"
-    payload = json.loads(state_path.read_text(encoding="utf-8"))
-    payload["version"] = 1
-    del payload["executions"]["a-1"]
-    state_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    restored = ExecutionStore(root, max_executions=100, migrate_legacy=False)
-    restored.sync_job_retention(set(), {})
-
-    assert [session.session_id for session in restored.list_sessions()] == ["chat-b"]
-    assert [record.execution_id for record in restored.list_executions()] == ["b-1"]
-
-
-def test_dashboard_activity_archive_migrates_legacy_histories_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    serena_home = tmp_path / "serena-home"
-    monkeypatch.setenv("SERENA_HOME", str(serena_home))
-    dashboard_root = serena_home / "dashboard_activity_sessions"
-    activity_root = serena_home / "activity_runs"
-    dashboard_root.mkdir(parents=True)
-    activity_root.mkdir(parents=True)
-    panel_id = DashboardActivityArchive.panel_id_for_session("chat-a")
-    (dashboard_root / f"{panel_id}.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "panel_id": panel_id,
-                "session_id": "chat-a",
-                "project_name": "project-a",
-                "display_name": "Legacy chat",
-                "started_at": 100.0,
-                "updated_at": 101.0,
-                "calls": [
-                    {
-                        "call_id": "legacy-call",
-                        "tool_name": "read_file",
-                        "parameters": "relative_path='old.txt'",
-                        "status": "completed",
-                        "submitted_at": 100.0,
-                        "started_at": 100.0,
-                        "finished_at": 101.0,
-                        "result": "old result",
-                        "project_name": "project-a",
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    (activity_root / "legacy-run.json").write_text(
-        json.dumps(
-            {
-                "run_id": "legacy-run",
-                "session_id": "chat-a",
-                "project_name": "project-a",
-                "started_at": 100.0,
-                "superseded": True,
-                "calls": [
-                    {
-                        "call_id": "legacy-call",
-                        "tool_name": "read_file",
-                        "arguments": '{"relative_path": "old.txt"}',
-                        "started_at": 100.0,
-                        "finished_at": 101.0,
-                        "status": "completed",
-                        "result": "old result",
-                        "project_name": "project-a",
-                    }
-                ],
-            }
-        ),
+    root.mkdir()
+    (root / "state.json").write_text(
+        json.dumps({"version": 1, "sessions": {}, "executions": {}, "activity_runs": {}}),
         encoding="utf-8",
     )
 
-    store = ExecutionStore()
-    archive = DashboardActivityArchive(store)
-    restored = ExecutionStore()
-
-    assert archive.list_sessions()[0]["display_name"] == "Legacy chat"
-    assert archive.list_sessions()[0]["calls"][0]["call_id"] == "legacy-call"
-    assert store.get_activity_run("legacy-run") is not None
-    assert len(restored.list_executions()) == 1
-    assert not list(dashboard_root.glob("*.json"))
-    assert not list(activity_root.glob("*.json"))
-    assert (serena_home / "execution_store" / "state.json").is_file()
+    with pytest.raises(RuntimeError, match="requires schema version 2"):
+        ExecutionStore(root)

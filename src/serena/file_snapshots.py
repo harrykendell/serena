@@ -4,9 +4,7 @@ import hashlib
 import mimetypes
 import os
 import secrets
-import shutil
 import stat
-import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,11 +53,6 @@ class FileSnapshotStore:
         if stat.S_IMODE(root.stat().st_mode) != 0o700:
             root.chmod(0o700)
         return root
-
-    @classmethod
-    def _legacy_root(cls) -> Path:
-        """Returns the former temporary snapshot directory for compatibility reads."""
-        return Path(tempfile.gettempdir(), f"serena-chat-files-{os.getuid()}")
 
     @classmethod
     def _prune(cls, root: Path, incoming_size: int) -> None:
@@ -181,32 +174,12 @@ class FileSnapshotStore:
         )
 
     @classmethod
-    def _migrate_legacy_snapshot(cls, token: str, destination: Path) -> bool:
-        """Copies one still-present legacy temporary snapshot into persistent storage."""
-        legacy_path = cls._legacy_root() / token
-        if not legacy_path.is_file():
-            return False
-        if legacy_path.stat().st_size > FILE_EXPORT_MAX_SIZE:
-            raise ValueError(f"File exceeds the {FILE_EXPORT_MAX_SIZE // (1024 * 1024)} MiB export limit")
-
-        temporary_path = destination.parent / f".{token}.legacy.tmp"
-        try:
-            shutil.copyfile(legacy_path, temporary_path)
-            temporary_path.chmod(0o600)
-            os.replace(temporary_path, destination)
-        finally:
-            temporary_path.unlink(missing_ok=True)
-        legacy_path.unlink(missing_ok=True)
-        return True
-
-    @classmethod
     def read(cls, token: str) -> bytes:
         """Reads one persistent snapshot identified by an opaque resource token."""
         cls._validate_token(token)
         with cls._LOCK:
-            root = cls._root()
-            path = root / token
-            if not path.is_file() and not cls._migrate_legacy_snapshot(token, path):
+            path = cls._root() / token
+            if not path.is_file():
                 raise FileNotFoundError("Serena file snapshot no longer exists")
             if path.stat().st_size > FILE_EXPORT_MAX_SIZE:
                 raise ValueError(f"File exceeds the {FILE_EXPORT_MAX_SIZE // (1024 * 1024)} MiB export limit")

@@ -15,7 +15,6 @@ from mcp.types import CallToolResult, ResourceLink
 
 from serena.execution_store import ACTIVITY_HISTORY_LIMIT, ExecutionRecord, ExecutionStore
 from serena.jobs import JobManager, JobRecord, JobSnapshot, JobStatus
-from serena.session import get_mcp_session_id  # noqa: F401 - compatibility re-export
 
 ACTIVITY_RESOURCE_URI = "ui://serena/activity-v28.html"
 _ACTIVITY_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
@@ -498,7 +497,6 @@ class ActivityTracker:
             self._temporary_store_dir = TemporaryDirectory(prefix="serena-activity-store-")
             self._execution_store = ExecutionStore(
                 root=Path(self._temporary_store_dir.name),
-                migrate_legacy=False,
             )
 
     @property

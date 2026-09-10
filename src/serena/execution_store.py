@@ -27,7 +27,6 @@ class SessionRecord:
     updated_at: float
     display_name: str = ""
     project_name: str = ""
-    history_complete: bool = True
 
 
 @dataclass
@@ -81,7 +80,6 @@ class ExecutionStore:
         max_sessions: int = 128,
         max_executions: int = ACTIVITY_HISTORY_LIMIT,
         max_activity_runs: int = ACTIVITY_HISTORY_LIMIT,
-        migrate_legacy: bool = True,
     ) -> None:
         self._root = root or self._default_root()
         self._state_path = self._root / "state.json"
@@ -95,12 +93,7 @@ class ExecutionStore:
         self._current_run_by_session: dict[str, str] = {}
         self._retained_job_ids: set[str] | None = None
         self._running_job_sessions: dict[str, str] = {}
-        self._loaded_state_version = 0
-        self._legacy_migrated = False
         self._load()
-        self._migrate_retention_state()
-        if migrate_legacy and not self._legacy_migrated:
-            self._migrate_legacy()
         self._interrupt_stale_state()
 
     @staticmethod
@@ -483,9 +476,13 @@ class ExecutionStore:
             return
         if not isinstance(payload, dict):
             return
+
         version = payload.get("version")
-        if isinstance(version, int):
-            self._loaded_state_version = version
+        if version != _STATE_VERSION:
+            raise RuntimeError(
+                f"Unsupported Serena execution-store schema version {version!r}; Serena 2.1 requires schema version {_STATE_VERSION}."
+            )
+
         sessions = payload.get("sessions", {})
         executions = payload.get("executions", {})
         activity_runs = payload.get("activity_runs", {})
@@ -515,31 +512,11 @@ class ExecutionStore:
                         current = self._current_run_by_session.get(run.session_id)
                         if current is None or self._activity_runs[current].started_at < run.started_at:
                             self._current_run_by_session[run.session_id] = run.run_id
-        self._legacy_migrated = bool(payload.get("legacy_migrated"))
-
-    def _migrate_retention_state(self) -> None:
-        """Marks or drops panels already degraded by pre-v2 per-execution pruning."""
-        if self._loaded_state_version == 0 or self._loaded_state_version >= _STATE_VERSION:
-            return
-
-        for session in list(self._sessions.values()):
-            records = [record for record in self._executions.values() if record.session_id == session.session_id]
-            if not records:
-                self._drop_session(session.session_id)
-                continue
-
-            earliest_execution = min(record.started_at for record in records)
-            if earliest_execution > session.created_at + 1e-3:
-                session.history_complete = False
-
-        self._save()
-        self._loaded_state_version = _STATE_VERSION
 
     def _save(self) -> None:
         self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
         payload = {
             "version": _STATE_VERSION,
-            "legacy_migrated": self._legacy_migrated,
             "sessions": {key: asdict(value) for key, value in self._sessions.items()},
             "executions": {key: asdict(value) for key, value in self._executions.items()},
             "activity_runs": {key: asdict(value) for key, value in self._activity_runs.items()},
@@ -575,11 +552,8 @@ class ExecutionStore:
         protected.update(self._running_job_sessions.values())
         return protected
 
-    def _session_has_incomplete_history(self, session_id: str) -> bool:
-        """Returns whether retained activity is known to be incomplete."""
-        session = self._sessions.get(session_id)
-        if session is None or not session.history_complete:
-            return True
+    def _session_has_dangling_execution_reference(self, session_id: str) -> bool:
+        """Returns whether an activity run references an execution no longer retained by its session."""
         records = {record.execution_id for record in self._executions.values() if record.session_id == session_id}
         runs = [run for run in self._activity_runs.values() if run.session_id == session_id]
         return any(execution_id not in records for run in runs for execution_id in run.execution_ids)
@@ -612,12 +586,12 @@ class ExecutionStore:
                 self._current_run_by_session.pop(session_id, None)
                 changed = True
 
-        # remove legacy or expired panels as a whole instead of showing partial history
+        # remove inconsistent or expired panels as a whole instead of showing partial history
         protected = self._protected_session_ids()
         for session_id in list(self._sessions):
             if session_id in protected:
                 continue
-            if self._session_has_incomplete_history(session_id) or self._session_has_missing_job(session_id):
+            if self._session_has_dangling_execution_reference(session_id) or self._session_has_missing_job(session_id):
                 changed = self._drop_session(session_id) or changed
 
         # enforce all retention budgets by evicting the oldest complete inactive sessions
@@ -650,138 +624,3 @@ class ExecutionStore:
             return None
         match = _JOB_ID_RE.search(result)
         return match.group(1) if match is not None else None
-
-    def _migrate_legacy(self) -> None:
-        """Imports legacy activity/dashboard persistence once, then removes duplicate JSON files."""
-        legacy_dashboard = self._serena_home() / "dashboard_activity_sessions"
-        legacy_activity = self._serena_home() / "activity_runs"
-        migrated_paths: list[Path] = []
-
-        # import dashboard sessions first because they retain the broadest execution history
-        if legacy_dashboard.is_dir():
-            for path in legacy_dashboard.glob("*.json"):
-                payload = self._read_legacy_json(path)
-                if payload is None:
-                    continue
-                session_id = payload.get("session_id")
-                if not isinstance(session_id, str) or not session_id:
-                    continue
-                started_at = float(payload.get("started_at") or path.stat().st_mtime)
-                session = self._ensure_session(session_id, started_at)
-                session.project_name = str(payload.get("project_name") or session.project_name)
-                session.display_name = str(payload.get("display_name") or session.display_name)
-                session.updated_at = max(session.updated_at, float(payload.get("updated_at") or started_at))
-                calls = payload.get("calls", [])
-                if isinstance(calls, list):
-                    for call in calls:
-                        if isinstance(call, dict):
-                            self._import_legacy_execution(session_id, call)
-                migrated_paths.append(path)
-
-        # import inline runs and map their historical call identifiers onto canonical executions
-        if legacy_activity.is_dir():
-            for path in legacy_activity.glob("*.json"):
-                payload = self._read_legacy_json(path)
-                if payload is None:
-                    continue
-                run_id = payload.get("run_id")
-                session_id = payload.get("session_id")
-                if not isinstance(run_id, str) or not isinstance(session_id, str):
-                    continue
-                execution_ids: list[str] = []
-                calls = payload.get("calls", [])
-                if isinstance(calls, list):
-                    for call in calls:
-                        if not isinstance(call, dict):
-                            continue
-                        execution_id = self._find_matching_legacy_execution(session_id, call, set(execution_ids))
-                        if execution_id is None:
-                            execution_id = self._import_legacy_execution(session_id, call)
-                        if execution_id is not None:
-                            execution_ids.append(execution_id)
-                run = ActivityPanelRun(
-                    run_id=run_id,
-                    session_id=session_id,
-                    project_name=str(payload.get("project_name") or ""),
-                    started_at=float(payload.get("started_at") or path.stat().st_mtime),
-                    superseded=bool(payload.get("superseded")),
-                    execution_ids=execution_ids,
-                    job_ids=[str(item) for item in payload.get("job_ids", []) if isinstance(item, str)],
-                    retained_jobs=[dict(item) for item in payload.get("retained_jobs", []) if isinstance(item, dict)],
-                )
-                self._activity_runs[run_id] = run
-                if not run.superseded:
-                    current = self._current_run_by_session.get(session_id)
-                    if current is None or self._activity_runs[current].started_at < run.started_at:
-                        self._current_run_by_session[session_id] = run_id
-                migrated_paths.append(path)
-
-        self._legacy_migrated = True
-        self._prune()
-        self._save()
-        for path in migrated_paths:
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
-
-    @staticmethod
-    def _read_legacy_json(path: Path) -> dict[str, Any] | None:
-        try:
-            with path.open("r", encoding="utf-8") as stream:
-                payload = json.load(stream)
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            return None
-        return payload if isinstance(payload, dict) else None
-
-    def _find_matching_legacy_execution(
-        self,
-        session_id: str,
-        call: dict[str, Any],
-        excluded_ids: set[str] | None = None,
-    ) -> str | None:
-        tool_name = str(call.get("tool_name") or "")
-        started_at = float(call.get("started_at") or call.get("submitted_at") or 0.0)
-        excluded_ids = excluded_ids or set()
-        candidates = [
-            record
-            for record in self._executions.values()
-            if record.execution_id not in excluded_ids
-            and record.session_id == session_id
-            and record.tool_name == tool_name
-            and abs(record.started_at - started_at) <= 1.0
-        ]
-        if not candidates:
-            return None
-        return min(candidates, key=lambda record: abs(record.started_at - started_at)).execution_id
-
-    def _import_legacy_execution(self, session_id: str, call: dict[str, Any]) -> str | None:
-        tool_name = str(call.get("tool_name") or "")
-        if not tool_name:
-            return None
-        execution_id = str(call.get("call_id") or uuid.uuid4().hex)
-        if execution_id in self._executions:
-            return execution_id
-        started_at = float(call.get("started_at") or call.get("submitted_at") or time.time())
-        finished = call.get("finished_at")
-        media = call.get("media") if isinstance(call.get("media"), dict) else None
-        result = str(call.get("result")) if call.get("result") is not None and media is None else None
-        error = str(call.get("error")) if call.get("error") is not None else None
-        status = str(call.get("status") or ("failed" if error else "completed"))
-        record = ExecutionRecord(
-            execution_id=execution_id,
-            session_id=session_id,
-            project_name=str(call.get("project_name") or ""),
-            tool_name=tool_name,
-            arguments=str(call.get("arguments") or call.get("parameters") or "{}"),
-            started_at=started_at,
-            status=status,
-            finished_at=float(finished) if isinstance(finished, int | float) else None,
-            result=result,
-            error=error,
-            media={str(key): str(value) for key, value in media.items()} if media is not None else None,
-            durable_job_id=str(call.get("job_id")) if call.get("job_id") else self._extract_job_id(result),
-        )
-        self._executions[execution_id] = record
-        self._ensure_session(session_id, started_at)
-        return execution_id
