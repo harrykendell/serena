@@ -155,8 +155,14 @@ def test_dashboard_bootstraps_inactive_serena_panels_with_compact_history(tmp_pa
     assert panel["active"] is False
     assert state["summary_only"] is True
     assert state["tool_count"] == 12
+    assert state["submission_span_seconds"] == 11.0
     assert len(state["calls"]) == 8
     assert state["calls"][-1]["scope"] == "file-12.txt"
+
+    full_state = client.get(f"/dashboard/api/serena/panels/{panel['panel_id']}").get_json()
+    assert full_state["summary_only"] is False
+    assert full_state["submission_span_seconds"] == 11.0
+    assert len(full_state["calls"]) == 12
 
 
 def test_dashboard_orders_serena_panels_newest_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

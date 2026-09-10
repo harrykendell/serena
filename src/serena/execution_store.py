@@ -13,7 +13,7 @@ from typing import Any
 
 _FILE_RESOURCE_RE = re.compile(r"serena-file://export/([0-9a-f]{48})")
 _JOB_ID_RE = re.compile(r'"job_id"\s*:\s*"([0-9a-f]{32})"')
-_STATE_VERSION = 1
+_STATE_VERSION = 2
 ACTIVITY_HISTORY_LIMIT = 2048
 
 
@@ -27,6 +27,7 @@ class SessionRecord:
     updated_at: float
     display_name: str = ""
     project_name: str = ""
+    history_complete: bool = True
 
 
 @dataclass
@@ -79,7 +80,7 @@ class ExecutionStore:
         *,
         max_sessions: int = 128,
         max_executions: int = ACTIVITY_HISTORY_LIMIT,
-        max_activity_runs: int = 128,
+        max_activity_runs: int = ACTIVITY_HISTORY_LIMIT,
         migrate_legacy: bool = True,
     ) -> None:
         self._root = root or self._default_root()
@@ -92,8 +93,12 @@ class ExecutionStore:
         self._executions: dict[str, ExecutionRecord] = {}
         self._activity_runs: dict[str, ActivityPanelRun] = {}
         self._current_run_by_session: dict[str, str] = {}
+        self._retained_job_ids: set[str] | None = None
+        self._running_job_sessions: dict[str, str] = {}
+        self._loaded_state_version = 0
         self._legacy_migrated = False
         self._load()
+        self._migrate_retention_state()
         if migrate_legacy and not self._legacy_migrated:
             self._migrate_legacy()
         self._interrupt_stale_state()
@@ -215,6 +220,7 @@ class ExecutionStore:
             if record.project_name:
                 session.project_name = record.project_name
             session.updated_at = now
+            self._prune()
             self._save()
 
     def set_retained_output(self, execution_id: str, output_id: str | None, total_chars: int | None) -> None:
@@ -374,6 +380,28 @@ class ExecutionStore:
             runs = sorted(self._activity_runs.values(), key=lambda item: item.started_at)
             return [ActivityPanelRun(**asdict(run)) for run in runs]
 
+    def sync_job_retention(
+        self,
+        retained_job_ids: set[str],
+        running_job_sessions: dict[str, str | None],
+    ) -> None:
+        """Synchronizes durable-job retention used to protect complete dashboard panels."""
+        with self._lock:
+            self._retained_job_ids = set(retained_job_ids)
+            self._running_job_sessions = {}
+            for job_id, session_id in running_job_sessions.items():
+                resolved_session = session_id
+                if resolved_session is None:
+                    resolved_session = next(
+                        (record.session_id for record in self._executions.values() if record.durable_job_id == job_id),
+                        None,
+                    )
+                if resolved_session is not None:
+                    self._running_job_sessions[job_id] = resolved_session
+
+            if self._prune():
+                self._save()
+
     def retained_file_tokens(self) -> set[str]:
         """Returns snapshot tokens referenced by retained execution media/results."""
         with self._lock:
@@ -455,6 +483,9 @@ class ExecutionStore:
             return
         if not isinstance(payload, dict):
             return
+        version = payload.get("version")
+        if isinstance(version, int):
+            self._loaded_state_version = version
         sessions = payload.get("sessions", {})
         executions = payload.get("executions", {})
         activity_runs = payload.get("activity_runs", {})
@@ -486,6 +517,24 @@ class ExecutionStore:
                             self._current_run_by_session[run.session_id] = run.run_id
         self._legacy_migrated = bool(payload.get("legacy_migrated"))
 
+    def _migrate_retention_state(self) -> None:
+        """Marks or drops panels already degraded by pre-v2 per-execution pruning."""
+        if self._loaded_state_version == 0 or self._loaded_state_version >= _STATE_VERSION:
+            return
+
+        for session in list(self._sessions.values()):
+            records = [record for record in self._executions.values() if record.session_id == session.session_id]
+            if not records:
+                self._drop_session(session.session_id)
+                continue
+
+            earliest_execution = min(record.started_at for record in records)
+            if earliest_execution > session.created_at + 1e-3:
+                session.history_complete = False
+
+        self._save()
+        self._loaded_state_version = _STATE_VERSION
+
     def _save(self) -> None:
         self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
         payload = {
@@ -508,24 +557,92 @@ class ExecutionStore:
             except FileNotFoundError:
                 pass
 
-    def _prune(self) -> None:
-        if len(self._executions) > self._max_executions:
-            ordered = sorted(self._executions.values(), key=lambda item: item.started_at)
-            expired = {item.execution_id for item in ordered[: len(ordered) - self._max_executions]}
-            for execution_id in expired:
+    def _drop_session(self, session_id: str) -> bool:
+        """Drops one dashboard session together with every retained execution and activity run it owns."""
+        changed = self._sessions.pop(session_id, None) is not None
+        for execution_id in [execution_id for execution_id, record in self._executions.items() if record.session_id == session_id]:
+            self._executions.pop(execution_id, None)
+            changed = True
+        for run_id in [run_id for run_id, run in self._activity_runs.items() if run.session_id == session_id]:
+            self._activity_runs.pop(run_id, None)
+            changed = True
+        self._current_run_by_session.pop(session_id, None)
+        return changed
+
+    def _protected_session_ids(self) -> set[str]:
+        """Returns sessions that cannot be evicted while tools or durable jobs are still running."""
+        protected = {record.session_id for record in self._executions.values() if record.status in {"running", "queued"}}
+        protected.update(self._running_job_sessions.values())
+        return protected
+
+    def _session_has_incomplete_history(self, session_id: str) -> bool:
+        """Returns whether retained activity is known to be incomplete."""
+        session = self._sessions.get(session_id)
+        if session is None or not session.history_complete:
+            return True
+        records = {record.execution_id for record in self._executions.values() if record.session_id == session_id}
+        runs = [run for run in self._activity_runs.values() if run.session_id == session_id]
+        return any(execution_id not in records for run in runs for execution_id in run.execution_ids)
+
+    def _session_has_missing_job(self, session_id: str) -> bool:
+        """Returns whether a session references durable-job metadata that has already expired."""
+        if self._retained_job_ids is None:
+            return False
+        return any(
+            record.durable_job_id is not None and record.durable_job_id not in self._retained_job_ids
+            for record in self._executions.values()
+            if record.session_id == session_id
+        )
+
+    def _prune(self) -> bool:
+        """Prunes retained activity only by complete dashboard-session ownership units."""
+        changed = False
+
+        # discard orphaned state that cannot be represented as a complete dashboard session
+        for execution_id, record in list(self._executions.items()):
+            if record.session_id not in self._sessions:
                 self._executions.pop(execution_id, None)
-            for run in self._activity_runs.values():
-                run.execution_ids = [execution_id for execution_id in run.execution_ids if execution_id not in expired]
-        if len(self._activity_runs) > self._max_activity_runs:
-            ordered_runs = sorted(self._activity_runs.values(), key=lambda item: item.started_at)
-            for run in ordered_runs[: len(ordered_runs) - self._max_activity_runs]:
-                self._activity_runs.pop(run.run_id, None)
-                if self._current_run_by_session.get(run.session_id) == run.run_id:
-                    self._current_run_by_session.pop(run.session_id, None)
-        if len(self._sessions) > self._max_sessions:
-            ordered_sessions = sorted(self._sessions.values(), key=lambda item: item.updated_at)
-            for session in ordered_sessions[: len(ordered_sessions) - self._max_sessions]:
-                self._sessions.pop(session.session_id, None)
+                changed = True
+        for run_id, run in list(self._activity_runs.items()):
+            if run.session_id not in self._sessions:
+                self._activity_runs.pop(run_id, None)
+                changed = True
+        for session_id, run_id in list(self._current_run_by_session.items()):
+            if session_id not in self._sessions or run_id not in self._activity_runs:
+                self._current_run_by_session.pop(session_id, None)
+                changed = True
+
+        # remove legacy or expired panels as a whole instead of showing partial history
+        protected = self._protected_session_ids()
+        for session_id in list(self._sessions):
+            if session_id in protected:
+                continue
+            if self._session_has_incomplete_history(session_id) or self._session_has_missing_job(session_id):
+                changed = self._drop_session(session_id) or changed
+
+        # enforce all retention budgets by evicting the oldest complete inactive sessions
+        while (
+            len(self._executions) > self._max_executions
+            or len(self._sessions) > self._max_sessions
+            or len(self._activity_runs) > self._max_activity_runs
+        ):
+            if not self._sessions:
+                break
+            newest_session_id = max(
+                self._sessions.values(),
+                key=lambda session: (session.updated_at, session.created_at, session.session_id),
+            ).session_id
+            candidates = [
+                session
+                for session in self._sessions.values()
+                if session.session_id not in protected and session.session_id != newest_session_id
+            ]
+            if not candidates:
+                break
+            oldest = min(candidates, key=lambda session: (session.updated_at, session.created_at, session.session_id))
+            changed = self._drop_session(oldest.session_id) or changed
+
+        return changed
 
     @staticmethod
     def _extract_job_id(result: str | None) -> str | None:

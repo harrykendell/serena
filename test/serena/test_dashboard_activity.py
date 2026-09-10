@@ -78,6 +78,167 @@ def test_dashboard_activity_archive_marks_interrupted_calls_terminal_on_restart(
     assert "restarted" in call["error"]
 
 
+def test_execution_retention_evicts_oldest_session_atomically(tmp_path: Path) -> None:
+    store = ExecutionStore(
+        tmp_path / "execution-store",
+        max_sessions=10,
+        max_executions=3,
+        max_activity_runs=10,
+        migrate_legacy=False,
+    )
+
+    store.start_execution(
+        execution_id="a-1",
+        session_id="chat-a",
+        project_name="project-a",
+        tool_name="read_file",
+        arguments="{}",
+    )
+    run = store.start_activity_run("chat-a", "project-a")
+    store.append_execution_to_current_run("chat-a", "a-1")
+    store.finish_execution("a-1", succeeded=True, result="a-1")
+    store.start_execution(
+        execution_id="a-2",
+        session_id="chat-a",
+        project_name="project-a",
+        tool_name="read_file",
+        arguments="{}",
+    )
+    store.append_execution_to_current_run("chat-a", "a-2")
+    store.finish_execution("a-2", succeeded=True, result="a-2")
+
+    store.start_execution(
+        execution_id="b-1",
+        session_id="chat-b",
+        project_name="project-b",
+        tool_name="read_file",
+        arguments="{}",
+    )
+    store.finish_execution("b-1", succeeded=True, result="b-1")
+    store.start_execution(
+        execution_id="b-2",
+        session_id="chat-b",
+        project_name="project-b",
+        tool_name="read_file",
+        arguments="{}",
+    )
+
+    assert [session.session_id for session in store.list_sessions()] == ["chat-b"]
+    assert [record.execution_id for record in store.list_executions(newest_first=False)] == ["b-1", "b-2"]
+    assert store.get_activity_run(run.run_id) is None
+
+
+def test_running_job_protects_session_until_job_is_terminal(tmp_path: Path) -> None:
+    store = ExecutionStore(
+        tmp_path / "execution-store",
+        max_sessions=10,
+        max_executions=2,
+        max_activity_runs=10,
+        migrate_legacy=False,
+    )
+    job_id = "1" * 32
+
+    store.start_execution(
+        execution_id="a-1",
+        session_id="chat-a",
+        project_name="project-a",
+        tool_name="start_job",
+        arguments="{}",
+    )
+    store.finish_execution("a-1", succeeded=True, result="{}", durable_job_id=job_id)
+    store.start_execution(
+        execution_id="a-2",
+        session_id="chat-a",
+        project_name="project-a",
+        tool_name="read_file",
+        arguments="{}",
+    )
+    store.finish_execution("a-2", succeeded=True, result="a-2")
+    store.sync_job_retention({job_id}, {job_id: "chat-a"})
+
+    store.start_execution(
+        execution_id="b-1",
+        session_id="chat-b",
+        project_name="project-b",
+        tool_name="read_file",
+        arguments="{}",
+    )
+    store.finish_execution("b-1", succeeded=True, result="b-1")
+
+    assert {session.session_id for session in store.list_sessions()} == {"chat-a", "chat-b"}
+    assert len(store.list_executions()) == 3
+
+    store.sync_job_retention({job_id}, {})
+
+    assert [session.session_id for session in store.list_sessions()] == ["chat-b"]
+    assert [record.execution_id for record in store.list_executions()] == ["b-1"]
+
+
+def test_session_is_dropped_when_referenced_job_metadata_expires(tmp_path: Path) -> None:
+    store = ExecutionStore(tmp_path / "execution-store", migrate_legacy=False)
+    job_id = "2" * 32
+    store.start_execution(
+        execution_id="execution-a",
+        session_id="chat-a",
+        project_name="project-a",
+        tool_name="start_job",
+        arguments="{}",
+    )
+    store.finish_execution("execution-a", succeeded=True, result="{}", durable_job_id=job_id)
+
+    store.sync_job_retention({job_id}, {})
+    assert [session.session_id for session in store.list_sessions()] == ["chat-a"]
+
+    store.sync_job_retention(set(), {})
+    assert store.list_sessions() == []
+    assert store.list_executions() == []
+
+
+def test_v1_retention_migration_removes_empty_and_partial_panels(tmp_path: Path) -> None:
+    root = tmp_path / "execution-store"
+    store = ExecutionStore(root, max_executions=100, migrate_legacy=False)
+    store.start_execution(
+        execution_id="a-1",
+        session_id="chat-a",
+        project_name="project-a",
+        tool_name="read_file",
+        arguments="{}",
+        started_at=100.0,
+    )
+    store.finish_execution("a-1", succeeded=True, result="a-1", finished_at=101.0)
+    store.start_execution(
+        execution_id="a-2",
+        session_id="chat-a",
+        project_name="project-a",
+        tool_name="read_file",
+        arguments="{}",
+        started_at=102.0,
+    )
+    store.finish_execution("a-2", succeeded=True, result="a-2", finished_at=103.0)
+    store.start_execution(
+        execution_id="b-1",
+        session_id="chat-b",
+        project_name="project-b",
+        tool_name="read_file",
+        arguments="{}",
+        started_at=200.0,
+    )
+    store.finish_execution("b-1", succeeded=True, result="b-1", finished_at=201.0)
+    store.set_session_display_name("chat-empty", "Empty legacy panel")
+
+    state_path = root / "state.json"
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    payload["version"] = 1
+    del payload["executions"]["a-1"]
+    state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    restored = ExecutionStore(root, max_executions=100, migrate_legacy=False)
+    restored.sync_job_retention(set(), {})
+
+    assert [session.session_id for session in restored.list_sessions()] == ["chat-b"]
+    assert [record.execution_id for record in restored.list_executions()] == ["b-1"]
+
+
 def test_dashboard_activity_archive_migrates_legacy_histories_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     serena_home = tmp_path / "serena-home"
     monkeypatch.setenv("SERENA_HOME", str(serena_home))

@@ -389,8 +389,9 @@ def test_job_tools_return_compact_recovery_and_telemetry_payloads(tmp_path: Path
     status_tool._job_manager = manager
     cancel_tool._job_manager = manager
 
-    started = json.loads(start_tool.apply("echo hello", label="demo test", timeout_seconds=60))
+    started = json.loads(start_tool.apply("echo hello", label="demo test", timeout_seconds=60, session_id="chat-a"))
     job_id = started["job_id"]
+    assert manager.get_job(job_id).record.session_id == "chat-a"
     backend.output[job_id].append("hello")
     status = json.loads(status_tool.apply(job_id))
     backend.output[job_id].append("later")

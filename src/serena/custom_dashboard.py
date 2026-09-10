@@ -263,6 +263,7 @@ class DashboardSerenaActivityOverview:
             "initial_expanded": bool(recently_active),
             "tool_count": summary.tool_count,
             "job_count": len(visible_jobs),
+            "submission_span_seconds": summary.submission_span_seconds,
             "calls": calls,
             "jobs": payload_jobs,
         }
@@ -304,6 +305,7 @@ class DashboardSerenaActivityOverview:
             "partial": changed_since is not None and not summary,
             "tool_count": len(calls),
             "job_count": len(visible_jobs),
+            "submission_span_seconds": DashboardActivitySessionSummary.compute_submission_span(calls),
             "calls": [self._call_payload(call) for call in payload_calls],
             "jobs": payload_jobs,
         }

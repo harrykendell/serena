@@ -44,6 +44,17 @@ class DashboardActivitySessionSummary:
     has_active_calls: bool
     recent_calls: tuple[dict[str, Any], ...]
     latest_call: dict[str, Any] | None
+    submission_span_seconds: float | None
+
+    @staticmethod
+    def compute_submission_span(calls: list[dict[str, Any]]) -> float | None:
+        """Returns the elapsed span from the first to latest submitted call."""
+        submitted = [
+            float(timestamp) for call in calls if isinstance(timestamp := call.get("submitted_at") or call.get("started_at"), int | float)
+        ]
+        if not submitted:
+            return None
+        return max(submitted) - min(submitted)
 
     @classmethod
     def from_session(cls, session: dict[str, Any]) -> "DashboardActivitySessionSummary":
@@ -76,6 +87,7 @@ class DashboardActivitySessionSummary:
             has_active_calls=bool(active_calls),
             recent_calls=tuple(recent_calls),
             latest_call=latest_call,
+            submission_span_seconds=cls.compute_submission_span(calls),
         )
 
 

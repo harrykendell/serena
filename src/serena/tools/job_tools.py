@@ -73,7 +73,14 @@ class _JobTool(Tool):
 class StartJobTool(_JobTool, ToolMarkerCanEdit):
     """Starts one of up to six durable non-interactive commands and returns immediately with a job ID."""
 
-    def apply(self, command: str, label: str, cwd: str | None = None, timeout_seconds: int | None = None) -> str:
+    def apply(
+        self,
+        command: str,
+        label: str,
+        cwd: str | None = None,
+        timeout_seconds: int | None = None,
+        session_id: str = "global",
+    ) -> str:
         """Start a long-running command without blocking later Serena calls.
 
         Use this instead of ``execute_shell_command`` for tests, builds, simulations, optimisations, or other commands that may
@@ -85,6 +92,7 @@ class StartJobTool(_JobTool, ToolMarkerCanEdit):
         :param label: concise human-readable purpose, required for cross-chat recovery
         :param cwd: project-relative working directory; defaults to the active project root and may not escape it
         :param timeout_seconds: optional positive wall-clock runtime limit; omit for no runtime limit
+        :param session_id: client session that owns the dashboard panel for this job
         :return: compact JSON containing the job ID, state, and concurrency usage
         """
         record, running_jobs = self._job_manager.start_job(
@@ -94,6 +102,7 @@ class StartJobTool(_JobTool, ToolMarkerCanEdit):
             project_name=self.project.project_name,
             cwd=cwd,
             timeout_seconds=timeout_seconds,
+            session_id=session_id,
         )
         return self._json(
             {

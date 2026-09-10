@@ -17,7 +17,7 @@ from serena.execution_store import ACTIVITY_HISTORY_LIMIT, ExecutionRecord, Exec
 from serena.jobs import JobManager, JobRecord, JobSnapshot, JobStatus
 from serena.session import get_mcp_session_id  # noqa: F401 - compatibility re-export
 
-ACTIVITY_RESOURCE_URI = "ui://serena/activity-v27.html"
+ACTIVITY_RESOURCE_URI = "ui://serena/activity-v28.html"
 _ACTIVITY_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
 _MAX_RUNS = 128
 
@@ -1189,8 +1189,13 @@ def activity_widget_html() -> str:
   header.addEventListener("click", async () => {
     initialViewResolved = true;
     const expanding = root.classList.contains("collapsed");
+    if (expanding && state?.summary_only && await hydrateFullActivity()) {
+      setCollapsed(false);
+      if (state?.run_id) render(state);
+      return;
+    }
+
     setCollapsed(!root.classList.contains("collapsed"), preferSummaryCollapsedHeader);
-    if (expanding && await hydrateFullActivity()) return;
     if (state?.run_id) render(state);
   });
   otherJobsButton.addEventListener("click", event => {
@@ -1221,8 +1226,10 @@ def activity_widget_html() -> str:
     return formatDuration(end - entry.started_at);
   }
 
-  function submissionSpan(calls) {
-    const submitted = (calls || [])
+  function submissionSpan(next) {
+    if (Number.isFinite(next?.submission_span_seconds)) return formatDuration(next.submission_span_seconds);
+
+    const submitted = (next?.calls || [])
       .map(call => Number(call.submitted_at ?? call.started_at))
       .filter(Number.isFinite);
     if (submitted.length === 0) return "";
@@ -2010,7 +2017,7 @@ def activity_widget_html() -> str:
     headerStats.textContent = `${countLabel(toolCount, "tool")} · ${countLabel(jobCount, "job")} · ${projectName}`;
     headerStats.title = headerStats.textContent;
 
-    headerDuration.textContent = submissionSpan(next.calls);
+    headerDuration.textContent = submissionSpan(next);
     headerDuration.title = headerDuration.textContent ? "Time between first and latest submitted tool" : "";
 
     if (backgroundJobs.length === 0) otherJobsExpanded = false;

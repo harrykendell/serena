@@ -215,12 +215,19 @@ function formatEpochDate(timestamp) {
 
 function formatDuration(seconds) {
   if (seconds === null || seconds === undefined) return "—";
-  if (seconds < 60) return `${Math.max(0, Math.round(seconds))}s`;
-  const minutes = Math.floor(seconds / 60);
-  const secs = Math.round(seconds % 60);
-  if (minutes < 60) return `${minutes}m ${secs}s`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h ${minutes % 60}m`;
+  const boundedSeconds = Math.max(0, seconds);
+  if (boundedSeconds < 10) return `${boundedSeconds.toFixed(1)}s`;
+
+  const roundedSeconds = Math.round(boundedSeconds);
+  if (roundedSeconds < 120) return `${roundedSeconds}s`;
+  if (roundedSeconds < 3600) {
+    const minutes = Math.floor(roundedSeconds / 60);
+    return `${minutes}m ${String(roundedSeconds % 60).padStart(2, "0")}s`;
+  }
+
+  const roundedMinutes = Math.round(boundedSeconds / 60);
+  const hours = Math.floor(roundedMinutes / 60);
+  return `${hours}h ${String(roundedMinutes % 60).padStart(2, "0")}m`;
 }
 
 function setConnection(state, label) {
@@ -402,6 +409,16 @@ function sessionPreviewElapsed(entry, now) {
   return formatDuration(Math.max(0, end - started));
 }
 
+function sessionPreviewSubmissionSpan(state) {
+  if (Number.isFinite(state?.submission_span_seconds)) return formatDuration(state.submission_span_seconds);
+
+  const submitted = (state?.calls || [])
+    .map(call => Number(call.submitted_at ?? call.started_at))
+    .filter(Number.isFinite);
+  if (submitted.length === 0) return "";
+  return formatDuration(Math.max(...submitted) - Math.min(...submitted));
+}
+
 function serenaPreviewEntries(state) {
   if (!state) return [];
   const currentJobIds = new Set((state.jobs || []).filter(job => job.current_turn !== false).map(job => job.job_id));
@@ -457,16 +474,14 @@ function orchestratorPreviewEntries(panel) {
 function sessionPreviewModel(panel, kind) {
   if (kind === "serena") {
     const state = panel.initial_state || null;
-    const running = [...(state?.calls || []), ...(state?.jobs || [])].filter(entry => entry.status === "running").length;
-    const failed = [...(state?.calls || []), ...(state?.jobs || [])].filter(entry => entry.status === "failed" || entry.status === "timed_out").length;
     const toolCount = Number.isFinite(state?.tool_count) ? state.tool_count : (state?.calls || []).length;
     const jobCount = Number.isFinite(state?.job_count) ? state.job_count : (state?.jobs || []).length;
     return {
       label: "Serena",
       icon: dashboardAssetUrl("serena-logo.svg"),
       stats: `${toolCount} tool${toolCount === 1 ? "" : "s"} · ${jobCount} job${jobCount === 1 ? "" : "s"} · ${state?.project_name || panel.project_name || "no project"}`,
-      status: running ? `${running} running` : failed ? `${failed} failed` : toolCount + jobCount ? "Complete" : "Idle",
-      statusClass: running ? "running" : failed ? "failed" : "",
+      status: sessionPreviewSubmissionSpan(state),
+      statusClass: "",
       expanded: serenaPreviewExpanded(state),
       entries: serenaPreviewEntries(state),
     };

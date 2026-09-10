@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
 
 import psutil
@@ -68,6 +68,18 @@ class JobStatus(str, Enum):
         return self is not JobStatus.RUNNING
 
 
+class JobRetentionObserver(Protocol):
+    """Receives the durable-job state needed to keep dashboard panels consistent."""
+
+    def sync_job_retention(
+        self,
+        retained_job_ids: set[str],
+        running_job_sessions: dict[str, str | None],
+    ) -> None:
+        """Synchronize retained jobs and running-job ownership with panel retention."""
+        ...
+
+
 @dataclass(frozen=True)
 class JobRecord:
     """Persisted metadata for one background job."""
@@ -78,6 +90,7 @@ class JobRecord:
     cwd: str
     status: JobStatus
     created_at: str
+    session_id: str | None = None
     project_name: str | None = None
     label: str | None = None
     timeout_seconds: int | None = None
@@ -102,6 +115,7 @@ class JobRecord:
             cwd=str(data["cwd"]),
             status=JobStatus(str(data["status"])),
             created_at=str(data["created_at"]),
+            session_id=str(data["session_id"]) if data.get("session_id") is not None else None,
             project_name=str(data["project_name"]) if data.get("project_name") is not None else None,
             label=str(data["label"]) if data.get("label") is not None else None,
             timeout_seconds=int(data["timeout_seconds"]) if data.get("timeout_seconds") is not None else None,
@@ -880,6 +894,7 @@ class JobManager:
         max_concurrent_jobs: int = DEFAULT_MAX_CONCURRENT_JOBS,
         output_char_limit: int = DEFAULT_OUTPUT_CHAR_LIMIT,
         retention: timedelta = DEFAULT_JOB_RETENTION,
+        retention_observer: JobRetentionObserver | None = None,
     ):
         if max_concurrent_jobs <= 0:
             raise ValueError("max_concurrent_jobs must be positive")
@@ -890,7 +905,21 @@ class JobManager:
         self._max_concurrent_jobs = max_concurrent_jobs
         self._output_char_limit = output_char_limit
         self._retention = retention
+        self._retention_observer = retention_observer
+
+        self._store.prune_terminal_jobs(self._retention)
         self._store.cleanup_orphan_command_files()
+        self._sync_retention_observer(self._store.list_records())
+
+    def _sync_retention_observer(self, records: list[JobRecord] | None = None) -> None:
+        """Publishes retained-job identity and running ownership for panel retention."""
+        if self._retention_observer is None:
+            return
+        current_records = records if records is not None else self._store.list_records()
+        self._retention_observer.sync_job_retention(
+            retained_job_ids={record.job_id for record in current_records},
+            running_job_sessions={record.job_id: record.session_id for record in current_records if record.status is JobStatus.RUNNING},
+        )
 
     @property
     def max_concurrent_jobs(self) -> int:
@@ -909,6 +938,7 @@ class JobManager:
         project_name: str | None = None,
         cwd: str | None = None,
         timeout_seconds: int | None = None,
+        session_id: str | None = None,
     ) -> tuple[JobRecord, int]:
         """Start a non-interactive command and return immediately with its durable job record."""
         command = command.strip()
@@ -932,6 +962,7 @@ class JobManager:
             records = [self._reconcile_record(record) for record in self._store.list_records()]
             running = [record for record in records if record.status is JobStatus.RUNNING]
             if len(running) >= self._max_concurrent_jobs:
+                self._sync_retention_observer(records)
                 active_ids = ", ".join(record.job_id for record in running)
                 raise JobLimitError(
                     f"Cannot start another job: the limit of {self._max_concurrent_jobs} concurrent jobs is already in use. "
@@ -947,6 +978,7 @@ class JobManager:
                 cwd=str(resolved_cwd),
                 status=JobStatus.RUNNING,
                 created_at=now,
+                session_id=session_id,
                 project_name=project_name,
                 label=label,
                 timeout_seconds=timeout_seconds,
@@ -963,16 +995,18 @@ class JobManager:
                     command_file.unlink(missing_ok=True)
                 status_message = str(error) if isinstance(error, UserFacingError) else "Job could not be started."
                 try:
-                    self._store.update(
+                    failed_record = self._store.update(
                         job_id,
                         status=JobStatus.FAILED,
                         finished_at=datetime.now(UTC).isoformat(),
                         status_message=status_message,
                     )
+                    self._sync_retention_observer([*records, failed_record])
                 except Exception:
-                    pass
+                    self._sync_retention_observer(records)
                 raise
 
+            self._sync_retention_observer([*records, record])
             return record, len(running) + 1
 
     def get_job(
@@ -983,6 +1017,7 @@ class JobManager:
     ) -> JobSnapshot:
         """Return current state, telemetry, and bounded output for one job."""
         record = self._reconcile_record(self._store.read(job_id))
+        self._sync_retention_observer()
         output = self._backend.read_output(record, cursor, self._output_char_limit, output_mode=output_mode)
         return JobSnapshot(record=record, runtime=self._backend.runtime_info(record), output=output)
 
@@ -1000,6 +1035,7 @@ class JobManager:
         self._store.prune_terminal_jobs(self._retention)
         self._store.cleanup_orphan_command_files()
         records = [self._reconcile_record(record) for record in self._store.list_records()]
+        self._sync_retention_observer(records)
         running = sorted(
             (record for record in records if record.status is JobStatus.RUNNING),
             key=lambda record: record.created_at,
@@ -1025,6 +1061,7 @@ class JobManager:
         record = self._reconcile_record(self._store.read(job_id))
         if record.status.is_terminal:
             self._store.delete_command_file(job_id)
+            self._sync_retention_observer()
             return record
 
         self._backend.cancel(record)
@@ -1033,6 +1070,7 @@ class JobManager:
         current = self._store.read(job_id)
         if current.status.is_terminal:
             self._store.delete_command_file(job_id)
+            self._sync_retention_observer()
             return current
         updated = self._store.update(
             job_id,
@@ -1041,6 +1079,7 @@ class JobManager:
             status_message="Job was cancelled on request.",
         )
         self._store.delete_command_file(job_id)
+        self._sync_retention_observer()
         return updated
 
     def _reconcile_record(self, record: JobRecord) -> JobRecord:
