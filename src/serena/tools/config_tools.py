@@ -44,11 +44,10 @@ class ActivateProjectTool(Tool, ToolMarkerDoesNotRequireActiveProject):
 class GetCurrentConfigTool(Tool):
     """Prints Serena's current fixed-runtime configuration and project/tool state."""
 
-    def apply(self, max_answer_chars: int = -1) -> str:
+    def apply(self) -> str:
         """
         Print Serena's current runtime configuration, active project, and tool state.
 
-        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema
         :return: the complete current configuration overview
         """
         return self.agent.get_current_config_overview()

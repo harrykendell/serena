@@ -19,7 +19,6 @@ class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit):
         command: str,
         cwd: str | None = None,
         capture_stderr: bool = True,
-        max_answer_chars: int = -1,
     ) -> dict[str, object]:
         """
         Execute a short, non-interactive shell command and return its output.
@@ -29,7 +28,6 @@ class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit):
         :param command: the shell command to execute
         :param cwd: the working directory to execute the command in. If None, the project root will be used.
         :param capture_stderr: whether to capture and return stderr output
-        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema.
         :return: native result containing the return code plus complete non-empty stdout/stderr output
         """
         if cwd is None:

@@ -123,7 +123,6 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
         cursor: str | None = None,
         output: Literal["latest", "start"] = "latest",
         wait_for: float | Literal["completed"] | None = None,
-        max_answer_chars: int = -1,
     ) -> dict[str, object]:
         """Return job state, telemetry, and the complete journal snapshot or delta selected by this operation.
 
@@ -141,7 +140,6 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
         :param cursor: opaque cursor returned by the preceding status call for this job
         :param output: initial output position when no cursor is supplied: ``latest`` (default) or ``start``
         :param wait_for: optional wait duration in seconds, or ``"completed"`` to wait until the job finishes
-        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema
         :return: native current state, telemetry, and selected journal output
         """
         deadline: float | None = None

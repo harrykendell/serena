@@ -28,7 +28,7 @@ class GetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead):
 
     symbol_dict_grouper = LanguageServerSymbolDictGrouper(["kind"], ["kind"], collapse_singleton=True)
 
-    def apply(self, relative_path: str, depth: int = -1, max_answer_chars: int = -1) -> dict[str, Any] | list[Any]:
+    def apply(self, relative_path: str, depth: int = -1) -> dict[str, Any] | list[Any]:
         """
         Use this tool to get a high-level understanding of the code symbols in a file.
         This should be the first tool to call when you want to understand a new file, unless you already know
@@ -37,7 +37,6 @@ class GetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead):
         :param relative_path: the relative path to the file to get the overview of
         :param depth: depth up to which descendants shall be retrieved.
             Default (-1) uses depth 0.
-        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema.
         :return: a native object containing symbols grouped by kind in a compact format.
         """
         # Note: file system sync not required (relevant file is opened in the language server explicitly)
@@ -102,7 +101,6 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead):
         exclude_kinds: list[int] = [],  # noqa: B006
         substring_matching: bool = False,
         max_matches: int = -1,
-        max_answer_chars: int = -1,
     ) -> dict[str, Any] | list[Any]:
         """
         Finds symbols and code entities (classes, methods, etc.) based on the given name path pattern.
@@ -138,7 +136,6 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead):
             "Foo/get" would match "Foo/getValue" and "Foo/getData".
         :param max_matches: maximum number of permitted matches. If exceeded, a compact native match index is returned
             so the search can be refined. -1 (default) means no limit. Set to 1 if you search for a single symbol.
-        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema.
         :return: native symbol structures matching the name.
         """
         # Note: file system sync not required; the symbol finder opens all relevant source files explicitly in the case of changes
@@ -223,7 +220,6 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
         include_kinds: list[int] = [],  # noqa: B006
         exclude_kinds: list[int] = [],  # noqa: B006
         context_lines: int = 0,
-        max_answer_chars: int = -1,
     ) -> dict[str, Any] | list[Any]:
         """
         Finds references to the symbol at the given `name_path`. The result contains metadata about the referencing symbols
@@ -235,7 +231,6 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
         :param exclude_kinds: optional list of LSP symbol kinds (integers) to exclude.
         :param context_lines: surrounding source lines to include on each side of the reference, from 0 through 5.
             The default of 0 returns only the referenced line.
-        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema.
         :return: native symbol structures containing references to the requested symbol.
         """
         if not 0 <= context_lines <= 5:
@@ -292,7 +287,6 @@ class FindImplementationsTool(Tool, ToolMarkerSymbolicRead):
         include_info: bool = False,
         include_kinds: list[int] = [],  # noqa: B006
         exclude_kinds: list[int] = [],  # noqa: B006
-        max_answer_chars: int = -1,
     ) -> list[dict[str, Any]]:
         """
         Finds implementations of the symbol at the given `name_path`.
@@ -304,7 +298,6 @@ class FindImplementationsTool(Tool, ToolMarkerSymbolicRead):
             about the implementing symbols.
         :param include_kinds: (optional) limits results to the given LSP symbol kinds (integers)
         :param exclude_kinds: (optional) list of LSP symbol kinds (integers) to exclude.
-        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema.
         :return: native symbol structures implementing the requested symbol.
         """
         if not name_path:
@@ -353,7 +346,6 @@ class FindDeclarationTool(Tool, ToolMarkerSymbolicRead):
         containing_symbol_name_path: str | None = None,
         include_body: bool = False,
         include_info: bool = False,
-        max_answer_chars: int = -1,
     ) -> dict[str, Any]:
         r"""
         Finds the declaration of a symbol.
@@ -367,7 +359,6 @@ class FindDeclarationTool(Tool, ToolMarkerSymbolicRead):
         :param containing_symbol_name_path: optional name path of a containing symbol whose body shall be searched instead of the full file.
         :param include_body: whether to include the symbol's body in the result. Default False.
         :param include_info: whether to include additional info (hover-like). Default False.
-        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema.
         :return: the native declaration structure.
         """
         relative_path = self._sanitize_input_param(relative_path)
@@ -438,7 +429,6 @@ class GetDiagnosticsForFileTool(Tool, ToolMarkerSymbolicRead):
         end_line: int = -1,
         min_severity: int = 4,
         include_range: bool = False,
-        max_answer_chars: int = -1,
     ) -> dict[str, Any]:
         """
         Gets diagnostics for a file. Diagnostics are grouped as `relative_path -> severity -> name_path -> diagnostics_results`.
@@ -453,7 +443,6 @@ class GetDiagnosticsForFileTool(Tool, ToolMarkerSymbolicRead):
         :param min_severity: minimum LSP severity to include, where 1=Error, 2=Warning, 3=Information, 4=Hint.
             Diagnostics with lower-or-equal numeric severity are returned.
         :param include_range: whether to include the complete LSP start/end range instead of compact line/column fields.
-        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema.
         :return: grouped native diagnostics for the requested file.
         """
         if start_line < 0:

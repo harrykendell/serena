@@ -434,9 +434,9 @@ def test_new_runtime_initializes_once_before_first_project_tool(
     original_read = read_tool.apply
     read_entered = threading.Event()
 
-    def tracking_read(relative_path: str, start_line: int = 0, end_line: int | None = None, max_answer_chars: int = -1) -> str:
+    def tracking_read(relative_path: str, start_line: int = 0, end_line: int | None = None) -> str:
         read_entered.set()
-        return original_read(relative_path, start_line, end_line, max_answer_chars)
+        return original_read(relative_path, start_line, end_line)
 
     monkeypatch.setattr(read_tool, "apply", tracking_read)
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -646,26 +646,14 @@ def test_read_file_missing_path_is_concise_mcp_failure(
     asyncio.run(scenario())
 
 
-def test_legacy_response_budget_no_longer_changes_tool_result(
+def test_ordinary_tool_schema_does_not_expose_presentation_budget(
     multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
 ) -> None:
-    agent, roots = multi_project_agent
-    (roots["project_a"] / "value.txt").write_text("alpha")
+    agent, _ = multi_project_agent
     _activate(agent, "session-a", "project_a")
     mcp_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(ReadFileTool))
 
-    async def scenario() -> None:
-        result = await mcp_tool.run(
-            {"relative_path": "value.txt", "max_answer_chars": 0},
-            context=_mcp_context("session-a"),
-        )
-
-        assert result == "alpha"
-        record = agent.execution_store.list_session_executions("session-a")[-1]
-        assert record.status == "completed"
-        assert record.error is None
-
-    asyncio.run(scenario())
+    assert "max_answer_chars" not in mcp_tool.parameters["properties"]
 
 
 def test_read_tool_output_failures_are_concise_mcp_errors(
@@ -934,7 +922,7 @@ def test_retained_output_round_trip_is_exact_through_mcp(
 
     async def scenario() -> None:
         response = await read_tool.run(
-            {"relative_path": "large.txt", "max_answer_chars": 500},
+            {"relative_path": "large.txt"},
             context=_mcp_context("session-a"),
         )
         assert isinstance(response, dict)
@@ -1091,8 +1079,8 @@ def test_different_project_reads_can_interleave(
     second_entered = threading.Event()
     release_first = threading.Event()
 
-    def blocking_apply(relative_path: str, start_line: int = 0, end_line: int | None = None, max_answer_chars: int = -1) -> str:
-        result = original_apply(relative_path, start_line, end_line, max_answer_chars)
+    def blocking_apply(relative_path: str, start_line: int = 0, end_line: int | None = None) -> str:
+        result = original_apply(relative_path, start_line, end_line)
         if result == "alpha":
             first_entered.set()
             assert release_first.wait(timeout=5)
@@ -1135,8 +1123,8 @@ def test_same_project_plain_reads_can_overlap(
     second_entered = threading.Event()
     release_first = threading.Event()
 
-    def blocking_apply(relative_path: str, start_line: int = 0, end_line: int | None = None, max_answer_chars: int = -1) -> str:
-        result = original_apply(relative_path, start_line, end_line, max_answer_chars)
+    def blocking_apply(relative_path: str, start_line: int = 0, end_line: int | None = None) -> str:
+        result = original_apply(relative_path, start_line, end_line)
         if relative_path == "first.txt":
             first_entered.set()
             assert release_first.wait(timeout=5)
@@ -1182,10 +1170,10 @@ def test_same_project_write_waits_for_active_read(
     write_entered = threading.Event()
     release_read = threading.Event()
 
-    def blocking_read(relative_path: str, start_line: int = 0, end_line: int | None = None, max_answer_chars: int = -1) -> str:
+    def blocking_read(relative_path: str, start_line: int = 0, end_line: int | None = None) -> str:
         read_entered.set()
         assert release_read.wait(timeout=5)
-        return original_read(relative_path, start_line, end_line, max_answer_chars)
+        return original_read(relative_path, start_line, end_line)
 
     def tracking_write(relative_path: str, content: str) -> str:
         write_entered.set()
@@ -1582,10 +1570,10 @@ def test_queued_tool_remains_pinned_to_project_selected_at_submission(
     read_entered = threading.Event()
     release_read = threading.Event()
 
-    def blocking_read(relative_path: str, start_line: int = 0, end_line: int | None = None, max_answer_chars: int = -1) -> str:
+    def blocking_read(relative_path: str, start_line: int = 0, end_line: int | None = None) -> str:
         read_entered.set()
         assert release_read.wait(timeout=5)
-        return original_read(relative_path, start_line, end_line, max_answer_chars)
+        return original_read(relative_path, start_line, end_line)
 
     monkeypatch.setattr(read_tool, "apply", blocking_read)
 

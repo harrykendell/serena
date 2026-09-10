@@ -40,12 +40,11 @@ class ReadMemoryTool(Tool):
     Reads the content of a memory file.
     """
 
-    def apply(self, memory_name: str, max_answer_chars: int = -1) -> str:
+    def apply(self, memory_name: str) -> str:
         """
         Use to read a memory that is likely to be relevant to the current task, inferring relevance e.g. from the name.
 
         :param memory_name: name of the memory to read
-        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema
         :return: complete memory content
         """
         return self.memory_manager.load_memory(memory_name)
@@ -56,12 +55,11 @@ class ListMemoriesTool(Tool):
     Lists available memories.
     """
 
-    def apply(self, topic: str = "", max_answer_chars: int = -1) -> dict[str, object]:
+    def apply(self, topic: str = "") -> dict[str, object]:
         """
         Lists available memories, optionally filtered by topic.
 
         :param topic: optional memory topic to list
-        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema
         :return: complete native memory listing
         """
         return self.memory_manager.list_memories(topic).to_dict()

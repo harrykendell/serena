@@ -31,3 +31,14 @@ def test_all_tool_parameters_have_type():
                     issues.append(f"Tool {tool.get_name()!r} parameter {pname!r} missing 'type'")
         if issues:
             raise AssertionError("\n".join(issues))
+
+
+def test_ordinary_tool_schemas_do_not_expose_presentation_budget() -> None:
+    """Ordinary tools leave response-size presentation to the central presenter."""
+    cfg = SerenaConfig(log_level=logging.ERROR).with_headless_mode_overrides()
+    factory = SerenaMCPFactory(transport="stdio")
+    factory.agent = factory._create_serena_agent(cfg)
+
+    for tool in factory._iter_tools():
+        mcp_tool = factory.make_mcp_tool(tool, openai_tool_compatible=True)
+        assert "max_answer_chars" not in mcp_tool.parameters.get("properties", {})

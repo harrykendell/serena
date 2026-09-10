@@ -91,7 +91,7 @@ def test_shell_tool_returns_compact_decision_relevant_payload(tmp_path) -> None:
     assert response == {"return_code": 7, "stdout": "out", "stderr": "err"}
 
 
-def test_shell_tool_returns_complete_output_independent_of_legacy_budget(tmp_path) -> None:
+def test_shell_tool_returns_complete_output(tmp_path) -> None:
     agent = MagicMock()
     agent.get_active_project_or_raise.return_value = SimpleNamespace(project_root=str(tmp_path))
     agent.serena_config.tool_timeout = 30
@@ -99,6 +99,6 @@ def test_shell_tool_returns_complete_output_independent_of_legacy_budget(tmp_pat
     program = 'print("x" * 1200, flush=True)'
     command = f"{shlex.quote(sys.executable)} -u -c {shlex.quote(program)}"
 
-    response = tool.apply(command, max_answer_chars=10)
+    response = tool.apply(command)
 
     assert response == {"return_code": 0, "stdout": "x" * 1200 + "\n"}

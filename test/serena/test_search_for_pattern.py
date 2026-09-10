@@ -14,26 +14,19 @@ def _tool(tmp_path) -> SearchForPatternTool:
     return SearchForPatternTool(agent)
 
 
-def test_search_for_pattern_returns_complete_matches_independent_of_legacy_budget(tmp_path) -> None:
+def test_search_for_pattern_returns_complete_matches(tmp_path) -> None:
     lines = [f"MATCHME item number {i:04d} " + "payload " * 12 for i in range(60)]
     (tmp_path / "data.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     tool = _tool(tmp_path)
 
-    small_budget = tool.apply(
+    result = tool.apply(
         substring_pattern="MATCHME",
         restrict_search_to_code_files=False,
-        max_answer_chars=100,
-    )
-    large_budget = tool.apply(
-        substring_pattern="MATCHME",
-        restrict_search_to_code_files=False,
-        max_answer_chars=100_000,
     )
 
-    assert small_budget == large_budget
-    assert len(small_budget["data.txt"]) == 60
-    assert "MATCHME item number 0000" in small_budget["data.txt"][0]
-    assert "MATCHME item number 0059" in small_budget["data.txt"][-1]
+    assert len(result["data.txt"]) == 60
+    assert "MATCHME item number 0000" in result["data.txt"][0]
+    assert "MATCHME item number 0059" in result["data.txt"][-1]
 
 
 def test_search_for_pattern_preserves_complete_requested_context(tmp_path) -> None:
@@ -45,7 +38,6 @@ def test_search_for_pattern_preserves_complete_requested_context(tmp_path) -> No
         context_lines_before=1,
         context_lines_after=1,
         restrict_search_to_code_files=False,
-        max_answer_chars=1,
     )
 
     assert result == {"data.txt": ["...   0:above\n  >   1:MATCHME target\n...   2:below"]}
@@ -58,7 +50,6 @@ def test_search_deduplicates_multiple_matches_on_one_source_line(tmp_path) -> No
     result = tool.apply(
         substring_pattern="MATCHME",
         restrict_search_to_code_files=False,
-        max_answer_chars=10_000,
     )
 
     assert len(result["data.txt"]) == 1

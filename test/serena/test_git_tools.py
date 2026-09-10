@@ -33,9 +33,7 @@ def _run_git(repo: Path, *args: str) -> str:
 def _make_tool(tool_cls, project: Project):
     agent = MagicMock()
     agent.get_active_project_or_raise.return_value = project
-    tool = tool_cls(agent)
-    tool._limit_length = lambda result, max_answer_chars: result
-    return tool
+    return tool_cls(agent)
 
 
 @pytest.mark.parametrize("tool_cls", [GitStatusTool, GitLogTool, GitDiffTool])

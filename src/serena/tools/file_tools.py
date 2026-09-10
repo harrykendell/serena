@@ -30,13 +30,12 @@ class ReadFileTool(Tool):
     Reads a file within the project directory.
     """
 
-    def apply(self, relative_path: str, start_line: int = 0, end_line: int | None = None, max_answer_chars: int = -1) -> str:
+    def apply(self, relative_path: str, start_line: int = 0, end_line: int | None = None) -> str:
         """Reads the given file or an exact line range.
 
         :param relative_path: the relative path to the file to read
         :param start_line: the 0-based first line, with negative values counting from the end
         :param end_line: the inclusive 0-based final line, or ``None`` for the rest of the file
-        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema
         :return: the complete requested file content
         """
         if end_line is not None and end_line < 0:
@@ -90,15 +89,12 @@ class ListDirTool(Tool):
     Lists files and directories in the given directory (optionally with recursion).
     """
 
-    def apply(
-        self, relative_path: str, recursive: bool, skip_ignored_files: bool = False, max_answer_chars: int = -1
-    ) -> dict[str, list[str]]:
+    def apply(self, relative_path: str, recursive: bool, skip_ignored_files: bool = False) -> dict[str, list[str]]:
         """Lists files and directories under one project-relative directory.
 
         :param relative_path: the directory to list; pass ``.`` for the project root
         :param recursive: whether to recurse into subdirectories
         :param skip_ignored_files: whether ignored paths should be omitted
-        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema
         :return: a native object containing directory and file paths
         """
         self.project.validate_relative_path(relative_path)
@@ -124,12 +120,11 @@ class FindFileTool(Tool):
     Finds files in the given relative paths
     """
 
-    def apply(self, file_mask: str, relative_path: str, max_answer_chars: int = -1) -> dict[str, list[str]]:
+    def apply(self, file_mask: str, relative_path: str) -> dict[str, list[str]]:
         """Finds files matching one filename mask below a project-relative directory.
 
         :param file_mask: filename mask using ``*`` and ``?`` wildcards
         :param relative_path: directory to search; pass ``.`` for the project root
-        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema
         :return: a native object containing matching file paths
         """
         self.project.validate_relative_path(relative_path)
@@ -226,7 +221,6 @@ class ReplaceInFilesTool(EditingToolWithDiagnostics):
         dry_run: bool = False,
         occurrence_ids: list[str] | None = None,
         expected_count: int = -1,
-        max_answer_chars: int = -1,
     ) -> str:
         r"""
         Replaces occurrences of a pattern across multiple files in ONE call.
@@ -262,8 +256,6 @@ class ReplaceInFilesTool(EditingToolWithDiagnostics):
         :param expected_count: optional guard for calls without occurrence_ids: the number of
             occurrences you expect to be replaced. If the actual count differs, nothing is changed and
             the list of prospective changes is returned. -1 disables the guard.
-        :param max_answer_chars: if the output exceeds this many characters, a shortened version is
-            returned. -1 uses the configured default.
         :return: in a dry run, the prospective changes; otherwise a summary of the applied replacements
         """
         replacer = MultiFileContentReplacer(mode=mode)
@@ -272,7 +264,7 @@ class ReplaceInFilesTool(EditingToolWithDiagnostics):
         contents = dict(files)
 
         if dry_run:
-            return self._render_listing(replacer, occurrences, contents, max_answer_chars, dry_run=True)
+            return self._render_listing(replacer, occurrences, contents, dry_run=True)
 
         if occurrence_ids is not None:
             selected, problems = self._resolve_occurrence_ids(occurrence_ids, occurrences)
@@ -292,13 +284,13 @@ class ReplaceInFilesTool(EditingToolWithDiagnostics):
                 "No occurrences of the pattern were found; no changes were applied. Check the mode and path/glob restrictions."
             )
         if expected_count >= 0 and len(occurrences) != expected_count:
-            listing = self._render_listing(replacer, occurrences, contents, max_answer_chars, dry_run=False)
+            listing = self._render_listing(replacer, occurrences, contents, dry_run=False)
             raise UserFacingError(
                 f"expected_count={expected_count}, but the pattern matches {len(occurrences)} occurrence(s); no changes were applied.\n{listing}"
             )
         ambiguous = [o for o in occurrences if o.is_ambiguous]
         if ambiguous:
-            listing = self._render_listing(replacer, occurrences, contents, max_answer_chars, dry_run=False)
+            listing = self._render_listing(replacer, occurrences, contents, dry_run=False)
             raise UserFacingError(
                 f"{len(ambiguous)} occurrence(s) are ambiguous; no changes were applied. Refine the pattern or select explicit occurrence_ids.\n{listing}"
             )
@@ -342,7 +334,6 @@ class ReplaceInFilesTool(EditingToolWithDiagnostics):
         replacer: MultiFileContentReplacer,
         occurrences: list[ReplacementOccurrence],
         contents: dict[str, str],
-        max_answer_chars: int,
         dry_run: bool,
     ) -> str:
         """Renders the complete prospective replacement listing."""
@@ -434,7 +425,6 @@ class SearchForPatternTool(Tool):
         restrict_search_to_code_files: bool = False,
         skip_ignored_files: bool = True,
         multiline: bool = True,
-        max_answer_chars: int = -1,
     ) -> dict[str, list[str]]:
         """
         Searches for a regex pattern across project files, returning whole matched lines (plus optional context).
@@ -453,7 +443,6 @@ class SearchForPatternTool(Tool):
             otherwise also search non-code files.
         :param skip_ignored_files: whether to skip ignored sub-paths (default: True)
         :param multiline: whether to apply multi-line matching (default: True), enabling the flags re.DOTALL and re.MULTILINE
-        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema.
         :return: a native mapping from file paths to complete matched consecutive lines (0-based line numbers).
         """
         relative_path = relative_path.strip()

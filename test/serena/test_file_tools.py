@@ -15,10 +15,7 @@ def read_file_tool(tmp_path: Path) -> ReadFileTool:
     project = Project.load(str(tmp_path), serena_config=SerenaConfig(web_dashboard=False))
     agent = MagicMock()
     agent.get_active_project_or_raise.return_value = project
-    tool = ReadFileTool(agent)
-    # bypass the length limit, which would otherwise depend on the agent configuration
-    tool._limit_length = lambda result, max_answer_chars: result
-    return tool
+    return ReadFileTool(agent)
 
 
 def _line_at_lsp_index(content: str, line: int) -> str:

@@ -1,6 +1,6 @@
 # Serena Central Result Presentation Plan
 
-Status: C00-C05 COMPLETE (2026-09-10); C06 NEXT
+Status: C00-C06 COMPLETE (2026-09-10); C07 NEXT
 
 Scope: successful Serena tool results, retained-output paging, MCP transport, `ExecutionStore`, activity/dashboard inspection, and the removal of tool-local presentation truncation.
 
@@ -390,6 +390,14 @@ Keep only parameters that are semantically part of the operation, notably:
 Update ChatGPT policy/tool descriptions so callers rely on retained `output_id` when central presentation truncates a result rather than trying to pre-budget ordinary tools.
 
 Completion condition: tool schemas no longer expose the implementation detail of Serena's presentation budget.
+
+#### C06 completion captured 2026-09-10
+
+- Removed all 24 public ordinary-tool `max_answer_chars` parameters from configuration, jobs, symbolic/semantic queries, foreground shell, memories, Git, file/search, and replacement-listing schemas.
+- Removed the now-unused Git and replacement-listing presentation-budget plumbing while leaving the legacy generic `Tool._limit_length()` helpers and retained-output internals for the planned C09 cleanup.
+- Kept semantic query controls such as `max_matches`, file line ranges, job cursor/output/wait controls, and `read_tool_output.max_chars` unchanged.
+- Updated ChatGPT policy and configuration documentation so callers rely on central presentation plus retained `output_id` paging rather than pre-budgeting ordinary tools.
+- Added schema-level coverage that rejects presentation-budget leakage from ordinary tools; validation completed with `uv run poe format`, `uv run poe type-check`, and `uv run poe test` (`799 passed, 265 deselected`).
 
 ### C07 — Make dashboard rendering presentation-preserving
 

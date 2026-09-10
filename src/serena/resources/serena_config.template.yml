@@ -73,8 +73,8 @@ language_server_idle_timeout: 900
 max_memory_chars: 150000
 
 # Approximate default response budget when retained-output paging is available in the ChatGPT runtime.
-# Serena uses a deterministic four-characters-per-token approximation here. Explicit max_answer_chars tool arguments still
-# override this implicit default exactly.
+# Serena uses a deterministic four-characters-per-token approximation here and applies the budget centrally to ordinary tool
+# results. Oversized exact results remain available through retained-output paging.
 default_max_tool_answer_tokens: 8000
 
 # time budget (seconds) per tool call for the retrieval of additional symbol information

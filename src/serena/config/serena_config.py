@@ -509,8 +509,8 @@ class SerenaConfig(SharedConfig):
     default_max_tool_answer_tokens: int = 4_000
     """Approximate default response budget when retained output paging is available.
 
-    The budget uses a deterministic four-characters-per-token approximation and only constrains implicit defaults. An explicit
-    ``max_answer_chars`` supplied by a caller remains an exact character override.
+    The budget uses a deterministic four-characters-per-token approximation and is applied centrally to ordinary tool results.
+    Oversized exact results remain available through retained-output paging.
     """
 
     ignored_paths: list[str] = field(default_factory=list)

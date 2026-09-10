@@ -8,6 +8,7 @@ def test_chatgpt_policy_preserves_project_concurrency_and_job_guidance() -> None
     assert "serializes project mutations" in CHATGPT_PRODUCT_PROMPT
     assert "different project runtimes remain independent" in CHATGPT_PRODUCT_PROMPT
     assert "read_tool_output" in CHATGPT_PRODUCT_PROMPT
+    assert "do not try to pre-budget responses" in CHATGPT_PRODUCT_PROMPT
     assert "start_job" in CHATGPT_PRODUCT_PROMPT
     assert "job_status(wait_for=...)" in CHATGPT_PRODUCT_PROMPT
 
