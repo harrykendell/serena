@@ -48,8 +48,7 @@ class GetCurrentConfigTool(Tool):
         """
         Print Serena's current runtime configuration, active project, and tool state.
 
-        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget
-        :return: current configuration, using retained-output paging when the response exceeds the budget
+        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema
+        :return: the complete current configuration overview
         """
-        result = self.agent.get_current_config_overview()
-        return self._limit_length(result, max_answer_chars)
+        return self.agent.get_current_config_overview()

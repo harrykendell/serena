@@ -11,6 +11,7 @@ class _GitTool(Tool):
     _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 
     def _run_git(self, args: list[str], max_answer_chars: int = -1) -> str:
+        """Runs one Git command and returns its complete successful output."""
         try:
             result = subprocess.run(
                 ["git", *args],
@@ -29,7 +30,7 @@ class _GitTool(Tool):
         output = result.stdout.strip()
         if result.stderr.strip():
             output = f"{output}\n{result.stderr.strip()}".strip()
-        return self._limit_length(output or "OK", max_answer_chars)
+        return output or "OK"
 
     @classmethod
     def _validate_git_name(cls, value: str, kind: str) -> str:

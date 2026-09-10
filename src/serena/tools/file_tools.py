@@ -36,8 +36,8 @@ class ReadFileTool(Tool):
         :param relative_path: the relative path to the file to read
         :param start_line: the 0-based first line, with negative values counting from the end
         :param end_line: the inclusive 0-based final line, or ``None`` for the rest of the file
-        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured default
-        :return: the requested file content
+        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema
+        :return: the complete requested file content
         """
         if end_line is not None and end_line < 0:
             raise UserFacingError("end_line must be non-negative when provided.")
@@ -49,7 +49,7 @@ class ReadFileTool(Tool):
             raise UserFacingError(f"start_line {start_line} is outside the file's {len(result_lines)} lines.")
 
         selected = result_lines[start_line:] if end_line is None else result_lines[start_line : end_line + 1]
-        return self._limit_length("\n".join(selected), max_answer_chars)
+        return "\n".join(selected)
 
 
 class CreateTextFileTool(EditingToolWithDiagnostics):
@@ -90,14 +90,16 @@ class ListDirTool(Tool):
     Lists files and directories in the given directory (optionally with recursion).
     """
 
-    def apply(self, relative_path: str, recursive: bool, skip_ignored_files: bool = False, max_answer_chars: int = -1) -> str:
+    def apply(
+        self, relative_path: str, recursive: bool, skip_ignored_files: bool = False, max_answer_chars: int = -1
+    ) -> dict[str, list[str]]:
         """Lists files and directories under one project-relative directory.
 
         :param relative_path: the directory to list; pass ``.`` for the project root
         :param recursive: whether to recurse into subdirectories
         :param skip_ignored_files: whether ignored paths should be omitted
-        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured default
-        :return: a JSON object containing directory and file paths
+        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema
+        :return: a native object containing directory and file paths
         """
         self.project.validate_relative_path(relative_path)
         abs_path = Path(self.get_project_root()) / relative_path
@@ -114,7 +116,7 @@ class ListDirTool(Tool):
             is_ignored_dir=is_ignored_path_fn,
             is_ignored_file=is_ignored_path_fn,
         )
-        return self._limit_length(self._to_json({"dirs": dirs, "files": files}), max_answer_chars)
+        return {"dirs": dirs, "files": files}
 
 
 class FindFileTool(Tool):
@@ -122,13 +124,13 @@ class FindFileTool(Tool):
     Finds files in the given relative paths
     """
 
-    def apply(self, file_mask: str, relative_path: str, max_answer_chars: int = -1) -> str:
+    def apply(self, file_mask: str, relative_path: str, max_answer_chars: int = -1) -> dict[str, list[str]]:
         """Finds files matching one filename mask below a project-relative directory.
 
         :param file_mask: filename mask using ``*`` and ``?`` wildcards
         :param relative_path: directory to search; pass ``.`` for the project root
-        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured default
-        :return: a JSON object containing matching file paths
+        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema
+        :return: a native object containing matching file paths
         """
         self.project.validate_relative_path(relative_path)
         abs_path = Path(self.get_project_root()) / relative_path
@@ -151,7 +153,7 @@ class FindFileTool(Tool):
             is_ignored_file=is_ignored_file,
             relative_to=self.get_project_root(),
         )
-        return self._limit_length(self._to_json({"files": files}), max_answer_chars)
+        return {"files": files}
 
 
 class ReplaceContentTool(EditingToolWithDiagnostics):
@@ -343,6 +345,7 @@ class ReplaceInFilesTool(EditingToolWithDiagnostics):
         max_answer_chars: int,
         dry_run: bool,
     ) -> str:
+        """Renders the complete prospective replacement listing."""
         affected_files = sorted({o.relative_path for o in occurrences})
         header = f"Found {len(occurrences)} occurrence(s) in {len(affected_files)} file(s)."
         if dry_run:
@@ -357,22 +360,7 @@ class ReplaceInFilesTool(EditingToolWithDiagnostics):
             parts.append(f"\n{path} ({len(file_occurrences)} occurrence(s)):")
             for occ in file_occurrences:
                 parts.append(replacer.render_occurrence_diff(occ, contents[path]))
-        result = "\n".join(parts)
-
-        def make_locations_only() -> str:
-            lines = [header] + [f"  [{o.occurrence_id}] line {o.start_line}" for o in occurrences]
-            return "\n".join(lines)
-
-        def make_per_file_counts() -> str:
-            counts = {path: sum(1 for o in occurrences if o.relative_path == path) for path in affected_files}
-            return f"{header}\nOccurrence counts per file:\n{self._to_json(counts)}"
-
-        def make_summary() -> str:
-            return header
-
-        return self._limit_length(
-            result, max_answer_chars, shortened_result_factories=[make_locations_only, make_per_file_counts, make_summary]
-        )
+        return "\n".join(parts)
 
     @staticmethod
     def _resolve_occurrence_ids(
@@ -447,7 +435,7 @@ class SearchForPatternTool(Tool):
         skip_ignored_files: bool = True,
         multiline: bool = True,
         max_answer_chars: int = -1,
-    ) -> str:
+    ) -> dict[str, list[str]]:
         """
         Searches for a regex pattern across project files, returning whole matched lines (plus optional context).
         Use this for arbitrary text/non-symbol structure or discovery when a target code symbol cannot yet be identified
@@ -465,9 +453,8 @@ class SearchForPatternTool(Tool):
             otherwise also search non-code files.
         :param skip_ignored_files: whether to skip ignored sub-paths (default: True)
         :param multiline: whether to apply multi-line matching (default: True), enabling the flags re.DOTALL and re.MULTILINE
-        :param max_answer_chars: if the output exceeds this many characters, a progressively shortened summary is returned instead.
-            ``-1`` uses the configured default.
-        :return: A mapping from file paths to matched consecutive lines (0-based line numbers).
+        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema.
+        :return: a native mapping from file paths to complete matched consecutive lines (0-based line numbers).
         """
         relative_path = relative_path.strip()
         if relative_path:
@@ -498,8 +485,6 @@ class SearchForPatternTool(Tool):
         # group unique displayed matches by file so repeated regex hits do not duplicate the same source context
         file_to_matches: dict[str, list[str]] = defaultdict(list)
         seen_displays_by_file: dict[str, set[str]] = defaultdict(set)
-        match_lines_by_file: dict[str, list[dict[str, int | str]]] = defaultdict(list)
-        seen_lines_by_file: dict[str, set[int]] = defaultdict(set)
         for match in matches:
             assert match.source_file_path is not None
             path = match.source_file_path
@@ -508,71 +493,11 @@ class SearchForPatternTool(Tool):
                 file_to_matches[path].append(display)
                 seen_displays_by_file[path].add(display)
 
-            first = match.matched_lines[0]
-            if first.line_number not in seen_lines_by_file[path]:
-                match_lines_by_file[path].append({"line": first.line_number, "text": first.line_content.strip()})
-                seen_lines_by_file[path].add(first.line_number)
+        return dict(file_to_matches)
 
-        # shortened result closures, from least to most aggressive shortening
-        _TEXT_TRUNCATE = 60
-
-        def render_first_lines(truncate: bool) -> str:
-            """Render each match's first line, either in full or truncated to a fixed length."""
-
-            def entry_text(text: str) -> str:
-                if truncate and len(text) > _TEXT_TRUNCATE:
-                    return text[:_TEXT_TRUNCATE] + "..."
-                return text
-
-            compact = {
-                path: [{"line": m["line"], "text": entry_text(str(m["text"]))} for m in lines]
-                for path, lines in match_lines_by_file.items()
-            }
-            if truncate:
-                header = (
-                    f"Matched lines (text over {_TEXT_TRUNCATE} chars is truncated, marked with a trailing '...'). "
-                    "For matched code symbols, continue with semantic retrieval; use read_file only when exact raw line context is needed:"
-                )
-            else:
-                header = (
-                    "Matched lines per file. For matched code symbols, continue with semantic retrieval; "
-                    "use read_file only when exact raw line context is needed:"
-                )
-            return f"{header}\n{self._to_json(compact)}"
-
-        def make_first_lines_full() -> str:
-            """Match locations with each match's full first line."""
-            return render_first_lines(truncate=False)
-
-        def make_first_lines_truncated() -> str:
-            """Match locations with each match's first line truncated to a fixed length."""
-            return render_first_lines(truncate=True)
-
-        def make_line_numbers_only() -> str:
-            """Match locations as bare line numbers (no text)."""
-            numbers = {path: [m["line"] for m in lines] for path, lines in match_lines_by_file.items()}
-            return f"Match lines per file:\n{self._to_json(numbers)}"
-
-        def make_per_file_counts() -> str:
-            counts = {path: len(lines) for path, lines in match_lines_by_file.items()}
-            return f"Match counts per file:\n{self._to_json(counts)}"
-
-        def make_summary() -> str:
-            unique_lines = sum(len(lines) for lines in match_lines_by_file.values())
-            return f"Found {unique_lines} matching lines in {len(match_lines_by_file)} files."
-
-        result = self._to_json(file_to_matches)
-        return self._limit_length(
-            result,
-            max_answer_chars,
-            shortened_result_factories=[
-                make_first_lines_full,
-                make_first_lines_truncated,
-                make_line_numbers_only,
-                make_per_file_counts,
-                make_summary,
-            ],
-        )
+    """
+    Performs a search for a pattern in the project.
+    """
 
     """
     Performs a search for a pattern in the project.

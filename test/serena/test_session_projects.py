@@ -646,7 +646,7 @@ def test_read_file_missing_path_is_concise_mcp_failure(
     asyncio.run(scenario())
 
 
-def test_invalid_response_budget_is_concise_mcp_failure(
+def test_legacy_response_budget_no_longer_changes_tool_result(
     multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
 ) -> None:
     agent, roots = multi_project_agent
@@ -655,16 +655,15 @@ def test_invalid_response_budget_is_concise_mcp_failure(
     mcp_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(ReadFileTool))
 
     async def scenario() -> None:
-        with pytest.raises(ToolError) as exc_info:
-            await mcp_tool.run(
-                {"relative_path": "value.txt", "max_answer_chars": 0},
-                context=_mcp_context("session-a"),
-            )
+        result = await mcp_tool.run(
+            {"relative_path": "value.txt", "max_answer_chars": 0},
+            context=_mcp_context("session-a"),
+        )
 
-        message = str(exc_info.value)
-        assert message == "Resolved maximum answer length must be positive, got: 0"
+        assert result == "alpha"
         record = agent.execution_store.list_session_executions("session-a")[-1]
-        assert record.error == message
+        assert record.status == "completed"
+        assert record.error is None
 
     asyncio.run(scenario())
 
@@ -825,8 +824,7 @@ def test_shell_nonzero_exit_remains_successful_mcp_result(
 
     async def scenario() -> None:
         result = await mcp_tool.run({"command": "exit 7"}, context=_mcp_context("session-a"))
-        payload = json.loads(result)
-        assert payload == {"return_code": 7}
+        assert result == {"return_code": 7}
 
         record = agent.execution_store.list_session_executions("session-a")[-1]
         assert record.status == "completed"
@@ -929,7 +927,7 @@ def test_retained_output_round_trip_is_exact_through_mcp(
 ) -> None:
     agent, roots = multi_project_agent
     _activate(agent, "session-a", "project_a")
-    content = "start-" + "x" * 2_000 + "-useful-tail"
+    content = "start-" + "x" * 18_000 + "-useful-tail"
     (roots["project_a"] / "large.txt").write_text(content)
     read_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(ReadFileTool))
     output_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(ReadToolOutputTool))
@@ -939,23 +937,30 @@ def test_retained_output_round_trip_is_exact_through_mcp(
             {"relative_path": "large.txt", "max_answer_chars": 500},
             context=_mcp_context("session-a"),
         )
-        assert isinstance(response, str)
-        assert response.startswith(f"truncated=true; total_chars={len(content)}; output_id=")
-        assert "-useful-tail" in response
-        output_id = response.split("output_id=", 1)[1].splitlines()[0]
+        assert isinstance(response, dict)
+        assert response["truncated"] is True
+        assert response["total_chars"] == len(content)
+        assert "start-" in cast(str, response["result"])
+        assert "-useful-tail" in cast(str, response["result"])
+        output_id = cast(str, response["output_id"])
         execution = agent.execution_store.list_executions(newest_first=True)[0]
         assert execution.result == json.dumps(response, ensure_ascii=False, separators=(",", ":"))
         assert execution.retained_output_id == output_id
         assert execution.retained_output_chars == len(content)
 
-        page = await output_tool.run(
-            {"output_id": output_id, "offset": 0, "max_chars": len(content)},
+        first_page = await output_tool.run(
+            {"output_id": output_id, "offset": 0, "max_chars": 9_000},
             context=_mcp_context("session-a"),
         )
-        payload = json.loads(cast(str, page))
-        assert payload["output_id"] == output_id
-        assert payload["complete"] is True
-        assert payload["content"] == content
+        second_page = await output_tool.run(
+            {"output_id": output_id, "offset": 9_000, "max_chars": 9_100},
+            context=_mcp_context("session-a"),
+        )
+        first_payload = json.loads(cast(str, first_page))
+        second_payload = json.loads(cast(str, second_page))
+        assert first_payload["output_id"] == output_id
+        assert first_payload["complete"] is False
+        assert first_payload["content"] + second_payload["content"] == content
 
     asyncio.run(scenario())
 

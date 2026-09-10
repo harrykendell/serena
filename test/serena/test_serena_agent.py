@@ -570,7 +570,7 @@ class TestSerenaAgent:
         agent = serena_agent
         find_symbol_tool = agent.get_tool(FindSymbolTool)
         result = find_symbol_tool.apply(name_path_pattern=case.symbol_name, include_info=True)
-        symbols = json.loads(result)
+        symbols = result
         assert any(
             case.symbol_name in s["name_path"]
             and case.expected_kind.lower() in s["kind"].lower()
@@ -589,7 +589,7 @@ class TestSerenaAgent:
         result = find_symbol_tool.apply(name_path_pattern=case.symbol_name, relative_path=case.definition_file)
 
         time.sleep(1)
-        symbols = json.loads(result)
+        symbols = result
         # Find the definition
         def_symbol = symbols[0]
 
@@ -613,7 +613,7 @@ class TestSerenaAgent:
                         return True
             return False
 
-        refs = json.loads(result)
+        refs = result
         assert contains_ref_with_relative_path(refs, case.reference_file), (
             f"Expected to find reference to {case.symbol_name} in {case.reference_file}. refs={refs}"
         )
@@ -627,7 +627,7 @@ class TestSerenaAgent:
             containing_symbol_name_path=case.containing_symbol_name_path,
             include_info=True,
         )
-        defining_symbol = json.loads(result)
+        defining_symbol = result
         assert defining_symbol is not None, f"Expected defining symbol for regex {case.regex!r} in {case.relative_path}"
         assert defining_symbol.get("relative_path") is not None
         assert case.expected_definition_file in defining_symbol["relative_path"], (
@@ -659,7 +659,7 @@ class TestSerenaAgent:
             relative_path=diagnostic_case.relative_path,
             min_severity=1,
         )
-        full_file_diagnostics = json.loads(result)
+        full_file_diagnostics = result
         diagnostic_case.assert_matches(full_file_diagnostics)
         compact_diagnostic = next(
             diagnostic
@@ -684,7 +684,7 @@ class TestSerenaAgent:
             end_line=pos2[0] - 1,
             include_range=True,
         )
-        diagnostics_in_range = json.loads(result)
+        diagnostics_in_range = result
         diagnostic_case.without_second_symbol().assert_matches(diagnostics_in_range)
         ranged_diagnostic = next(
             diagnostic
@@ -701,12 +701,12 @@ class TestSerenaAgent:
         agent = serena_agent
         find_symbol_tool = agent.get_tool(FindSymbolTool)
         result = find_symbol_tool.apply(name_path_pattern=case.symbol_name, relative_path=case.definition_file)
-        symbols = json.loads(result)
+        symbols = result
         assert symbols, f"Expected to find symbol {case.symbol_name} in {case.definition_file}"
         def_symbol = symbols[0]
         find_impl_tool = agent.get_tool(FindImplementationsTool)
         result = find_impl_tool.apply(name_path=def_symbol["name_path"], relative_path=def_symbol["relative_path"], include_info=True)
-        implementations = json.loads(result)
+        implementations = result
         assert any(
             case.implementation_file in implementation["relative_path"]
             and self._symbol_matches_expected_name(implementation, case.expected_symbol_name)
@@ -730,7 +730,7 @@ class TestSerenaAgent:
             substring_matching=case.substring_matching,
         )
 
-        symbols = json.loads(result)
+        symbols = result
         assert any(
             case.expected_symbol_name == s["name_path"].split("/")[-1]
             and case.expected_kind.lower() in s["kind"].lower()
@@ -749,7 +749,7 @@ class TestSerenaAgent:
             substring_matching=True,
         )
 
-        symbols = json.loads(result)
+        symbols = result
         assert not symbols, f"Expected to find no symbols for {case.name_path}. Symbols found: {symbols}"
 
     @pytest.mark.parametrize(

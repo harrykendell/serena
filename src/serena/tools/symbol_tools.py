@@ -2,9 +2,8 @@
 Language server-related tools
 """
 
-import copy
 import os
-from collections import Counter, defaultdict
+from collections import defaultdict
 from collections.abc import Sequence
 from typing import Any
 
@@ -29,7 +28,7 @@ class GetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead):
 
     symbol_dict_grouper = LanguageServerSymbolDictGrouper(["kind"], ["kind"], collapse_singleton=True)
 
-    def apply(self, relative_path: str, depth: int = -1, max_answer_chars: int = -1) -> str:
+    def apply(self, relative_path: str, depth: int = -1, max_answer_chars: int = -1) -> dict[str, Any] | list[Any]:
         """
         Use this tool to get a high-level understanding of the code symbols in a file.
         This should be the first tool to call when you want to understand a new file, unless you already know
@@ -38,10 +37,8 @@ class GetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead):
         :param relative_path: the relative path to the file to get the overview of
         :param depth: depth up to which descendants shall be retrieved.
             Default (-1) uses depth 0.
-        :param max_answer_chars: if the overview is longer than this number of characters,
-            no content will be returned. -1 means the default value from the config will be used.
-            Don't adjust unless there is really no other way to get the content required for the task.
-        :return: a JSON object containing symbols grouped by kind in a compact format.
+        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema.
+        :return: a native object containing symbols grouped by kind in a compact format.
         """
         # Note: file system sync not required (relevant file is opened in the language server explicitly)
 
@@ -49,32 +46,7 @@ class GetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead):
             depth = 0
 
         result = self.get_symbol_overview(relative_path, depth=depth)
-
-        # capture kind names and depth-0 snapshots before grouping, which mutates the dicts
-        kind_names = [d.get("kind", "unknown") for d in result]
-        if depth > 0:
-            depth_0_result = [d.copy() for d in result]
-            for d in depth_0_result:
-                d.pop("children", None)
-
-        compact_result = self.symbol_dict_grouper.group(result)
-        result_json_str = self._to_json(compact_result)
-
-        # shortened result closures
-        def make_kind_counts() -> str:
-            return f"Symbol counts by kind:\n{self._to_json(Counter(kind_names))}"
-
-        if depth == 0:
-            shortened_results = [make_kind_counts]
-        else:
-
-            def make_depth_0_result() -> str:
-                compact_depth_0_result = self.symbol_dict_grouper.group(depth_0_result)
-                return "Depth 0 overview:\n" + self._to_json(compact_depth_0_result)
-
-            shortened_results = [make_depth_0_result, make_kind_counts]
-
-        return self._limit_length(result_json_str, max_answer_chars, shortened_result_factories=shortened_results)
+        return self.symbol_dict_grouper.group(result)
 
     def get_symbol_overview(self, relative_path: str, depth: int = 0) -> list[LanguageServerSymbol.OutputDict]:
         """Returns the symbol hierarchy for one analyzable source file."""
@@ -131,7 +103,7 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead):
         substring_matching: bool = False,
         max_matches: int = -1,
         max_answer_chars: int = -1,
-    ) -> str:
+    ) -> dict[str, Any] | list[Any]:
         """
         Finds symbols and code entities (classes, methods, etc.) based on the given name path pattern.
         The returned symbol information can be used for edits or further queries.
@@ -139,7 +111,7 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead):
 
         A name path is a path in the symbol tree *within a source file*.
         For example, the method `my_method` defined in class `MyClass` would have the name path `MyClass/my_method`.
-        If a symbol is overloaded (e.g., in C++), a 0-based index is appended (e.g. "MyClass/my_method[0]") to
+        If a symbol is overloaded (e.g. in C++), a 0-based index is appended (e.g. "MyClass/my_method[0]") to
         uniquely identify it.
 
         To search for a symbol, you provide a name path pattern that is used to match against name paths.
@@ -164,10 +136,10 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead):
         :param exclude_kinds: (optional) list of LSP symbol kinds (integers) to exclude.
         :param substring_matching: If True, use substring matching for the last element of the pattern, such that
             "Foo/get" would match "Foo/getValue" and "Foo/getData".
-        :param max_matches: maximum number of permitted matches. If exceeded, a shortened result is returned
-             which allows refining the search. -1 (default) means no limit. Set to 1 if you search for a single symbol.
-        :param max_answer_chars: max result length; -1 for default
-        :return: symbols (with locations) matching the name.
+        :param max_matches: maximum number of permitted matches. If exceeded, a compact native match index is returned
+            so the search can be refined. -1 (default) means no limit. Set to 1 if you search for a single symbol.
+        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema.
+        :return: native symbol structures matching the name.
         """
         # Note: file system sync not required; the symbol finder opens all relevant source files explicitly in the case of changes
 
@@ -196,14 +168,15 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead):
         )
         n_matches = len(symbols)
 
-        def create_short_result_relative_path_to_name_paths() -> str:
-            relative_path_to_name_paths: defaultdict[str, list[str]] = defaultdict(list)
-            for s in symbols:
-                relative_path_to_name_paths[s.location.relative_path or "unknown"].append(s.get_name_path())
-            return f"Shortened result:\n{self._to_json(relative_path_to_name_paths)}"
-
         if 0 < max_matches < n_matches:
-            return f"Matched {n_matches}>{max_matches=} symbols.\n" + create_short_result_relative_path_to_name_paths()
+            relative_path_to_name_paths: defaultdict[str, list[str]] = defaultdict(list)
+            for symbol in symbols:
+                relative_path_to_name_paths[symbol.location.relative_path or "unknown"].append(symbol.get_name_path())
+            return {
+                "matched": n_matches,
+                "max_matches": max_matches,
+                "symbols": dict(relative_path_to_name_paths),
+            }
 
         symbol_dicts = [
             s.to_dict(
@@ -228,14 +201,7 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead):
                     # If we ever upgrade to 3.15, we can remove the type: ignore[typeddict-unknown-key]
                     s_dict["info"] = symbol_info
 
-        grouped_symbol_dicts = self.symbol_dict_grouper.group(symbol_dicts)
-        result = self._to_json(grouped_symbol_dicts)
-        return self._limit_length(
-            result,
-            max_answer_chars,
-            shortened_result_factories=[create_short_result_relative_path_to_name_paths],
-            prefer_structured_preview=include_body,
-        )
+        return self.symbol_dict_grouper.group(symbol_dicts)
 
     @classmethod
     def get_param_aliases(cls) -> dict[str, str]:
@@ -258,7 +224,7 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
         exclude_kinds: list[int] = [],  # noqa: B006
         context_lines: int = 0,
         max_answer_chars: int = -1,
-    ) -> str:
+    ) -> dict[str, Any] | list[Any]:
         """
         Finds references to the symbol at the given `name_path`. The result contains metadata about the referencing symbols
         and the referenced source line, with optional surrounding context.
@@ -269,8 +235,8 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
         :param exclude_kinds: optional list of LSP symbol kinds (integers) to exclude.
         :param context_lines: surrounding source lines to include on each side of the reference, from 0 through 5.
             The default of 0 returns only the referenced line.
-        :param max_answer_chars: max result length; -1 for default
-        :return: a list of JSON objects with the symbols referencing the requested symbol
+        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema.
+        :return: native symbol structures containing references to the requested symbol.
         """
         if not 0 <= context_lines <= 5:
             raise UserFacingError("context_lines must be between 0 and 5.")
@@ -299,49 +265,18 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
         for ref in references_in_symbols:
             ref_dict_orig = ref.symbol.to_dict(kind=True, relative_path=True, depth=0, body=include_body, body_location=True)
             ref_dict = dict(ref_dict_orig)
-            if not include_body:
-                ref_relative_path = ref.symbol.location.relative_path
-                assert ref_relative_path is not None, f"Referencing symbol {ref.symbol.name} has no relative path, this is likely a bug."
-                content_around_ref = self.project.retrieve_content_around_line(
-                    relative_file_path=ref_relative_path,
-                    line=ref.line,
-                    context_lines_before=context_lines,
-                    context_lines_after=context_lines,
-                )
-                ref_dict["content_around_reference"] = content_around_ref.to_display_string()
+            ref_relative_path = ref.symbol.location.relative_path
+            assert ref_relative_path is not None, f"Referencing symbol {ref.symbol.name} has no relative path, this is likely a bug."
+            content_around_ref = self.project.retrieve_content_around_line(
+                relative_file_path=ref_relative_path,
+                line=ref.line,
+                context_lines_before=context_lines,
+                context_lines_after=context_lines,
+            )
+            ref_dict["content_around_reference"] = content_around_ref.to_display_string()
             reference_dicts.append(ref_dict)
 
-        # capture lightweight reference data before grouping
-        ref_summaries = []
-        for ref, d in zip(references_in_symbols, reference_dicts, strict=True):
-            ref_summaries.append(
-                {
-                    "name_path": d.get("name_path"),
-                    "kind": d.get("kind"),
-                    "relative_path": d.get("relative_path"),
-                    "reference_line": ref.line,
-                }
-            )
-
-        result = self.symbol_dict_grouper.group(reference_dicts)
-
-        # shortened result closures, from least to most aggressive shortening
-        def make_refs_without_context() -> str:
-            """References with name_path and reference line, without surrounding code lines"""
-            grouped = self.symbol_dict_grouper.group(copy.deepcopy(ref_summaries))
-            return f"References without surrounding lines:\n{self._to_json(grouped)}"
-
-        def make_per_file_counts() -> str:
-            counts = Counter(str(r["relative_path"]) for r in ref_summaries)
-            return f"Reference counts per file:\n{self._to_json(counts)}"
-
-        def make_summary() -> str:
-            return f"Found {len(ref_summaries)} references."
-
-        shortened_results = [make_refs_without_context, make_per_file_counts, make_summary]
-
-        result_json = self._to_json(result)
-        return self._limit_length(result_json, max_answer_chars, shortened_result_factories=shortened_results)
+        return self.symbol_dict_grouper.group(reference_dicts)
 
 
 class FindImplementationsTool(Tool, ToolMarkerSymbolicRead):
@@ -358,7 +293,7 @@ class FindImplementationsTool(Tool, ToolMarkerSymbolicRead):
         include_kinds: list[int] = [],  # noqa: B006
         exclude_kinds: list[int] = [],  # noqa: B006
         max_answer_chars: int = -1,
-    ) -> str:
+    ) -> list[dict[str, Any]]:
         """
         Finds implementations of the symbol at the given `name_path`.
 
@@ -369,8 +304,8 @@ class FindImplementationsTool(Tool, ToolMarkerSymbolicRead):
             about the implementing symbols.
         :param include_kinds: (optional) limits results to the given LSP symbol kinds (integers)
         :param exclude_kinds: (optional) list of LSP symbol kinds (integers) to exclude.
-        :param max_answer_chars: max result length; -1 for default
-        :return: a list of JSON objects with the symbols implementing the requested symbol
+        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema.
+        :return: native symbol structures implementing the requested symbol.
         """
         if not name_path:
             raise UserFacingError("name_path must not be empty.")
@@ -403,8 +338,7 @@ class FindImplementationsTool(Tool, ToolMarkerSymbolicRead):
                     s_dict["info"] = symbol_info
                     s_dict.pop("name", None)  # name is included in the info
 
-        result = self._to_json(symbol_dicts)
-        return self._limit_length(result, max_answer_chars)
+        return symbol_dicts
 
 
 class FindDeclarationTool(Tool, ToolMarkerSymbolicRead):
@@ -420,7 +354,7 @@ class FindDeclarationTool(Tool, ToolMarkerSymbolicRead):
         include_body: bool = False,
         include_info: bool = False,
         max_answer_chars: int = -1,
-    ) -> str:
+    ) -> dict[str, Any]:
         r"""
         Finds the declaration of a symbol.
 
@@ -433,7 +367,8 @@ class FindDeclarationTool(Tool, ToolMarkerSymbolicRead):
         :param containing_symbol_name_path: optional name path of a containing symbol whose body shall be searched instead of the full file.
         :param include_body: whether to include the symbol's body in the result. Default False.
         :param include_info: whether to include additional info (hover-like). Default False.
-        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget.
+        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema.
+        :return: the native declaration structure.
         """
         relative_path = self._sanitize_input_param(relative_path)
         self.project.validate_relative_path(relative_path)
@@ -467,14 +402,12 @@ class FindDeclarationTool(Tool, ToolMarkerSymbolicRead):
             raise UserFacingError(f"No symbol declaration found at {relative_path}:{coords.line}:{coords.col}.")
 
         # create output
-        symbol_dict = self._defining_symbol_to_result_dict(
+        return self._defining_symbol_to_result_dict(
             symbol_retriever,
             defining_symbol,
             include_body,
             include_info,
         )
-        result = self._to_json(symbol_dict)
-        return self._limit_length(result, max_answer_chars)
 
     @staticmethod
     def _defining_symbol_to_result_dict(
@@ -506,7 +439,7 @@ class GetDiagnosticsForFileTool(Tool, ToolMarkerSymbolicRead):
         min_severity: int = 4,
         include_range: bool = False,
         max_answer_chars: int = -1,
-    ) -> str:
+    ) -> dict[str, Any]:
         """
         Gets diagnostics for a file. Diagnostics are grouped as `relative_path -> severity -> name_path -> diagnostics_results`.
         If a diagnostic cannot be mapped to a symbol, it is grouped under the special name path `<file>`.
@@ -520,8 +453,8 @@ class GetDiagnosticsForFileTool(Tool, ToolMarkerSymbolicRead):
         :param min_severity: minimum LSP severity to include, where 1=Error, 2=Warning, 3=Information, 4=Hint.
             Diagnostics with lower-or-equal numeric severity are returned.
         :param include_range: whether to include the complete LSP start/end range instead of compact line/column fields.
-        :param max_answer_chars: max result length; -1 for default.
-        :return: grouped diagnostics for the requested file.
+        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema.
+        :return: grouped native diagnostics for the requested file.
         """
         if start_line < 0:
             raise UserFacingError("start_line must be non-negative.")
@@ -566,8 +499,7 @@ class GetDiagnosticsForFileTool(Tool, ToolMarkerSymbolicRead):
                             diagnostic["line"] = start["line"]
                             diagnostic["column"] = start["character"]
 
-        result = self._to_json(result_dict)
-        return self._limit_length(result, max_answer_chars)
+        return result_dict
 
 
 class ReplaceSymbolBodyTool(EditingToolWithDiagnostics):

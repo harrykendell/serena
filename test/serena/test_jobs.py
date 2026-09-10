@@ -393,10 +393,10 @@ def test_job_tools_return_compact_recovery_and_telemetry_payloads(tmp_path: Path
     job_id = started["job_id"]
     assert manager.get_job(job_id).record.session_id == "chat-a"
     backend.output[job_id].append("hello")
-    status = json.loads(status_tool.apply(job_id))
+    status = status_tool.apply(job_id)
     backend.output[job_id].append("later")
-    delta = json.loads(status_tool.apply(job_id, cursor=status["next_cursor"]))
-    listed = json.loads(status_tool.apply())
+    delta = status_tool.apply(job_id, cursor=status["next_cursor"])
+    listed = status_tool.apply()
     cancelled = json.loads(cancel_tool.apply(job_id))
 
     assert started == {
@@ -447,7 +447,7 @@ def test_job_status_duration_wait_ignores_new_output_until_deadline(tmp_path: Pa
 
     monkeypatch.setattr("serena.tools.job_tools.time.sleep", fake_sleep)
 
-    status = json.loads(status_tool.apply(record.job_id, cursor="0", wait_for=0.25))
+    status = status_tool.apply(record.job_id, cursor="0", wait_for=0.25)
 
     assert sleep_calls == 2
     assert status["status"] == "running"
@@ -488,7 +488,7 @@ def test_job_status_wait_for_completed_ignores_output_until_terminal(tmp_path: P
 
     monkeypatch.setattr("serena.tools.job_tools.time.sleep", fake_sleep)
 
-    status = json.loads(status_tool.apply(record.job_id, cursor="0", wait_for="completed"))
+    status = status_tool.apply(record.job_id, cursor="0", wait_for="completed")
 
     assert sleep_calls == 2
     assert status["status"] == "completed"

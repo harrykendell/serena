@@ -1,8 +1,6 @@
 """Behaviour tests for incremental shell command output."""
 
-import json
 import os
-import re
 import shlex
 import sys
 import time
@@ -13,8 +11,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from serena.execution import bind_execution_id, reset_execution_id
-from serena.tool_output import ToolOutputStore
 from serena.tools.cmd_tools import ExecuteShellCommandTool
 from serena.util.shell import execute_shell_command
 
@@ -85,51 +81,24 @@ def test_execute_shell_command_uses_user_shell_environment(monkeypatch, tmp_path
 
 
 def test_shell_tool_returns_compact_decision_relevant_payload(tmp_path) -> None:
-    store = ToolOutputStore()
     agent = MagicMock()
     agent.get_active_project_or_raise.return_value = SimpleNamespace(project_root=str(tmp_path))
-    agent.serena_config.default_max_tool_answer_tokens = 1_000
     agent.serena_config.tool_timeout = 30
-    agent.open_tool_output.side_effect = store.open
-    agent.tool_is_active.return_value = True
     tool = ExecuteShellCommandTool(agent)
 
-    try:
-        response = json.loads(tool.apply("printf out; printf err >&2; exit 7", capture_stderr=True))
-        assert response == {"return_code": 7, "stdout": "out", "stderr": "err"}
-    finally:
-        store.close()
+    response = tool.apply("printf out; printf err >&2; exit 7", capture_stderr=True)
+
+    assert response == {"return_code": 7, "stdout": "out", "stderr": "err"}
 
 
-def test_shell_tool_oversize_response_reuses_live_transcript_id(tmp_path) -> None:
-    store = ToolOutputStore()
+def test_shell_tool_returns_complete_output_independent_of_legacy_budget(tmp_path) -> None:
     agent = MagicMock()
     agent.get_active_project_or_raise.return_value = SimpleNamespace(project_root=str(tmp_path))
-    agent.serena_config.default_max_tool_answer_tokens = 100
     agent.serena_config.tool_timeout = 30
-    agent.open_tool_output.side_effect = store.open
-    agent.render_tool_output_tail.side_effect = store.render_tail
-    agent.tool_is_active.return_value = True
     tool = ExecuteShellCommandTool(agent)
     program = 'print("x" * 1200, flush=True)'
     command = f"{shlex.quote(sys.executable)} -u -c {shlex.quote(program)}"
-    execution_id = "shell-execution"
 
-    try:
-        execution_token = bind_execution_id(execution_id)
-        try:
-            response = tool.apply(command, max_answer_chars=400)
-        finally:
-            reset_execution_id(execution_token)
-        match = re.search(r"output_id=([0-9a-f]{32})", response)
-        assert match is not None
-        output_id = match.group(1)
-        descriptor = store.describe_execution(execution_id)
-        page = store.read(output_id, 0, 2_000)
+    response = tool.apply(command, max_answer_chars=10)
 
-        assert descriptor is not None
-        assert descriptor.output_id == output_id
-        assert page.content == "x" * 1200 + "\n"
-        assert "return_code=0" in response
-    finally:
-        store.close()
+    assert response == {"return_code": 0, "stdout": "x" * 1200 + "\n"}

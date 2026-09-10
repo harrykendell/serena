@@ -5,7 +5,6 @@ Tools supporting the execution of (external) commands
 import os.path
 
 from serena.errors import UserFacingError
-from serena.execution import get_current_execution_id
 from serena.tools import Tool, ToolMarkerCanEdit
 from serena.util.shell import execute_shell_command
 
@@ -21,7 +20,7 @@ class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit):
         cwd: str | None = None,
         capture_stderr: bool = True,
         max_answer_chars: int = -1,
-    ) -> str:
+    ) -> dict[str, object]:
         """
         Execute a short, non-interactive shell command and return its output.
         This tool is intended for commands that terminate promptly. Long-running commands are supported by
@@ -30,9 +29,8 @@ class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit):
         :param command: the shell command to execute
         :param cwd: the working directory to execute the command in. If None, the project root will be used.
         :param capture_stderr: whether to capture and return stderr output
-        :param max_answer_chars: if the output is longer than this number of characters,
-            a retained output tail is returned when supported. -1 uses the configured default.
-        :return: compact JSON containing the return code plus non-empty stdout/stderr output
+        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema.
+        :return: native result containing the return code plus complete non-empty stdout/stderr output
         """
         if cwd is None:
             _cwd = self.get_project_root()
@@ -43,18 +41,14 @@ class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit):
         if not os.path.isdir(_cwd):
             raise UserFacingError(f"Working directory is not a directory: {cwd or _cwd}")
 
-        effective_max_answer_chars = self._effective_max_answer_chars(max_answer_chars)
-
-        # stream a live transcript keyed to this exact model-visible execution
+        # stream internally to avoid pipe deadlock while still returning the complete logical result
         try:
-            with self.agent.open_tool_output(self.get_name(), execution_id=get_current_execution_id()) as output_writer:
-                result = execute_shell_command(
-                    command,
-                    cwd=_cwd,
-                    capture_stderr=capture_stderr,
-                    output_sink=output_writer,
-                    timeout=self.agent.serena_config.tool_timeout,
-                )
+            result = execute_shell_command(
+                command,
+                cwd=_cwd,
+                capture_stderr=capture_stderr,
+                timeout=self.agent.serena_config.tool_timeout,
+            )
         except TimeoutError as error:
             raise UserFacingError(str(error)) from None
         except OSError as error:
@@ -64,15 +58,4 @@ class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit):
             payload["stdout"] = result.stdout
         if result.stderr:
             payload["stderr"] = result.stderr
-        result_json = self._to_json(payload)
-        if len(result_json) <= effective_max_answer_chars:
-            return result_json
-
-        if self.agent.tool_is_active("read_tool_output"):
-            details = f"return_code={result.return_code}"
-            return self.agent.render_tool_output_tail(
-                output_writer.output_id,
-                effective_max_answer_chars,
-                details=details,
-            )
-        return self._limit_length(result_json, max_answer_chars)
+        return payload

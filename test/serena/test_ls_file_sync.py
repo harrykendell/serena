@@ -5,7 +5,6 @@ Exercises all three ``FileChangeType`` branches against a real pyright backend:
 Created (new caller file), Changed (append a second caller), Deleted (remove the caller file).
 """
 
-import json
 import os
 import shutil
 
@@ -58,7 +57,7 @@ class FileSystemSyncTestCase:
             with tool.symbol_dict_grouper.disabled_context():
                 relative_path = self._TARGET_FILE if self._tool_use_relative_path else ""
                 response = tool.apply(name_path=self._TARGET_SYMBOL, relative_path=relative_path)
-                ref_symbols = json.loads(response)
+                ref_symbols = response
                 symbol_names = [ref["name_path"].split("/")[-1] for ref in ref_symbols]
                 return symbol_names
         else:
@@ -151,7 +150,7 @@ class SymbolPositionStaleAfterExternalEditTestCase:
     def _find(self, tool: FindSymbolTool) -> dict:
         with tool.symbol_dict_grouper.disabled_context():
             response = tool.apply(name_path_pattern=self._TARGET_SYMBOL, relative_path=self._TARGET_FILE)
-        symbols = json.loads(response)
+        symbols = response
         assert len(symbols) == 1, f"expected exactly one match for {self._TARGET_SYMBOL}, got {symbols}"
         return symbols[0]
 

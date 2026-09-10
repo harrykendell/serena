@@ -497,8 +497,7 @@ class EditingToolWithDiagnostics(Tool, ToolMarkerCanEdit):
                     "result": base_result,
                     EditingToolWithDiagnostics.DIAGNOSTICS_KEY: grouped_diagnostics,
                 }
-                result = self._tool._to_json(result_dict)
-                return self._tool._limit_length(result, -1)
+                return self._tool._to_json(result_dict)
 
 
 class EditedFileContext:

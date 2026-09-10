@@ -1,103 +1,64 @@
-"""Tests for the ``SearchForPatternTool`` overflow shortening chain.
+"""Behavioural tests for complete pattern-search results."""
 
-The snippet stage and, in particular, its position in the shortening chain were
-previously untested. Test contributed by @AmirF194 in review of PR #1667.
-"""
-
-import json
-import re
 from unittest.mock import MagicMock
 
 from serena.config.serena_config import SerenaConfig
 from serena.project import Project
-from serena.tool_output import ToolOutputStore
 from serena.tools.file_tools import SearchForPatternTool
 
 
-def test_search_for_pattern_snippet_stage(tmp_path):
-    lines: list[str] = []
-    for i in range(60):
-        lines += [
-            "filler above",
-            "filler above",
-            f"MATCHME item number {i:04d} " + "payload " * 6,
-            "filler below",
-            "filler below",
-        ]
-    (tmp_path / "data.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
-
+def _tool(tmp_path) -> SearchForPatternTool:
     project = Project.load(str(tmp_path), serena_config=SerenaConfig(web_dashboard=False))
     agent = MagicMock()
     agent.get_active_project_or_raise.return_value = project
-    tool = SearchForPatternTool(agent)
+    return SearchForPatternTool(agent)
 
-    def run(cap: int) -> str:
-        return tool.apply(
-            substring_pattern="MATCHME",
-            context_lines_before=2,
-            context_lines_after=2,
-            restrict_search_to_code_files=False,
-            max_answer_chars=cap,
-        )
 
-    # wide but overflowing cap: the snippet stage (line + matched text) is returned
-    snippet = run(7000)
-    assert snippet.startswith("truncated=true; total_chars=")
-    assert '"text":' in snippet and "MATCHME item number 0000" in snippet
-    assert "continue with semantic retrieval" in snippet
-    assert "use read_file only when exact raw line context is needed" in snippet
-    assert "Match lines per file" not in snippet  # not the bare-line-numbers stage
+def test_search_for_pattern_returns_complete_matches_independent_of_legacy_budget(tmp_path) -> None:
+    lines = [f"MATCHME item number {i:04d} " + "payload " * 12 for i in range(60)]
+    (tmp_path / "data.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tool = _tool(tmp_path)
 
-    # tighter cap: the chain degrades past the snippet stage to bare line numbers
-    bare = run(1000)
-    assert "Match lines per file" in bare and '"text":' not in bare
+    small_budget = tool.apply(
+        substring_pattern="MATCHME",
+        restrict_search_to_code_files=False,
+        max_answer_chars=100,
+    )
+    large_budget = tool.apply(
+        substring_pattern="MATCHME",
+        restrict_search_to_code_files=False,
+        max_answer_chars=100_000,
+    )
+
+    assert small_budget == large_budget
+    assert len(small_budget["data.txt"]) == 60
+    assert "MATCHME item number 0000" in small_budget["data.txt"][0]
+    assert "MATCHME item number 0059" in small_budget["data.txt"][-1]
+
+
+def test_search_for_pattern_preserves_complete_requested_context(tmp_path) -> None:
+    (tmp_path / "data.txt").write_text("above\nMATCHME target\nbelow\n", encoding="utf-8")
+    tool = _tool(tmp_path)
+
+    result = tool.apply(
+        substring_pattern="MATCHME",
+        context_lines_before=1,
+        context_lines_after=1,
+        restrict_search_to_code_files=False,
+        max_answer_chars=1,
+    )
+
+    assert result == {"data.txt": ["...   0:above\n  >   1:MATCHME target\n...   2:below"]}
 
 
 def test_search_deduplicates_multiple_matches_on_one_source_line(tmp_path) -> None:
     (tmp_path / "data.txt").write_text("MATCHME and MATCHME on one line\n", encoding="utf-8")
+    tool = _tool(tmp_path)
 
-    project = Project.load(str(tmp_path), serena_config=SerenaConfig(web_dashboard=False))
-    agent = MagicMock()
-    agent.get_active_project_or_raise.return_value = project
-    tool = SearchForPatternTool(agent)
-
-    result = json.loads(
-        tool.apply(
-            substring_pattern="MATCHME",
-            restrict_search_to_code_files=False,
-            max_answer_chars=10_000,
-        )
+    result = tool.apply(
+        substring_pattern="MATCHME",
+        restrict_search_to_code_files=False,
+        max_answer_chars=10_000,
     )
 
     assert len(result["data.txt"]) == 1
-
-
-def test_search_overflow_keeps_exact_result_recoverable(tmp_path) -> None:
-    lines = [f"MATCHME item number {i:04d} " + "payload " * 12 for i in range(60)]
-    (tmp_path / "data.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    project = Project.load(str(tmp_path), serena_config=SerenaConfig(web_dashboard=False))
-    store = ToolOutputStore()
-    agent = MagicMock()
-    agent.get_active_project_or_raise.return_value = project
-    agent.tool_is_active.return_value = True
-    agent.retain_tool_output.side_effect = store.retain
-    agent.render_tool_output_tail.side_effect = store.render_tail
-    tool = SearchForPatternTool(agent)
-
-    try:
-        response = tool.apply(
-            substring_pattern="MATCHME",
-            restrict_search_to_code_files=False,
-            max_answer_chars=1_200,
-        )
-        match = re.search(r"output_id=([0-9a-f]{32})", response)
-        assert match is not None
-        assert len(response) <= 1_200
-        assert response.startswith("truncated=true; total_chars=")
-
-        retained = store.read(match.group(1), offset=0, max_chars=100_000)
-        assert retained.complete is True
-        assert "MATCHME item number 0059" in retained.content
-    finally:
-        store.close()

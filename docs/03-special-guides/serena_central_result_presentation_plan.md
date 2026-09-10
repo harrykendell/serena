@@ -1,6 +1,6 @@
 # Serena Central Result Presentation Plan
 
-Status: C00-C04 COMPLETE (2026-09-10); C05 NEXT
+Status: C00-C05 COMPLETE (2026-09-10); C06 NEXT
 
 Scope: successful Serena tool results, retained-output paging, MCP transport, `ExecutionStore`, activity/dashboard inspection, and the removal of tool-local presentation truncation.
 
@@ -365,6 +365,16 @@ Remove generic presentation `max_answer_chars` controls from job tool schemas. K
 Most are already naturally small. Return their complete concise success structures/strings without calling `_limit_length()` as defensive boilerplate.
 
 Completion condition: no ordinary Serena tool performs response-size truncation or creates retained output merely because its result is large.
+
+#### C05 completion captured 2026-09-10
+
+- Migrated symbolic/semantic queries to complete native dict/list results, retaining only semantic `max_matches`; requested bodies, info, references, implementations, declarations, and diagnostics now reach the central presenter without tool-local shortening.
+- Migrated file/search queries so `read_file` returns the complete requested text and `list_dir`, `find_file`, and `search_for_pattern` return complete native structures; removed search/listing degradation factories and edit-listing truncation.
+- Migrated memories and current configuration to complete logical results, Git to complete successful command output, and foreground shell execution to a complete native `return_code`/`stdout`/`stderr` result without tool-local retained-output creation.
+- Migrated `job_status` to return the complete native snapshot/delta selected by its journal/cursor semantics; cursor/output selection remains semantic rather than presentational.
+- Removed defensive `_limit_length()` use from edit diagnostics. No ordinary tool now calls `_limit_length()`, `retain_tool_output()`, `open_tool_output()`, or `render_tool_output_tail()`; the legacy helper/schema parameters remain only for C06 removal.
+- Updated behavioural tests to assert complete tool-level results and central MCP-boundary retention/paging rather than tool-local truncation.
+- Validation completed with `uv run poe format`, `uv run poe type-check`, and `uv run poe test` (`798 passed, 265 deselected`).
 
 ### C06 — Remove presentation controls from ordinary tool schemas
 

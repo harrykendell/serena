@@ -127,23 +127,20 @@ def test_implicit_budget_uses_approximate_tokens_with_canonical_retained_paging(
         store.close()
 
 
-def test_read_memory_uses_retained_output_when_content_exceeds_budget() -> None:
+def test_read_memory_returns_complete_content_without_tool_local_retention() -> None:
     store = ToolOutputStore()
     agent = _agent_with_store(store)
     project = MagicMock()
-    project.memory_manager.load_memory.return_value = "memory-start-" + "x" * 1_000 + "-memory-end"
+    content = "memory-start-" + "x" * 1_000 + "-memory-end"
+    project.memory_manager.load_memory.return_value = content
     agent.get_active_project_or_raise.return_value = project
     tool = ReadMemoryTool(agent)
 
     try:
         response = tool.apply("large-memory")
-        output_id = _output_id(response)
-        retained = store.read(output_id, offset=0, max_chars=2_000)
 
-        assert "truncated=true; total_chars=" in response
-        assert retained.complete is True
-        assert retained.content.startswith("memory-start-")
-        assert retained.content.endswith("-memory-end")
+        assert response == content
+        agent.retain_tool_output.assert_not_called()
     finally:
         store.close()
 

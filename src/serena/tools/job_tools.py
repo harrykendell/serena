@@ -124,8 +124,8 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
         output: Literal["latest", "start"] = "latest",
         wait_for: float | Literal["completed"] | None = None,
         max_answer_chars: int = -1,
-    ) -> str:
-        """Return job state, telemetry, and bounded output.
+    ) -> dict[str, object]:
+        """Return job state, telemetry, and the complete journal snapshot or delta selected by this operation.
 
         With a ``job_id``, the first call defaults to the latest bounded output tail. Set ``output="start"`` to read from the
         beginning instead. Pass ``next_cursor`` back on later calls to receive only new output; those cursor-based calls return a
@@ -141,8 +141,8 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
         :param cursor: opaque cursor returned by the preceding status call for this job
         :param output: initial output position when no cursor is supplied: ``latest`` (default) or ``start``
         :param wait_for: optional wait duration in seconds, or ``"completed"`` to wait until the job finishes
-        :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget
-        :return: compact JSON describing current state, telemetry, and bounded output
+        :param max_answer_chars: legacy presentation parameter; ignored until removed from the public schema
+        :return: native current state, telemetry, and selected journal output
         """
         deadline: float | None = None
         if wait_for is not None and wait_for != "completed":
@@ -164,14 +164,11 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
                 if not record.status.is_terminal:
                     item["runtime"] = self._runtime_payload(snapshot.runtime)
                 jobs.append(item)
-            result = self._json(
-                {
-                    "jobs": jobs,
-                    "running_jobs": running_jobs,
-                    "max_concurrent_jobs": self._job_manager.max_concurrent_jobs,
-                }
-            )
-            return self._limit_length(result, max_answer_chars)
+            return {
+                "jobs": jobs,
+                "running_jobs": running_jobs,
+                "max_concurrent_jobs": self._job_manager.max_concurrent_jobs,
+            }
 
         snapshot = self._job_manager.get_job(job_id, cursor, output_mode=output)
         if wait_for is not None and snapshot.record.status is JobStatus.RUNNING:
@@ -187,8 +184,7 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
                 time.sleep(sleep_seconds)
                 snapshot = self._job_manager.get_job(job_id, cursor, output_mode=output)
 
-        result = self._json(self._snapshot_payload(snapshot, delta=cursor is not None))
-        return self._limit_length(result, max_answer_chars)
+        return self._snapshot_payload(snapshot, delta=cursor is not None)
 
     def _snapshot_payload(self, snapshot: JobSnapshot, *, delta: bool) -> dict[str, object]:
         record = snapshot.record
