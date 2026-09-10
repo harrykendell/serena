@@ -10,7 +10,7 @@ from typing import Any, cast
 
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import RequestParams
+from mcp.types import CallToolResult, RequestParams
 
 from serena.activity import ActivityTracker
 from serena.agent import SerenaAgent
@@ -23,12 +23,14 @@ from serena.tools import (
     ActivateProjectTool,
     CreateTextFileTool,
     ExecuteShellCommandTool,
+    FetchMediaFileTool,
     FindSymbolTool,
     GitStatusTool,
     JobStatusTool,
     ReadFileTool,
     ReadMemoryTool,
     ReadToolOutputTool,
+    RenameMemoryTool,
     RenameSymbolTool,
     RenderPdfPageTool,
     ReplaceContentTool,
@@ -173,13 +175,14 @@ def test_lsp_termination_restarts_and_replays_read_once(
         "get_language_server_manager_or_raise",
         lambda: SimpleNamespace(restart_language_server=restarted_languages.append),
     )
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(tool)
 
-    result = tool.apply_ex(
-        name_path_pattern="Example",
-        mcp_ctx=_mcp_context("session-a"),
-    )
+    async def scenario() -> None:
+        result = await mcp_tool.run({"name_path_pattern": "Example"}, context=_mcp_context("session-a"))
+        assert result == "recovered"
 
-    assert result == "recovered"
+    asyncio.run(scenario())
+
     assert apply_calls == 2
     assert restarted_languages == [LanguageServerId.PYTHON]
 
@@ -208,14 +211,17 @@ def test_lsp_termination_restarts_but_does_not_replay_write(
         "get_language_server_manager_or_raise",
         lambda: SimpleNamespace(restart_language_server=restarted_languages.append),
     )
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(tool)
 
-    with pytest.raises(UserFacingError, match="Re-inspect the affected state"):
-        tool.apply_ex(
-            name_path="Example",
-            relative_path="example.py",
-            new_name="Renamed",
-            mcp_ctx=_mcp_context("session-a"),
-        )
+    async def scenario() -> None:
+        with pytest.raises(ToolError) as exc_info:
+            await mcp_tool.run(
+                {"name_path": "Example", "relative_path": "example.py", "new_name": "Renamed"},
+                context=_mcp_context("session-a"),
+            )
+        assert "Re-inspect the affected state" in str(exc_info.value)
+
+    asyncio.run(scenario())
 
     assert apply_calls == 1
     assert restarted_languages == [LanguageServerId.PYTHON]
@@ -287,7 +293,7 @@ def test_lsp_operation_failure_is_concise_user_facing_mcp_error(
 
 
 def test_unclassified_lsp_failure_remains_internal_at_mcp_boundary(
-    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     agent, _ = multi_project_agent
     _activate(agent, "session-a", "project_a")
@@ -310,6 +316,14 @@ def test_unclassified_lsp_failure_remains_internal_at_mcp_boundary(
         assert record.error == message
 
     asyncio.run(scenario())
+
+    unexpected_records = [
+        record
+        for record in caplog.records
+        if record.name == "serena.mcp" and record.message.startswith("Unexpected error executing tool find_symbol:")
+    ]
+    assert len(unexpected_records) == 1
+    assert unexpected_records[0].exc_info is not None
 
 
 def test_startup_project_sessions_share_serialization(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -856,6 +870,150 @@ def test_missing_memory_is_concise_mcp_failure(
         assert "FileNotFoundError:" not in message
         assert "Error executing tool" not in message
         assert "Traceback" not in message
+
+    asyncio.run(scenario())
+
+
+def test_memory_existing_and_read_only_failures_are_concise_mcp_errors(tmp_path: Path) -> None:
+    config = SerenaConfig(
+        log_level=logging.ERROR,
+        tool_timeout=30,
+        read_only_memory_patterns=[r"^frozen$"],
+    ).with_headless_mode_overrides()
+    root = tmp_path / "memory_project"
+    root.mkdir()
+    project = Project(
+        project_root=str(root),
+        project_config=ProjectConfig(project_name="memory_project", language_servers=[]),
+        serena_config=config,
+    )
+    config.projects = [RegisteredProject.from_project_instance(project)]
+    agent = SerenaAgent(serena_config=config)
+    try:
+        _activate(agent, "session-memory", "memory_project")
+        project.memory_manager.save_memory("source", "source", is_tool_context=False)
+        project.memory_manager.save_memory("target", "target", is_tool_context=False)
+        project.memory_manager.save_memory("frozen", "locked", is_tool_context=False)
+        rename_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(RenameMemoryTool))
+        write_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(WriteMemoryTool))
+
+        async def scenario() -> None:
+            with pytest.raises(ToolError) as existing_info:
+                await rename_tool.run(
+                    {"old_name": "source", "new_name": "target"},
+                    context=_mcp_context("session-memory"),
+                )
+            with pytest.raises(ToolError) as read_only_info:
+                await write_tool.run(
+                    {"memory_name": "frozen", "content": "changed"},
+                    context=_mcp_context("session-memory"),
+                )
+
+            existing_message = str(existing_info.value)
+            read_only_message = str(read_only_info.value)
+            assert "already exists" in existing_message
+            assert "read-only" in read_only_message
+            for message in (existing_message, read_only_message):
+                assert "Error executing tool" not in message
+                assert "Traceback" not in message
+                assert "FileExistsError:" not in message
+
+        asyncio.run(scenario())
+    finally:
+        agent.on_shutdown(timeout=5)
+
+
+def test_retained_output_round_trip_is_exact_through_mcp(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
+) -> None:
+    agent, roots = multi_project_agent
+    _activate(agent, "session-a", "project_a")
+    content = "start-" + "x" * 2_000 + "-useful-tail"
+    (roots["project_a"] / "large.txt").write_text(content)
+    read_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(ReadFileTool))
+    output_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(ReadToolOutputTool))
+
+    async def scenario() -> None:
+        response = await read_tool.run(
+            {"relative_path": "large.txt", "max_answer_chars": 500},
+            context=_mcp_context("session-a"),
+        )
+        assert isinstance(response, str)
+        assert response.startswith(f"truncated=true; total_chars={len(content)}; output_id=")
+        assert "-useful-tail" in response
+        output_id = response.split("output_id=", 1)[1].splitlines()[0]
+
+        page = await output_tool.run(
+            {"output_id": output_id, "offset": 0, "max_chars": len(content)},
+            context=_mcp_context("session-a"),
+        )
+        payload = json.loads(cast(str, page))
+        assert payload["output_id"] == output_id
+        assert payload["complete"] is True
+        assert payload["content"] == content
+
+    asyncio.run(scenario())
+
+
+def test_native_media_success_and_invalid_type_use_mcp_surface(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
+) -> None:
+    agent, roots = multi_project_agent
+    _activate(agent, "session-a", "project_a")
+    (roots["project_a"] / "pixel.png").write_bytes(b"png-bytes")
+    (roots["project_a"] / "notes.txt").write_text("not media")
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(FetchMediaFileTool))
+
+    async def scenario() -> None:
+        result = await mcp_tool.run(
+            {"relative_path": "pixel.png"},
+            context=_mcp_context("session-a"),
+            convert_result=True,
+        )
+        assert isinstance(result, CallToolResult)
+        assert result.content[0].type == "image"
+        assert result.content[1].type == "resource_link"
+
+        with pytest.raises(ToolError) as exc_info:
+            await mcp_tool.run({"relative_path": "notes.txt"}, context=_mcp_context("session-a"))
+        message = str(exc_info.value)
+        assert message == "fetch_media_file only accepts image or audio files; use download_file for other files"
+        assert "Error executing tool" not in message
+        assert "Traceback" not in message
+
+    asyncio.run(scenario())
+
+
+def test_mcp_preserves_diagnostics_bearing_edit_result(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "session-a", "project_a")
+    tool = agent.get_tool(ReplaceContentTool)
+    diagnostics_result = json.dumps(
+        {
+            "result": "OK",
+            "diagnostics": {
+                "example.py": {
+                    "Error": {
+                        "<file>": [
+                            {"line": 0, "column": 0, "message": "missing_name"},
+                        ]
+                    }
+                }
+            },
+        }
+    )
+    monkeypatch.setattr(tool, "apply", lambda **kwargs: diagnostics_result)
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(tool)
+
+    async def scenario() -> None:
+        result = await mcp_tool.run(
+            {"relative_path": "example.py", "needle": "old", "repl": "new", "mode": "literal"},
+            context=_mcp_context("session-a"),
+        )
+        assert result == diagnostics_result
+        assert json.loads(cast(str, result))["diagnostics"]["example.py"]["Error"]["<file>"][0]["message"] == "missing_name"
 
     asyncio.run(scenario())
 
