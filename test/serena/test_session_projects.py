@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 from mcp.server.fastmcp import FastMCP
@@ -999,6 +1000,159 @@ def test_central_result_presentation_is_used_at_actual_mcp_boundary(
         assert json.loads(execution.result) == structured
 
     asyncio.run(scenario())
+
+
+def test_model_and_dashboard_share_canonical_presentation_for_small_and_large_results(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "global", "project_a")
+    agent.serena_config.default_max_tool_answer_tokens = 1_000
+    tracker = ActivityTracker(_EmptyJobSource(), execution_store=agent.execution_store)
+    run = tracker.start_run("global", "project_a")
+
+    scenarios = [
+        (
+            ExecuteShellCommandTool,
+            {"command": "synthetic-small"},
+            {"return_code": 0, "stdout": "done"},
+            False,
+        ),
+        (
+            ExecuteShellCommandTool,
+            {"command": "synthetic-large"},
+            {
+                "return_code": 0,
+                "stdout": "stdout-head\n" + ("stdout-middle\n" * 600) + "stdout-tail\n",
+                "stderr": "stderr-head\n" + ("stderr-middle\n" * 400) + "stderr-tail\n",
+            },
+            True,
+        ),
+        (
+            ReadFileTool,
+            {"relative_path": "synthetic.txt"},
+            "text-head\n" + ("text-middle\n" * 1_000) + "text-tail\n",
+            True,
+        ),
+    ]
+
+    async def scenario() -> None:
+        retained_results: list[tuple[str, str]] = []
+        for index, (tool_cls, arguments, logical_result, expect_truncated) in enumerate(scenarios):
+            tool = agent.get_tool(tool_cls)
+            monkeypatch.setattr(tool, "apply", lambda logical_result=logical_result, **kwargs: logical_result)
+            mcp_tool = SerenaMCPFactory.make_mcp_tool(tool, activity_tracker=tracker)
+            mcp = FastMCP(f"presentation-equivalence-{index}")
+            mcp._tool_manager._tools[mcp_tool.name] = mcp_tool
+            handler = mcp._mcp_server.request_handlers[CallToolRequest]
+
+            server_result = await handler(
+                CallToolRequest(
+                    params=CallToolRequestParams(
+                        name=mcp_tool.name,
+                        arguments=arguments,
+                    )
+                )
+            )
+            result = server_result.root
+
+            assert isinstance(result, CallToolResult)
+            assert result.isError is False
+            model_value = result.structuredContent
+            assert isinstance(model_value, dict)
+            assert json.loads(result.content[0].text) == model_value
+
+            execution = agent.execution_store.list_executions(newest_first=True)[0]
+            assert execution.result is not None
+            assert json.loads(execution.result) == model_value
+
+            detail = tracker.get_call_detail("global", run["run_id"], execution.execution_id)
+            assert detail["result"] == execution.result
+            assert detail["structured_result"] == model_value
+
+            if not expect_truncated:
+                assert model_value == logical_result
+                assert execution.retained_output_id is None
+                assert execution.retained_output_chars is None
+                continue
+
+            assert model_value["truncated"] is True
+            output_id = cast(str, model_value["output_id"])
+            assert execution.retained_output_id == output_id
+            exact_serialization = (
+                logical_result if isinstance(logical_result, str) else json.dumps(logical_result, ensure_ascii=False, separators=(",", ":"))
+            )
+            assert execution.retained_output_chars == len(exact_serialization)
+            retained = agent.read_tool_output(output_id, 0, len(exact_serialization))
+            assert retained.content == exact_serialization
+            assert retained.complete
+            retained_results.append((output_id, exact_serialization))
+
+            preview = model_value["result"]
+            if isinstance(logical_result, str):
+                assert isinstance(preview, str)
+                assert "text-head" in preview
+                assert "text-tail" in preview
+            else:
+                assert isinstance(preview, dict)
+                assert preview["return_code"] == 0
+                assert "stdout-head" in preview["stdout"]
+                assert "stderr-tail" in preview["stderr"]
+
+        assert len(retained_results) == 2
+        for output_id, exact_serialization in retained_results:
+            retained = agent.read_tool_output(output_id, 0, len(exact_serialization))
+            assert retained.content == exact_serialization
+            assert retained.complete
+
+    asyncio.run(scenario())
+
+
+def test_find_symbol_returns_complete_requested_bodies_and_info_before_presentation(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "session-a", "project_a")
+    tool = agent.get_tool(FindSymbolTool)
+    bodies = [f"def run_{index}():\n" + (f"    value_{index} += 1\n" * 250) for index in range(12)]
+    infos = [f"run_{index}() -> int\n" + (f"detail-{index}\n" * 120) for index in range(12)]
+    symbols = []
+
+    for index, (body, info) in enumerate(zip(bodies, infos, strict=True)):
+        symbol = MagicMock()
+        symbol.location = SimpleNamespace(relative_path=f"src/example_{index}.py")
+        symbol.get_name_path.return_value = f"Thing{index}/run"
+
+        def to_dict(*, body: bool, index: int = index, **kwargs: Any) -> dict[str, Any]:
+            result: dict[str, Any] = {
+                "name_path": f"Thing{index}/run",
+                "relative_path": f"src/example_{index}.py",
+                "kind": "Method",
+                "body_location": {"start_line": index * 10, "end_line": index * 10 + 8},
+            }
+            if body:
+                result["body"] = bodies[index]
+            return result
+
+        symbol.to_dict.side_effect = to_dict
+        symbol._expected_info = info
+        symbols.append(symbol)
+
+    retriever = MagicMock()
+    retriever.find.return_value = symbols
+    retriever.request_info_for_symbol_batch.return_value = {symbol: symbol._expected_info for symbol in symbols}
+    monkeypatch.setattr(tool, "create_language_server_symbol_retriever", lambda: retriever)
+
+    body_result = tool.apply(name_path_pattern="run", include_body=True)
+    assert isinstance(body_result, list)
+    assert [record["name_path"] for record in body_result] == [f"Thing{index}/run" for index in range(12)]
+    assert [record["body"] for record in body_result] == bodies
+
+    info_result = tool.apply(name_path_pattern="run", include_info=True)
+    assert isinstance(info_result, list)
+    assert [record["name_path"] for record in info_result] == [f"Thing{index}/run" for index in range(12)]
+    assert [record["info"] for record in info_result] == infos
+    assert all("body" not in record for record in info_result)
 
 
 def test_native_media_success_and_invalid_type_use_mcp_surface(

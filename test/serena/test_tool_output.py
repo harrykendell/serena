@@ -169,6 +169,30 @@ def test_paging_uses_stable_output_id_after_later_tool_output() -> None:
         store.close()
 
 
+def test_unicode_paging_uses_character_offsets_and_lengths() -> None:
+    store = ToolOutputStore()
+    agent = _agent_with_store(store)
+    read_tool = ReadToolOutputTool(agent)
+    content = "A🙂漢字éβZ" * 80
+    output_id = store.retain("unicode_probe", content)
+
+    try:
+        first_page = json.loads(read_tool.apply(output_id=output_id, offset=1, max_chars=5))
+        middle_offset = len(content) // 2 - 3
+        middle_page = json.loads(read_tool.apply(output_id=output_id, offset=middle_offset, max_chars=7))
+        final_offset = len(content) - 4
+        final_page = json.loads(read_tool.apply(output_id=output_id, offset=final_offset, max_chars=10))
+
+        assert first_page["total_chars"] == len(content)
+        assert first_page["content"] == content[1:6]
+        assert middle_page["content"] == content[middle_offset : middle_offset + 7]
+        assert final_page["content"] == content[final_offset:]
+        assert final_page["end_offset"] == len(content)
+        assert final_page["next_offset"] is None
+    finally:
+        store.close()
+
+
 def test_retained_output_survives_store_restart(tmp_path: Path) -> None:
     execution_store = ExecutionStore(tmp_path / "execution-store")
     execution_store.start_execution(
@@ -184,8 +208,14 @@ def test_retained_output_survives_store_restart(tmp_path: Path) -> None:
     execution_store.set_retained_output("execution-a", output_id, len("persistent-output"))
     store.close()
 
-    restored = ToolOutputStore(tmp_path / "tool-outputs", execution_store=execution_store)
+    restored_execution_store = ExecutionStore(tmp_path / "execution-store")
+    restored = ToolOutputStore(tmp_path / "tool-outputs", execution_store=restored_execution_store)
     try:
+        execution = restored_execution_store.get_execution("execution-a")
+        assert execution is not None
+        assert execution.retained_output_id == output_id
+        assert execution.retained_output_chars == len("persistent-output")
+
         page = restored.read(output_id, 0, 100)
         assert page.content == "persistent-output"
         assert page.complete

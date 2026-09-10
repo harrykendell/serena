@@ -1,6 +1,6 @@
 # Serena Central Result Presentation Plan
 
-Status: C00-C07 COMPLETE (2026-09-10); C08 NEXT
+Status: C00-C08 COMPLETE (2026-09-10); C09 NEXT
 
 Scope: successful Serena tool results, retained-output paging, MCP transport, `ExecutionStore`, activity/dashboard inspection, and the removal of tool-local presentation truncation.
 
@@ -445,6 +445,15 @@ Minimum cases:
 Where feasible, capture the MCP result and execution/dashboard detail from one actual execution and assert equality directly rather than reconstructing expected values independently.
 
 Completion condition: tests make it impossible to reintroduce separate model and dashboard truncation paths unnoticed.
+
+#### C08 completion captured 2026-09-10
+
+- Added same-execution MCP/activity-detail coverage for small structured, large structured, and large plain-text results. The model-facing structured content, persisted `ExecutionStore.result`, and dashboard `structured_result` are asserted equal directly, with exact retained-output recovery for truncated cases.
+- Strengthened structured fitting coverage with `find_symbol`-shaped multi-record output, asserting that `name_path` and `relative_path` identities survive across the full collection before verbose bodies are compacted.
+- Added direct `FindSymbolTool` behaviour coverage showing that all requested `include_body` and `include_info` content remains complete at the logical-result layer before central presentation.
+- Added Unicode paging coverage using character offsets and lengths, and strengthened restart retention coverage by rehydrating both `ExecutionStore` and `ToolOutputStore` before reading the retained result.
+- Existing behavioural tests continue to cover stable `output_id` values across later calls, structured search results, typed shell `return_code`/`stdout`/`stderr`, native media/resource handling, and adversarial tiny budgets that remain bounded and valid JSON.
+- Validation completed with `uv run poe format`, `uv run poe type-check`, and `uv run poe test` (`803 passed, 265 deselected`).
 
 ### C09 — Cleanup, full audit, and cutover
 

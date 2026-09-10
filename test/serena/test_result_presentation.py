@@ -166,17 +166,17 @@ def test_structured_fitting_uses_available_budget_and_preserves_collection_bread
     logical_result = {
         "records": [
             {
-                "name": f"symbol_{index}",
+                "name_path": f"Thing{index}/run",
                 "relative_path": f"src/example_{index}.py",
-                "status": "ok",
-                "body": "def example():\n" + (f"    return {index}\n" * 120),
+                "kind": "Method",
+                "body": "def run():\n" + (f"    return {index}\n" * 120),
             }
             for index in range(20)
         ],
         "count": 20,
     }
 
-    presentation = presenter.present(logical_result, tool_name="wide_records", execution_id="execution-wide")
+    presentation = presenter.present(logical_result, tool_name="find_symbol", execution_id="execution-wide")
     serialized = json.dumps(presentation.transport_value, ensure_ascii=False, separators=(",", ":"))
     result = presentation.transport_value["result"]
 
@@ -186,7 +186,8 @@ def test_structured_fitting_uses_available_budget_and_preserves_collection_bread
     records = result["records"]
     assert isinstance(records, list)
     assert len(records) == 20
-    assert [record["name"] for record in records] == [f"symbol_{index}" for index in range(20)]
+    assert [record["name_path"] for record in records] == [f"Thing{index}/run" for index in range(20)]
+    assert all(record["relative_path"] == f"src/example_{index}.py" for index, record in enumerate(records))
     assert all("omitted" in record["body"] or "…" in record["body"] for record in records)
 
 
