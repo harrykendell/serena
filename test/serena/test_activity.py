@@ -168,9 +168,15 @@ def test_activity_tracker_rehydrates_historical_turn_after_restart(tmp_path: Pat
         "search_for_pattern",
         {"substring_pattern": "ActivityTracker", "relative_path": "src/serena"},
     )
-    tracker.finish_tool(call_id, succeeded=True, result={"matches": 3})
+    tracker.finish_tool(call_id, succeeded=True, result_serialization='{"matches":3}')
     job_call_id = tracker.start_tool("conversation-a", "start_job", {"label": "retained job"})
-    tracker.finish_tool(job_call_id, succeeded=True, result={"job_id": "job-a", "label": "retained job"})
+    job_result = {"job_id": "job-a", "label": "retained job"}
+    tracker.finish_tool(
+        job_call_id,
+        succeeded=True,
+        result_serialization=json.dumps(job_result, separators=(",", ":")),
+        result_metadata=ActivityTracker.extract_result_metadata(job_result),
+    )
     tracker.get_run("conversation-a", run["run_id"])
     interrupted_id = tracker.start_tool("conversation-a", "execute_shell_command", {"command": "sleep 30"})
 
@@ -248,10 +254,12 @@ def test_job_status_detail_prefers_known_job_label() -> None:
     run = tracker.start_run("conversation-a", "serena")
 
     start_call_id = tracker.start_tool("conversation-a", "start_job", {"label": "Optimise chapter"})
+    result = {"job_id": "job-a", "label": "Optimise chapter"}
     tracker.finish_tool(
         start_call_id,
         succeeded=True,
-        result={"job_id": "job-a", "label": "Optimise chapter"},
+        result_serialization=json.dumps(result, separators=(",", ":")),
+        result_metadata=ActivityTracker.extract_result_metadata(result),
     )
 
     status_call_id = tracker.start_tool(
@@ -270,10 +278,12 @@ def test_job_status_detail_uses_returned_label_when_not_known_at_start() -> None
     run = tracker.start_run("conversation-a", "serena")
 
     status_call_id = tracker.start_tool("conversation-a", "job_status", {"job_id": "job-a"})
+    result = {"job_id": "job-a", "label": "Recovered optimisation"}
     tracker.finish_tool(
         status_call_id,
         succeeded=True,
-        result={"job_id": "job-a", "label": "Recovered optimisation"},
+        result_serialization=json.dumps(result, separators=(",", ":")),
+        result_metadata=ActivityTracker.extract_result_metadata(result),
     )
 
     snapshot = tracker.get_run("conversation-a", run["run_id"])
@@ -311,7 +321,22 @@ def test_activity_tracker_exposes_tool_detail_on_demand() -> None:
         "execute_shell_command",
         {"command": "echo hello", "payload": "x" * 9000},
     )
-    tracker.finish_tool(call_id, succeeded=True, result={"ok": True, "payload": "y" * 9000})
+    canonical_result = json.dumps(
+        {
+            "truncated": True,
+            "total_chars": 9_000,
+            "output_id": "retained-output",
+            "result": {"ok": True, "payload": "bounded preview"},
+        },
+        separators=(",", ":"),
+    )
+    tracker.finish_tool(
+        call_id,
+        succeeded=True,
+        result_serialization=canonical_result,
+        retained_output_id="retained-output",
+        retained_output_chars=9_000,
+    )
 
     assert call_id is not None
     detail = tracker.get_call_detail("conversation-a", run["run_id"], call_id)
@@ -322,8 +347,8 @@ def test_activity_tracker_exposes_tool_detail_on_demand() -> None:
     assert detail["status"] == "completed"
     assert arguments["command"] == "echo hello"
     assert "chars omitted" in arguments["payload"]
-    assert result["ok"] is True
-    assert "chars omitted" in result["payload"]
+    assert detail["result"] == canonical_result
+    assert result["result"] == {"ok": True, "payload": "bounded preview"}
     assert detail["structured_result"] == result
 
 
@@ -331,14 +356,15 @@ def test_activity_tracker_exposes_typed_shell_result_for_rich_rendering() -> Non
     tracker = ActivityTracker(_FakeJobSource())
     run = tracker.start_run("conversation-a", "serena")
     call_id = tracker.start_tool("conversation-a", "execute_shell_command", {"command": "printf hello"})
-    tracker.finish_tool(call_id, succeeded=True, result='{"return_code": 0, "stdout": "hello"}')
+    logical_result = '{"return_code": 0, "stdout": "hello"}'
+    tracker.finish_tool(call_id, succeeded=True, result_serialization=json.dumps(logical_result))
 
     assert call_id is not None
     detail = tracker.get_call_detail("conversation-a", run["run_id"], call_id)
     assert detail["structured_result"] == {"return_code": 0, "stdout": "hello"}
 
 
-def test_activity_tracker_preserves_structure_of_large_json_string_result() -> None:
+def test_activity_tracker_preserves_canonical_result_serialization_byte_for_byte() -> None:
     tracker = ActivityTracker(_FakeJobSource())
     run = tracker.start_run("conversation-a", "serena")
     call_id = tracker.start_tool(
@@ -346,28 +372,27 @@ def test_activity_tracker_preserves_structure_of_large_json_string_result() -> N
         "find_symbol",
         {"name_path_pattern": "Thing/run", "include_body": True},
     )
-    symbol_result = json.dumps(
-        [
-            {
-                "name_path": "Thing/run",
-                "kind": "Method",
-                "relative_path": "src/thing.py",
-                "body_location": {"start_line": 10, "end_line": 900},
-                "body": "def run():\n" + "    value += 1\n" * 800,
-            }
-        ]
+    canonical_result = json.dumps(
+        {
+            "truncated": True,
+            "total_chars": 12_345,
+            "output_id": "canonical-output",
+            "result": {"name_path": "Thing/run", "body": "bounded preview"},
+        },
+        separators=(",", ":"),
     )
-    tracker.finish_tool(call_id, succeeded=True, result=symbol_result)
+    tracker.finish_tool(
+        call_id,
+        succeeded=True,
+        result_serialization=canonical_result,
+        retained_output_id="canonical-output",
+        retained_output_chars=12_345,
+    )
 
     assert call_id is not None
     detail = tracker.get_call_detail("conversation-a", run["run_id"], call_id)
-    stored_result = json.loads(detail["result"])
-
-    assert isinstance(stored_result, list)
-    assert stored_result[0]["name_path"] == "Thing/run"
-    assert stored_result[0]["body_location"] == {"start_line": 10, "end_line": 900}
-    assert "chars omitted" in stored_result[0]["body"]
-    assert detail["structured_result"] == stored_result
+    assert detail["result"] == canonical_result
+    assert detail["structured_result"] == json.loads(canonical_result)
 
 
 def test_activity_tracker_exposes_media_without_serialized_payload_text() -> None:
@@ -382,7 +407,11 @@ def test_activity_tracker_exposes_media_without_serialized_payload_text() -> Non
         size=123,
     )
 
-    tracker.finish_tool(call_id, succeeded=True, result=link)
+    tracker.finish_tool(
+        call_id,
+        succeeded=True,
+        result_metadata=ActivityTracker.extract_result_metadata(link),
+    )
 
     assert call_id is not None
     detail = tracker.get_call_detail("conversation-a", run["run_id"], call_id)
@@ -404,7 +433,12 @@ def test_activity_tracker_exposes_media_from_prepared_mcp_result() -> None:
         size=123,
     )
 
-    tracker.finish_tool(call_id, succeeded=True, result=CallToolResult(content=[link]))
+    logical_result = CallToolResult(content=[link])
+    tracker.finish_tool(
+        call_id,
+        succeeded=True,
+        result_metadata=ActivityTracker.extract_result_metadata(logical_result),
+    )
 
     assert call_id is not None
     detail = tracker.get_call_detail("conversation-a", run["run_id"], call_id)
@@ -421,10 +455,12 @@ def test_activity_tracker_marks_current_turn_job_and_exposes_other_running_jobs(
     call_id = tracker.start_tool("conversation-a", "start_job", {"label": "current optimisation"})
 
     source.records.append(_job_record("current-job", "current optimisation"))
+    result = {"job_id": "current-job", "label": "current optimisation"}
     tracker.finish_tool(
         call_id,
         succeeded=True,
-        result={"job_id": "current-job", "label": "current optimisation"},
+        result_serialization=json.dumps(result, separators=(",", ":")),
+        result_metadata=ActivityTracker.extract_result_metadata(result),
     )
     snapshot = tracker.get_run("conversation-a", run["run_id"])
 
@@ -442,10 +478,12 @@ def test_activity_tracker_exposes_job_runtime_and_output_on_demand() -> None:
     tracker = ActivityTracker(source)
     run = tracker.start_run("conversation-a", "serena")
     call_id = tracker.start_tool("conversation-a", "start_job", {"label": "current optimisation"})
+    result = {"job_id": "current-job", "label": "current optimisation"}
     tracker.finish_tool(
         call_id,
         succeeded=True,
-        result={"job_id": "current-job", "label": "current optimisation"},
+        result_serialization=json.dumps(result, separators=(",", ":")),
+        result_metadata=ActivityTracker.extract_result_metadata(result),
     )
 
     detail = tracker.get_job_detail("conversation-a", run["run_id"], "current-job")
@@ -495,7 +533,13 @@ def test_superseded_panel_retains_its_jobs_without_absorbing_background_jobs() -
     first = tracker.start_run("conversation-a", "serena")
     call_id = tracker.start_tool("conversation-a", "start_job", {"command": "sleep 5"})
 
-    tracker.finish_tool(call_id, succeeded=True, result={"job_id": "first-job", "label": "first job"})
+    result = {"job_id": "first-job", "label": "first job"}
+    tracker.finish_tool(
+        call_id,
+        succeeded=True,
+        result_serialization=json.dumps(result, separators=(",", ":")),
+        result_metadata=ActivityTracker.extract_result_metadata(result),
+    )
     second = tracker.start_run("conversation-a", "serena")
 
     first_state = tracker.get_run("conversation-a", first["run_id"])
@@ -515,7 +559,13 @@ def test_carried_start_job_is_retained_by_old_and_new_panels() -> None:
     call_id = tracker.start_tool("conversation-a", "start_job", {"command": "sleep 5"})
 
     second = tracker.start_run("conversation-a", "serena")
-    tracker.finish_tool(call_id, succeeded=True, result={"job_id": "shared-job", "label": "shared job"})
+    result = {"job_id": "shared-job", "label": "shared job"}
+    tracker.finish_tool(
+        call_id,
+        succeeded=True,
+        result_serialization=json.dumps(result, separators=(",", ":")),
+        result_metadata=ActivityTracker.extract_result_metadata(result),
+    )
 
     first_state = tracker.get_run("conversation-a", first["run_id"])
     second_state = tracker.get_run("conversation-a", second["run_id"])
@@ -568,6 +618,7 @@ def test_mcp_tool_wrapper_tracks_logical_result_when_transport_conversion_is_ena
 
     call_id = tracker.get_run("global", run["run_id"])["calls"][0]["call_id"]
     detail = tracker.get_call_detail("global", run["run_id"], call_id)
+    assert detail["result"] == '"git status"'
     assert json.loads(detail["result"]) == "git status"
 
 
@@ -627,6 +678,7 @@ def test_mcp_start_job_metadata_is_extracted_before_central_presentation(monkeyp
     assert [(job["job_id"], job["current_turn"]) for job in snapshot["jobs"]] == [("wrapped-job", True)]
     execution = tracker.execution_store.list_executions(newest_first=True)[0]
     assert execution.durable_job_id == "wrapped-job"
+    assert execution.durable_job_label == "wrapped label"
     assert execution.retained_output_id is not None
     assert "wrapped-job" not in str(result)
 

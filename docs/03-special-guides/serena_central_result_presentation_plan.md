@@ -1,6 +1,6 @@
 # Serena Central Result Presentation Plan
 
-Status: C00-C02 COMPLETE (2026-09-10); C03 NEXT
+Status: C00-C04 COMPLETE (2026-09-10); C05 NEXT
 
 Scope: successful Serena tool results, retained-output paging, MCP transport, `ExecutionStore`, activity/dashboard inspection, and the removal of tool-local presentation truncation.
 
@@ -275,6 +275,17 @@ Completion condition: ordinary tools no longer need `_limit_length()` for correc
 
 Completion condition: the execution record contains exactly the canonical result presentation produced by C01/C02, byte-for-byte for textual persistence.
 
+#### C03 completion captured 2026-09-10
+
+- `ExecutionStore.serialize_value()` was split into the explicitly auxiliary `serialize_auxiliary_value()` path, which remains only for bounded arguments/errors; successful result persistence no longer passes through the execution-store compactor.
+- `ActivityTracker.finish_tool()` now accepts the already-presented serialization plus retained-output metadata and explicit pre-presentation durable-job identity/label and media metadata. Activity bookkeeping no longer reparses or reserializes a successful result, and `ExecutionStore.finish_execution()` no longer falls back to regex job-ID extraction from persisted result text.
+- `SerenaFastMCPTool.run()` now persists `ToolResultPresentation.persisted_serialization` directly and records the presentation's retained-output ID/character count on the same `finish_execution()` call, both with and without an activity tracker.
+- The successful path no longer performs the old post-hoc execution-output lookup. Failure handling retains that lookup only for outputs created before a worker fails, preserving existing error semantics.
+- The manually registered `show_activity` tool now also uses `ToolResultPresenter` for successful persistence instead of the auxiliary execution serializer.
+- Transitional tool-local retained output is carried through `ToolResultPresentation` even when the legacy bounded result is already below the central budget, preserving exact recovery metadata until C05 removes those local truncation paths.
+- Behavioural coverage now asserts byte-for-byte equality between canonical presenter serialization and `ExecutionStore.result`, exact retained-output identity/counts at the MCP boundary, and presentation-preserving dashboard detail decoding.
+- Validation completed with `uv run poe format`, `uv run poe type-check`, and `uv run poe test` (`793 passed, 265 deselected`).
+
 ### C04 — Implement robust central fitting
 
 Replace the experimental fixed-tier compactor with the final central algorithm.
@@ -294,6 +305,17 @@ Required behaviours:
 Test with adversarial values: very small budgets, Unicode, deeply nested mappings/lists, huge single strings, many medium strings, many symbol-like records, enormous stdout/stderr, and already-JSON-looking strings.
 
 Completion condition: the presenter uses the available budget efficiently and never needs to parse prose-wrapped JSON.
+
+#### C04 completion captured 2026-09-10
+
+- Replaced the fixed `_STRING_LIMITS` / `_LIST_LIMITS` / `_DICT_LIMITS` fitter with adaptive binary-search fitting over the actual serialized size.
+- Bulky text leaves now share preview capacity fairly across repeated records; multiline previews retain head/tail context and prefer complete lines without leaving fixed-size plateaus.
+- Collection topology is preserved while possible, then lists are compacted with representative entries and explicit `_serena_omitted_items` markers; mapping fields are omitted only afterwards with explicit `_serena_omitted_fields` markers.
+- Removed the global semantic `_PRIORITY_KEYS` list from central fitting. Generic fallback ranking now preserves compact scalar/small structural fields ahead of bulky leaves without depending on tool-specific field names.
+- Structured values remain JSON-safe throughout fitting, JSON-looking logical strings remain text rather than being reparsed by the presenter, unknown values normalize safely, and the logical result is never mutated.
+- Pathological positive budgets are bounded rather than raising when the full retained-output metadata envelope cannot physically fit; normal budgets continue to use the canonical structured truncation envelope.
+- Added adversarial presenter coverage for tiny budgets, Unicode, deep nesting, symbol-like repeated records, large stdout/stderr-style text, many medium strings, omission markers, deterministic fitting, high budget utilisation, JSON-looking strings, unknown objects, and non-mutation.
+- Validation completed with `uv run poe format`, `uv run poe type-check`, and `uv run poe test` (`798 passed, 265 deselected`).
 
 ### C05 — Migrate tools to complete native results
 

@@ -117,6 +117,7 @@ class ActivityResultMetadata:
 
     media: ActivityMedia | None
     durable_job_id: str | None
+    durable_job_label: str | None
 
 
 @dataclass
@@ -559,7 +560,7 @@ class ActivityTracker:
                 session_id=session_id,
                 project_name=effective_project,
                 tool_name=tool_name,
-                arguments=self._execution_store.serialize_value(arguments),
+                arguments=self._execution_store.serialize_auxiliary_value(arguments),
             )
         self._execution_store.append_execution_to_current_run(
             session_id,
@@ -572,37 +573,42 @@ class ActivityTracker:
     def extract_result_metadata(result: object | None) -> ActivityResultMetadata:
         """Extracts bookkeeping metadata from one complete logical result."""
         media = ActivityMedia.from_result(result) if result is not None else None
-        job_id, _ = ActivityTracker._extract_job_identity(result)
-        return ActivityResultMetadata(media=media, durable_job_id=job_id)
+        job_id, job_label = ActivityTracker._extract_job_identity(result)
+        return ActivityResultMetadata(media=media, durable_job_id=job_id, durable_job_label=job_label)
 
     def finish_tool(
         self,
         call_id: str | None,
         succeeded: bool,
-        result: object | None = None,
+        result_serialization: str | None = None,
         error: str | None = None,
         project_name: str | None = None,
         result_metadata: ActivityResultMetadata | None = None,
+        retained_output_id: str | None = None,
+        retained_output_chars: int | None = None,
     ) -> None:
-        """Marks one execution terminal and updates activity-run job references."""
+        """Marks one execution terminal using an already-presented successful result."""
         if call_id is None:
             return
         record = self._execution_store.get_execution(call_id)
         if record is None:
             return
 
-        metadata = result_metadata if result_metadata is not None else self.extract_result_metadata(result)
+        metadata = result_metadata or ActivityResultMetadata(media=None, durable_job_id=None, durable_job_label=None)
         media = metadata.media if succeeded else None
         job_id = metadata.durable_job_id if succeeded else None
-        serialized_result = self._execution_store.serialize_value(result) if succeeded and result is not None and media is None else None
+        job_label = metadata.durable_job_label if succeeded else None
         self._execution_store.finish_execution(
             call_id,
             succeeded=succeeded,
-            result=serialized_result,
+            result=result_serialization if succeeded and media is None else None,
             error=error,
             project_name=project_name,
+            retained_output_id=retained_output_id if succeeded else None,
+            retained_output_chars=retained_output_chars if succeeded else None,
             media=media.storage_dict() if media is not None else None,
             durable_job_id=job_id,
+            durable_job_label=job_label,
         )
 
         if succeeded and record.tool_name == "start_job" and job_id is not None:
@@ -762,11 +768,10 @@ class ActivityTracker:
         return self._summarize_arguments(record.tool_name, arguments)
 
     def _job_label_for_execution(self, record: ExecutionRecord) -> str:
-        job_id, label = self._extract_job_identity(record.result)
-        if label:
-            return label
-        if record.durable_job_id or job_id:
-            return self._known_job_label(record.durable_job_id or job_id or "")
+        if record.durable_job_label:
+            return record.durable_job_label
+        if record.durable_job_id:
+            return self._known_job_label(record.durable_job_id)
         arguments = ActivityDetailFormatter().parse_parameters(record.arguments) or {}
         candidate = arguments.get("label")
         return candidate if isinstance(candidate, str) else ""
@@ -778,9 +783,8 @@ class ActivityTracker:
         for record in self._execution_store.list_executions(newest_first=True):
             if record.durable_job_id != job_id:
                 continue
-            _, label = self._extract_job_identity(record.result)
-            if label:
-                return label
+            if record.durable_job_label:
+                return record.durable_job_label
             arguments = ActivityDetailFormatter().parse_parameters(record.arguments) or {}
             label = arguments.get("label")
             if isinstance(label, str) and label:

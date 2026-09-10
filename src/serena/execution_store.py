@@ -16,7 +16,6 @@ from serena.storage_compression import RetainedTextCompression
 from serena.structured_output import StructuredOutputCompactor
 
 _FILE_RESOURCE_RE = re.compile(r"serena-file://export/([0-9a-f]{64}|[0-9a-f]{48})(?![0-9a-f])")
-_JOB_ID_RE = re.compile(r'"job_id"\s*:\s*"([0-9a-f]{32})"')
 _STATE_VERSION = 2
 
 
@@ -52,6 +51,7 @@ class ExecutionRecord:
     retained_output_chars: int | None = None
     media: dict[str, str] | None = None
     durable_job_id: str | None = None
+    durable_job_label: str | None = None
 
 
 @dataclass
@@ -114,8 +114,8 @@ class ExecutionStore:
         return uuid.uuid5(uuid.NAMESPACE_URL, f"serena-dashboard:{session_id}").hex[:16]
 
     @staticmethod
-    def serialize_value(value: object) -> str:
-        """Serializes one bounded display-safe execution field for persistence."""
+    def serialize_auxiliary_value(value: object) -> str:
+        """Serializes one bounded auxiliary execution field such as arguments or errors."""
         return StructuredOutputCompactor().serialize_for_storage(value, max_chars=8_000)
 
     def start_execution(
@@ -182,6 +182,7 @@ class ExecutionStore:
         retained_output_chars: int | None = None,
         media: dict[str, str] | None = None,
         durable_job_id: str | None = None,
+        durable_job_label: str | None = None,
         finished_at: float | None = None,
     ) -> None:
         """Marks one execution terminal after its underlying worker has actually stopped."""
@@ -203,7 +204,8 @@ class ExecutionStore:
             record.retained_output_id = retained_output_id
             record.retained_output_chars = retained_output_chars
             record.media = media
-            record.durable_job_id = durable_job_id or self._extract_job_id(result)
+            record.durable_job_id = durable_job_id
+            record.durable_job_label = durable_job_label
             if project_name is not None:
                 record.project_name = project_name
 
@@ -693,10 +695,3 @@ class ExecutionStore:
             retained_bytes = self._retained_artifact_bytes()
 
         return changed
-
-    @staticmethod
-    def _extract_job_id(result: str | None) -> str | None:
-        if not result:
-            return None
-        match = _JOB_ID_RE.search(result)
-        return match.group(1) if match is not None else None

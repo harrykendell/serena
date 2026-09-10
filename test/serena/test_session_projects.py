@@ -943,6 +943,10 @@ def test_retained_output_round_trip_is_exact_through_mcp(
         assert response.startswith(f"truncated=true; total_chars={len(content)}; output_id=")
         assert "-useful-tail" in response
         output_id = response.split("output_id=", 1)[1].splitlines()[0]
+        execution = agent.execution_store.list_executions(newest_first=True)[0]
+        assert execution.result == json.dumps(response, ensure_ascii=False, separators=(",", ":"))
+        assert execution.retained_output_id == output_id
+        assert execution.retained_output_chars == len(content)
 
         page = await output_tool.run(
             {"output_id": output_id, "offset": 0, "max_chars": len(content)},
@@ -998,7 +1002,7 @@ def test_central_result_presentation_is_used_at_actual_mcp_boundary(
         execution = agent.execution_store.list_executions(newest_first=True)[0]
         assert execution.retained_output_id == output_id
         assert execution.retained_output_chars == len(logical_result)
-        assert execution.result is not None
+        assert execution.result == json.dumps(structured, ensure_ascii=False, separators=(",", ":"))
         assert json.loads(execution.result) == structured
 
     asyncio.run(scenario())

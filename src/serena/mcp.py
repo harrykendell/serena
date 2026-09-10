@@ -234,7 +234,7 @@ class SerenaFastMCPTool(FastMCPTool):
             session_id=session_id,
             project_name=submission_project_name,
             tool_name=self.name,
-            arguments=execution_store.serialize_value(arguments),
+            arguments=execution_store.serialize_auxiliary_value(arguments),
         )
         if self._activity_tracker is not None:
             if submission_project_name:
@@ -250,37 +250,50 @@ class SerenaFastMCPTool(FastMCPTool):
         def finish_execution(
             *,
             succeeded: bool,
-            result: object | None = None,
+            presentation: ToolResultPresentation | None = None,
             error: str | None = None,
             project_name: str | None = None,
             result_metadata: ActivityResultMetadata | None = None,
         ) -> None:
+            metadata = result_metadata or ActivityResultMetadata(media=None, durable_job_id=None, durable_job_label=None)
+            media = metadata.media if succeeded else None
+            durable_job_id = metadata.durable_job_id if succeeded else None
+            durable_job_label = metadata.durable_job_label if succeeded else None
+            result_serialization = presentation.persisted_serialization if succeeded and presentation is not None else None
+            retained_output_id = presentation.retained_output_id if succeeded and presentation is not None else None
+            retained_output_chars = presentation.retained_output_chars if succeeded and presentation is not None else None
+
             if self._activity_tracker is not None:
                 self._activity_tracker.finish_tool(
                     execution_id,
                     succeeded=succeeded,
-                    result=result,
+                    result_serialization=result_serialization,
                     error=error,
                     project_name=project_name,
-                    result_metadata=result_metadata,
+                    result_metadata=metadata,
+                    retained_output_id=retained_output_id,
+                    retained_output_chars=retained_output_chars,
                 )
             else:
-                metadata = result_metadata if result_metadata is not None else ActivityTracker.extract_result_metadata(result)
-                media = metadata.media if succeeded else None
-                durable_job_id = metadata.durable_job_id if succeeded else None
-                serialized = execution_store.serialize_value(result) if succeeded and result is not None and media is None else None
                 execution_store.finish_execution(
                     execution_id,
                     succeeded=succeeded,
-                    result=serialized,
+                    result=result_serialization if media is None else None,
                     error=error,
                     project_name=project_name,
+                    retained_output_id=retained_output_id,
+                    retained_output_chars=retained_output_chars,
                     media=media.storage_dict() if media is not None else None,
                     durable_job_id=durable_job_id,
+                    durable_job_label=durable_job_label,
                 )
 
+            if succeeded:
+                return
+
+            # preserve retained output produced before a failed worker reaches presentation
             describe_output = getattr(self._agent, "describe_tool_execution_output", None)
-            descriptor = describe_output(execution_id) if callable(describe_output) else None
+            descriptor = cast(ToolOutputDescriptor | None, describe_output(execution_id)) if callable(describe_output) else None
             if descriptor is not None:
                 execution_store.set_retained_output(execution_id, descriptor.output_id, descriptor.total_chars)
 
@@ -397,7 +410,7 @@ class SerenaFastMCPTool(FastMCPTool):
 
             finish_execution(
                 succeeded=True,
-                result=prepared_result,
+                presentation=presentation,
                 project_name=completed_project_name(),
                 result_metadata=result_metadata,
             )
@@ -651,7 +664,7 @@ class SerenaMCPFactory:
                 session_id=session_id,
                 project_name=project_name,
                 tool_name="show_activity",
-                arguments=store.serialize_value({"conversation_title": conversation_title}),
+                arguments=store.serialize_auxiliary_value({"conversation_title": conversation_title}),
             )
             try:
                 await asyncio.to_thread(agent.set_dashboard_session_name, session_id, conversation_title)
@@ -660,17 +673,23 @@ class SerenaMCPFactory:
                 store.finish_execution(
                     execution_id,
                     succeeded=False,
-                    error=store.serialize_value(exc),
+                    error=store.serialize_auxiliary_value(exc),
                     project_name=project_name,
                 )
                 raise
+            presentation = ToolResultPresenter(
+                agent.tool_output_store,
+                max_chars=int(agent.serena_config.default_max_tool_answer_tokens) * 4,
+            ).present(result, tool_name="show_activity", execution_id=execution_id)
             store.finish_execution(
                 execution_id,
                 succeeded=True,
-                result=store.serialize_value(result),
+                result=presentation.persisted_serialization,
                 project_name=project_name,
+                retained_output_id=presentation.retained_output_id,
+                retained_output_chars=presentation.retained_output_chars,
             )
-            return result
+            return cast(dict[str, Any], presentation.transport_value)
 
         @mcp.tool(
             name="get_activity",

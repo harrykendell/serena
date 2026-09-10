@@ -55,6 +55,8 @@ class ToolResultPresenter:
             return ToolResultPresentation(
                 transport_value=normalized,
                 persisted_serialization=self._serialize_presentation(normalized),
+                retained_output_id=retained_output.output_id if retained_output is not None else None,
+                retained_output_chars=retained_output.total_chars if retained_output is not None else None,
             )
 
         # retain the exact complete logical serialization unless an earlier execution stage already owns it
@@ -77,7 +79,7 @@ class ToolResultPresenter:
             retained_output_chars=total_chars,
         )
 
-    def _fit_text_envelope(self, text: str, output_id: str, total_chars: int) -> dict[str, object]:
+    def _fit_text_envelope(self, text: str, output_id: str, total_chars: int) -> object:
         """Fits one adaptive text preview inside the canonical truncation envelope."""
         metadata = self._truncation_metadata(output_id, total_chars)
         minimum = metadata | {"result": ""}
@@ -99,26 +101,34 @@ class ToolResultPresenter:
                 high = preview_chars - 1
         return metadata | {"result": best}
 
-    def _fit_structured_envelope(self, value: object, output_id: str, total_chars: int) -> dict[str, object]:
+    def _fit_structured_envelope(self, value: object, output_id: str, total_chars: int) -> object:
         """Fits one valid structured preview inside the canonical truncation envelope."""
         metadata = self._truncation_metadata(output_id, total_chars)
         empty_envelope = metadata | {"result": None}
         fixed_chars = self._transport_length(empty_envelope) - len("null")
-        available = max(0, self._max_chars - fixed_chars)
+        available = self._max_chars - fixed_chars
 
-        # reuse the existing structure-preserving compactor only as the transitional C01 fitter
-        preview = self._structured_compactor.compact(value, available)
-        envelope = metadata | {"result": preview}
-        if self._transport_length(envelope) <= self._max_chars:
-            return envelope
+        # fit the logical structure directly rather than reconstructing it from serialized prose
+        if available > 0:
+            preview = self._structured_compactor.compact(value, available)
+            envelope = metadata | {"result": preview}
+            if self._transport_length(envelope) <= self._max_chars:
+                return envelope
         return self._minimum_envelope(metadata)
 
-    def _minimum_envelope(self, metadata: dict[str, object]) -> dict[str, object]:
-        """Returns the smallest canonical envelope available to the transitional presenter."""
-        envelope = metadata | {"result": None}
-        if self._transport_length(envelope) <= self._max_chars:
-            return envelope
-        raise ValueError("Result presentation budget is too small for truncation metadata")
+    def _minimum_envelope(self, metadata: dict[str, object]) -> object:
+        """Returns the most informative valid fallback that fits a pathological tiny budget."""
+        candidates: tuple[object, ...] = (
+            metadata | {"result": None},
+            {"truncated": True, "output_id": metadata["output_id"]},
+            {"truncated": True},
+            {},
+            0,
+        )
+        for candidate in candidates:
+            if self._transport_length(candidate) <= self._max_chars:
+                return candidate
+        raise AssertionError("A positive result-presentation budget must fit the one-character fallback")
 
     @staticmethod
     def _truncation_metadata(output_id: str, total_chars: int) -> dict[str, object]:
@@ -207,49 +217,5 @@ class ToolResultPresenter:
 
     @staticmethod
     def _truncate_text(text: str, limit: int) -> str:
-        """Returns an adaptive head/tail text preview within ``limit`` characters."""
-        if len(text) <= limit:
-            return text
-        if limit <= 0:
-            return ""
-
-        # preserve complete lines for code and logs whenever the budget permits
-        if "\n" in text and limit >= 64:
-            available = max(0, limit - len(f"... {len(text)} chars omitted ...\n"))
-            for _ in range(3):
-                head_budget = (available + 1) // 2
-                tail_budget = available // 2
-
-                head_candidate = text[:head_budget]
-                head_break = head_candidate.rfind("\n")
-                head = head_candidate[: head_break + 1] if head_break >= 0 else head_candidate
-
-                tail = ""
-                if tail_budget:
-                    tail_start = max(0, len(text) - tail_budget)
-                    tail_break = text.find("\n", tail_start)
-                    tail = text[tail_break + 1 :] if 0 <= tail_break < len(text) - 1 else text[-tail_budget:]
-
-                omitted = len(text) - len(head) - len(tail)
-                separator = "" if head.endswith("\n") else "\n"
-                result = head + separator + f"... {omitted} chars omitted ...\n" + tail
-                if len(result) <= limit:
-                    return result
-                available = max(0, available - (len(result) - limit))
-
-        # fall back to exact character budgeting for single-line or exceptionally tight values
-        marker_template = "\n... {omitted} chars omitted ...\n"
-        marker = marker_template.format(omitted=0)
-        if limit <= len(marker):
-            return text[:limit]
-        available = limit - len(marker)
-        head = (available + 1) // 2
-        tail = available // 2
-        omitted = len(text) - head - tail
-        marker = marker_template.format(omitted=omitted)
-        available = max(0, limit - len(marker))
-        head = (available + 1) // 2
-        tail = available // 2
-        omitted = len(text) - head - tail
-        marker = marker_template.format(omitted=omitted)
-        return text[:head] + marker + (text[-tail:] if tail else "")
+        """Returns the shared adaptive head/tail text preview."""
+        return StructuredOutputCompactor.truncate_text(text, limit)

@@ -7,50 +7,31 @@ from typing import Any, cast
 
 
 class StructuredOutputCompactor:
-    """Preserves useful JSON structure while reducing oversized display values."""
+    """Fits JSON-safe values adaptively while preserving useful structure."""
 
-    _STRING_LIMITS = (4096, 2048, 1024, 512, 256, 128, 64)
-    _LIST_LIMITS = (64, 32, 16, 8, 4, 2, 1)
-    _DICT_LIMITS = (64, 32, 16, 8, 4)
-    _PRIORITY_KEYS = (
-        "name_path",
-        "name",
-        "kind",
-        "relative_path",
-        "path",
-        "file",
-        "body_location",
-        "location",
-        "status",
-        "return_code",
-        "exit_code",
-        "job_id",
-        "output_id",
-        "line",
-        "start_line",
-        "end_line",
-        "count",
-        "total",
-        "message",
-    )
+    _ESSENTIAL_TEXT_MAX = 96
+    _SMALL_STRUCTURE_MAX = 192
+    _OMITTED_ITEMS_KEY = "_serena_omitted_items"
+    _OMITTED_FIELDS_KEY = "_serena_omitted_fields"
 
     def serialize_for_storage(self, value: object, max_chars: int) -> str:
         """Serializes ``value`` within ``max_chars`` without corrupting structured content."""
-        try:
-            serialized = self._dumps(value, pretty=True, default=str)
-        except (TypeError, ValueError):
-            text = str(value)
-            return text if len(text) <= max_chars else self._truncate_text(text, max_chars)
+        if max_chars <= 0:
+            return ""
+
+        # normalize first so fitting and serialization operate on one deterministic value
+        normalized = self._normalize(self._decode_structured_string(value))
+        serialized = self._dumps(normalized, pretty=True)
         if len(serialized) <= max_chars:
             return serialized
 
-        # recover JSON-producing tools before compacting so their outer structure remains useful
-        normalized = self._normalize(self._decode_structured_string(value))
         compacted = self.compact(normalized, max_chars, pretty=True)
         return self._dumps(compacted, pretty=True)
 
     def render_retained_json_preview(self, result: str, output_id: str, max_chars: int) -> str | None:
         """Returns a bounded valid-JSON retained-output envelope when ``result`` is structured JSON."""
+        if max_chars <= 0:
+            return None
         structured = self._decode_structured_string(result)
         if not isinstance(structured, dict | list):
             return None
@@ -60,65 +41,172 @@ class StructuredOutputCompactor:
             "total_chars": len(result),
             "output_id": output_id,
         }
-        empty_envelope = self._dumps(metadata | {"result": None})
-        available = max_chars - len(empty_envelope) - 8
-        if available < 64:
+        empty_envelope = metadata | {"result": None}
+        fixed_chars = self._serialized_length(empty_envelope, pretty=False) - len("null")
+        available = max_chars - fixed_chars
+        if available <= 0:
             return None
 
-        # leave the exact full value in retained output while exposing the richest valid structure that fits
-        for _ in range(4):
-            compacted = self.compact(self._normalize(structured), available)
-            response = self._dumps(metadata | {"result": compacted})
-            if len(response) <= max_chars:
-                return response
-            available -= len(response) - max_chars + 16
-            if available < 64:
-                return None
-        return None
+        # fit the structured value directly; legacy callers only need to wrap the fitted value
+        compacted = self.compact(structured, available)
+        response = self._dumps(metadata | {"result": compacted})
+        return response if len(response) <= max_chars else None
 
     def compact(self, value: object, max_chars: int, *, pretty: bool = False) -> object:
-        """Returns the richest deterministic structure whose JSON representation fits ``max_chars``."""
+        """Returns the richest deterministic JSON-safe value fitting ``max_chars``."""
+        if max_chars <= 0:
+            return ""
+
         normalized = self._normalize(value)
         if self._serialized_length(normalized, pretty=pretty) <= max_chars:
             return normalized
 
-        # first sacrifice only verbose leaf strings, retaining the complete object/list topology
-        for string_limit in self._STRING_LIMITS:
-            candidate = self._shrink(normalized, string_limit=string_limit)
-            if self._serialized_length(candidate, pretty=pretty) <= max_chars:
+        # first preserve the complete mapping/list topology and shorten only bulky text leaves
+        candidate = self._fit_text_previews(normalized, max_chars=max_chars, pretty=pretty)
+        if candidate is not None:
+            return candidate
+
+        # if the structural skeleton is too large, compact collections adaptively with omission markers
+        max_list_items = self._max_list_items(normalized)
+        if max_list_items > 0:
+            candidate = self._largest_fitting_list_shape(
+                normalized,
+                max_chars=max_chars,
+                pretty=pretty,
+                max_list_items=max_list_items,
+            )
+            if candidate is not None:
                 return candidate
 
-        # next retain representative beginning/end entries of oversized arrays
-        for list_limit in self._LIST_LIMITS:
-            candidate = self._shrink(normalized, string_limit=64, list_limit=list_limit)
-            if self._serialized_length(candidate, pretty=pretty) <= max_chars:
+        # only after collection compaction omit low-value mapping fields
+        max_dict_fields = self._max_dict_fields(normalized)
+        if max_dict_fields > 0:
+            candidate = self._largest_fitting_dict_shape(
+                normalized,
+                max_chars=max_chars,
+                pretty=pretty,
+                list_limit=1 if max_list_items > 0 else None,
+                max_dict_fields=max_dict_fields,
+            )
+            if candidate is not None:
                 return candidate
 
-        # only as a final structured stage omit dictionary fields, preferring identifiers and locations
-        for dict_limit in self._DICT_LIMITS:
-            candidate = self._shrink(normalized, string_limit=64, list_limit=1, dict_limit=dict_limit)
-            if self._serialized_length(candidate, pretty=pretty) <= max_chars:
+        # allow collections to collapse to an explicit marker before abandoning structured output
+        if max_list_items > 0:
+            candidate = self._fit_text_previews(
+                normalized,
+                max_chars=max_chars,
+                pretty=pretty,
+                list_limit=0,
+                dict_limit=1 if max_dict_fields > 0 else None,
+            )
+            if candidate is not None:
                 return candidate
 
-        fallback = {
-            "_serena_truncated": True,
-            "original_type": type(normalized).__name__,
-            "note": "Structured value exceeded the retained display budget; use retained output for the exact result.",
-        }
-        if self._serialized_length(fallback, pretty=pretty) <= max_chars:
-            return fallback
-        return "... output omitted ..."
+        return self._minimal_value(normalized, max_chars=max_chars, pretty=pretty)
 
-    def _shrink(
+    def _largest_fitting_list_shape(
         self,
         value: object,
         *,
-        string_limit: int,
+        max_chars: int,
+        pretty: bool,
+        max_list_items: int,
+    ) -> object | None:
+        """Finds the widest representative collection shape that fits."""
+        smallest = self._fit_text_previews(value, max_chars=max_chars, pretty=pretty, list_limit=1)
+        if smallest is None:
+            return None
+
+        low = 1
+        high = max_list_items
+        best = smallest
+        while low <= high:
+            limit = (low + high) // 2
+            candidate = self._fit_text_previews(value, max_chars=max_chars, pretty=pretty, list_limit=limit)
+            if candidate is not None:
+                best = candidate
+                low = limit + 1
+            else:
+                high = limit - 1
+        return best
+
+    def _largest_fitting_dict_shape(
+        self,
+        value: object,
+        *,
+        max_chars: int,
+        pretty: bool,
+        list_limit: int | None,
+        max_dict_fields: int,
+    ) -> object | None:
+        """Finds the widest mapping field set that fits after collection compaction."""
+        smallest = self._fit_text_previews(
+            value,
+            max_chars=max_chars,
+            pretty=pretty,
+            list_limit=list_limit,
+            dict_limit=1,
+        )
+        if smallest is None:
+            return None
+
+        low = 1
+        high = max_dict_fields
+        best = smallest
+        while low <= high:
+            limit = (low + high) // 2
+            candidate = self._fit_text_previews(
+                value,
+                max_chars=max_chars,
+                pretty=pretty,
+                list_limit=list_limit,
+                dict_limit=limit,
+            )
+            if candidate is not None:
+                best = candidate
+                low = limit + 1
+            else:
+                high = limit - 1
+        return best
+
+    def _fit_text_previews(
+        self,
+        value: object,
+        *,
+        max_chars: int,
+        pretty: bool,
         list_limit: int | None = None,
         dict_limit: int | None = None,
-    ) -> object:
-        if isinstance(value, str):
-            return self._truncate_text(value, string_limit)
+    ) -> object | None:
+        """Fits bulky text leaves fairly inside one fixed structural shape."""
+        shaped = self._shape(value, list_limit=list_limit, dict_limit=dict_limit)
+        verbose_lengths = self._verbose_text_lengths(shaped)
+        if not verbose_lengths:
+            return shaped if self._serialized_length(shaped, pretty=pretty) <= max_chars else None
+
+        # reserve one explicit ellipsis character for every bulky text leaf before spending preview space
+        minimum_budget = len(verbose_lengths)
+        smallest = self._apply_text_budget(shaped, minimum_budget)
+        if self._serialized_length(smallest, pretty=pretty) > max_chars:
+            return None
+
+        # binary-search the aggregate preview budget; fair allocation avoids spending it all on one record
+        low = minimum_budget
+        high = sum(verbose_lengths)
+        best = smallest
+        while low <= high:
+            text_budget = (low + high) // 2
+            candidate = self._apply_text_budget(shaped, text_budget)
+            if self._serialized_length(candidate, pretty=pretty) <= max_chars:
+                best = candidate
+                low = text_budget + 1
+            else:
+                high = text_budget - 1
+        return best
+
+    def _shape(self, value: object, *, list_limit: int | None, dict_limit: int | None) -> object:
+        """Copies one value while applying structural collection and mapping limits."""
         if isinstance(value, list):
             items = cast(list[object], value)
             selected: list[object]
@@ -126,110 +214,307 @@ class StructuredOutputCompactor:
                 head_count = (list_limit + 1) // 2
                 tail_count = list_limit // 2
                 omitted = len(items) - head_count - tail_count
-                selected = [*items[:head_count], {"_serena_omitted_items": omitted}]
+                selected = [*items[:head_count], {self._OMITTED_ITEMS_KEY: omitted}]
                 if tail_count:
                     selected.extend(items[-tail_count:])
             else:
                 selected = items
-            return [self._shrink(item, string_limit=string_limit, list_limit=list_limit, dict_limit=dict_limit) for item in selected]
+            return [self._shape(item, list_limit=list_limit, dict_limit=dict_limit) for item in selected]
+
         if isinstance(value, dict):
-            selected_items = list(cast(dict[str, object], value).items())
+            items = list(cast(dict[str, object], value).items())
             omitted_fields = 0
-            if dict_limit is not None and len(selected_items) > dict_limit:
-                selected_items, omitted_fields = self._select_dict_items(selected_items, dict_limit)
-            compacted = {
-                key: self._shrink(item, string_limit=string_limit, list_limit=list_limit, dict_limit=dict_limit)
-                for key, item in selected_items
-            }
+            if dict_limit is not None and len(items) > dict_limit:
+                items, omitted_fields = self._select_dict_items(items, dict_limit)
+
+            compacted = {key: self._shape(item, list_limit=list_limit, dict_limit=dict_limit) for key, item in items}
             if omitted_fields:
-                compacted["_serena_omitted_fields"] = omitted_fields
+                marker_key = self._available_marker_key(cast(dict[str, object], value), self._OMITTED_FIELDS_KEY)
+                compacted[marker_key] = omitted_fields
             return compacted
+
         return value
 
     def _select_dict_items(self, items: list[tuple[str, object]], limit: int) -> tuple[list[tuple[str, object]], int]:
+        """Selects mapping fields by generic structural value while preserving source order."""
         if len(items) <= limit:
             return items, 0
+        if limit <= 0:
+            return [], len(items)
 
-        priority = {key: index for index, key in enumerate(self._PRIORITY_KEYS)}
-        selected_indices = [index for index, (key, _) in enumerate(items) if key in priority]
-        selected_indices.sort(key=lambda index: priority[items[index][0]])
-        selected = selected_indices[:limit]
+        ranked = sorted(
+            enumerate(items),
+            key=lambda entry: (self._field_rank(entry[1][1]), entry[0]),
+        )
+        selected_indices = sorted(index for index, _ in ranked[:limit])
+        return [items[index] for index in selected_indices], len(items) - len(selected_indices)
 
-        # use remaining capacity on both ends, which usually preserves context plus terminal status/count fields
-        candidates: list[int] = []
-        left, right = 0, len(items) - 1
-        while left <= right:
-            candidates.append(left)
-            if right != left:
-                candidates.append(right)
-            left += 1
-            right -= 1
-        for index in candidates:
-            if len(selected) >= limit:
-                break
-            if index not in selected:
-                selected.append(index)
+    def _field_rank(self, value: object) -> tuple[int, int]:
+        """Ranks fields generically so compact scalar identity survives verbose leaves."""
+        if value is None or isinstance(value, bool | int | float):
+            return (0, self._serialized_length(value, pretty=False))
+        if isinstance(value, str):
+            if len(value) <= self._ESSENTIAL_TEXT_MAX:
+                return (1, len(value))
+            return (4, len(value))
+        if isinstance(value, dict | list):
+            size = self._serialized_length(value, pretty=False)
+            return (2 if size <= self._SMALL_STRUCTURE_MAX else 3, size)
+        return (3, self._serialized_length(value, pretty=False))
 
-        selected.sort()
-        return [items[index] for index in selected], len(items) - len(selected)
+    def _apply_text_budget(self, value: object, total_budget: int) -> object:
+        """Distributes one aggregate text budget fairly over all bulky text leaves."""
+        lengths = self._verbose_text_lengths(value)
+        allocations = self._fair_text_allocations(lengths, total_budget)
+        allocation_iter = iter(allocations)
+
+        def apply(item: object) -> object:
+            if isinstance(item, str):
+                if self._is_verbose_text(item):
+                    return self.truncate_text(item, next(allocation_iter))
+                return item
+            if isinstance(item, list):
+                return [apply(child) for child in cast(list[object], item)]
+            if isinstance(item, dict):
+                return {key: apply(child) for key, child in cast(dict[str, object], item).items()}
+            return item
+
+        return apply(value)
+
+    @classmethod
+    def _verbose_text_lengths(cls, value: object) -> list[int]:
+        lengths: list[int] = []
+
+        def collect(item: object) -> None:
+            if isinstance(item, str):
+                if cls._is_verbose_text(item):
+                    lengths.append(len(item))
+                return
+            if isinstance(item, list):
+                for child in cast(list[object], item):
+                    collect(child)
+                return
+            if isinstance(item, dict):
+                for child in cast(dict[str, object], item).values():
+                    collect(child)
+
+        collect(value)
+        return lengths
+
+    @classmethod
+    def _is_verbose_text(cls, text: str) -> bool:
+        return len(text) > cls._ESSENTIAL_TEXT_MAX
 
     @staticmethod
-    def _truncate_text(text: str, limit: int) -> str:
+    def _fair_text_allocations(lengths: list[int], total_budget: int) -> list[int]:
+        """Returns deterministic near-equal allocations summing to ``total_budget`` where possible."""
+        if not lengths:
+            return []
+
+        minimum = len(lengths)
+        budget = max(minimum, min(total_budget, sum(lengths)))
+        low = 1
+        high = max(lengths)
+        cap = 1
+        while low <= high:
+            candidate = (low + high) // 2
+            used = sum(min(length, candidate) for length in lengths)
+            if used <= budget:
+                cap = candidate
+                low = candidate + 1
+            else:
+                high = candidate - 1
+
+        allocations = [min(length, cap) for length in lengths]
+        remainder = budget - sum(allocations)
+        for index, length in enumerate(lengths):
+            if remainder <= 0:
+                break
+            if allocations[index] < length:
+                allocations[index] += 1
+                remainder -= 1
+        return allocations
+
+    @classmethod
+    def truncate_text(cls, text: str, limit: int) -> str:
+        """Returns an adaptive head/tail preview occupying at most ``limit`` characters."""
         if len(text) <= limit:
             return text
+        if limit <= 0:
+            return ""
+        if limit == 1:
+            return "…"
 
-        # preserve complete lines for code, logs and other multiline output whenever the budget permits
-        if "\n" in text and limit >= 64:
-            available = max(0, limit - len(f"... {len(text)} chars omitted ...\n"))
-            for _ in range(3):
-                head_budget = (available + 1) // 2
-                tail_budget = available // 2
+        # very tight budgets still make omission explicit without spending space on a long marker
+        if limit < 24:
+            head = (limit - 1 + 1) // 2
+            tail = (limit - 1) // 2
+            return text[:head] + "…" + (text[-tail:] if tail else "")
 
-                head_candidate = text[:head_budget]
-                head_break = head_candidate.rfind("\n")
-                head = head_candidate[: head_break + 1] if head_break >= 0 else head_candidate
+        # use a descriptive omission marker and split the remaining capacity across head and tail
+        multiline = "\n" in text
+        omitted = max(1, len(text) - limit)
+        for _ in range(5):
+            marker = cls._omission_marker(omitted, multiline=multiline)
+            available = limit - len(marker)
+            if available <= 1:
+                head = (limit - 1 + 1) // 2
+                tail = (limit - 1) // 2
+                return text[:head] + "…" + (text[-tail:] if tail else "")
 
-                tail = ""
-                if tail_budget:
-                    tail_start = max(0, len(text) - tail_budget)
-                    tail_break = text.find("\n", tail_start)
-                    tail = text[tail_break + 1 :] if 0 <= tail_break < len(text) - 1 else text[-tail_budget:]
+            head_chars = (available + 1) // 2
+            tail_chars = available // 2
+            if multiline:
+                head_chars, tail_chars = cls._prefer_complete_lines(text, head_chars, tail_chars, available)
+            omitted = len(text) - head_chars - tail_chars
 
-                omitted = len(text) - len(head) - len(tail)
-                separator = "" if head.endswith("\n") else "\n"
-                result = head + separator + f"... {omitted} chars omitted ...\n" + tail
-                if len(result) <= limit:
-                    return result
-                available = max(0, available - (len(result) - limit))
+        marker = cls._omission_marker(omitted, multiline=multiline)
+        available = limit - len(marker)
+        if available <= 1:
+            head = (limit - 1 + 1) // 2
+            tail = (limit - 1) // 2
+            return text[:head] + "…" + (text[-tail:] if tail else "")
 
-        # fall back to exact character budgeting for single-line or exceptionally tight values
-        marker_template = "\n... {omitted} chars omitted ...\n"
-        marker = marker_template.format(omitted=0)
+        head_chars = (available + 1) // 2
+        tail_chars = available // 2
+        if multiline:
+            head_chars, tail_chars = cls._prefer_complete_lines(text, head_chars, tail_chars, available)
+        omitted = len(text) - head_chars - tail_chars
+        marker = cls._omission_marker(omitted, multiline=multiline)
+
+        # one final exact rebalance handles marker-width changes at powers of ten
         available = max(0, limit - len(marker))
-        head = (available + 1) // 2
-        tail = available // 2
-        omitted = len(text) - head - tail
-        marker = marker_template.format(omitted=omitted)
-        available = max(0, limit - len(marker))
-        head = (available + 1) // 2
-        tail = available // 2
-        omitted = len(text) - head - tail
-        marker = marker_template.format(omitted=omitted)
-        if tail:
-            return text[:head] + marker + text[-tail:]
-        return text[:head] + marker
+        head_chars = (available + 1) // 2
+        tail_chars = available // 2
+        if multiline:
+            head_chars, tail_chars = cls._prefer_complete_lines(text, head_chars, tail_chars, available)
+        if multiline:
+            core = f"... {max(0, omitted)} chars omitted ..."
+            prefix = "" if head_chars and text[head_chars - 1] == "\n" else "\n"
+            tail_start = len(text) - tail_chars if tail_chars else len(text)
+            suffix = "" if tail_chars and text[tail_start] == "\n" else "\n"
+            marker = prefix + core + suffix
+        result = text[:head_chars] + marker + (text[-tail_chars:] if tail_chars else "")
+        return result[:limit] if len(result) > limit else result
+
+    @staticmethod
+    def _prefer_complete_lines(text: str, head_chars: int, tail_chars: int, available: int) -> tuple[int, int]:
+        """Moves preview boundaries to complete lines and only adds further complete lines."""
+        head_break = text.rfind("\n", 0, min(len(text), head_chars) + 1)
+        head = head_break + 1 if head_break >= 0 else head_chars
+
+        tail_start = max(0, len(text) - tail_chars)
+        tail_break = text.find("\n", tail_start)
+        tail = len(text) - tail_break - 1 if tail_break >= 0 else tail_chars
+
+        head = min(head, available)
+        tail = min(tail, available - head)
+        remaining = available - head - tail
+
+        # use spare capacity on whole adjacent lines without recreating partial boundaries
+        while remaining > 0 and head + tail < len(text):
+            changed = False
+            omitted_end = len(text) - tail
+
+            next_head_break = text.find("\n", head, omitted_end)
+            if next_head_break >= 0:
+                addition = next_head_break + 1 - head
+                if addition <= remaining:
+                    head += addition
+                    remaining -= addition
+                    changed = True
+                    omitted_end = len(text) - tail
+
+            tail_start = len(text) - tail
+            previous_tail_break = text.rfind("\n", head, max(head, tail_start - 1))
+            if previous_tail_break >= 0:
+                addition = tail_start - previous_tail_break - 1
+                if 0 < addition <= remaining:
+                    tail += addition
+                    remaining -= addition
+                    changed = True
+
+            if not changed:
+                break
+
+        return head, tail
+
+    @staticmethod
+    def _omission_marker(omitted: int, *, multiline: bool) -> str:
+        marker = f"... {max(0, omitted)} chars omitted ..."
+        return f"\n{marker}\n" if multiline else marker
 
     @classmethod
     def _normalize(cls, value: object) -> object:
-        if value is None or isinstance(value, str | int | float | bool):
+        if value is None or isinstance(value, str | int | bool):
             return value
+        if isinstance(value, float):
+            return value if value == value and value not in (float("inf"), float("-inf")) else str(value)
         if isinstance(value, bytes):
             return value.decode("utf-8", errors="replace")
         if isinstance(value, dict):
             return {str(key): cls._normalize(item) for key, item in value.items()}
-        if isinstance(value, list | tuple | set | frozenset):
+        if isinstance(value, list | tuple):
             return [cls._normalize(item) for item in value]
+        if isinstance(value, set | frozenset):
+            normalized = [cls._normalize(item) for item in value]
+            return sorted(normalized, key=cls._stable_sort_key)
         return str(value)
+
+    @classmethod
+    def _stable_sort_key(cls, value: object) -> str:
+        return cls._dumps(value)
+
+    @classmethod
+    def _max_list_items(cls, value: object) -> int:
+        maximum = 0
+        if isinstance(value, list):
+            items = cast(list[object], value)
+            maximum = len(items)
+            for item in items:
+                maximum = max(maximum, cls._max_list_items(item))
+        elif isinstance(value, dict):
+            for item in cast(dict[str, object], value).values():
+                maximum = max(maximum, cls._max_list_items(item))
+        return maximum
+
+    @classmethod
+    def _max_dict_fields(cls, value: object) -> int:
+        maximum = 0
+        if isinstance(value, dict):
+            mapping = cast(dict[str, object], value)
+            maximum = len(mapping)
+            for item in mapping.values():
+                maximum = max(maximum, cls._max_dict_fields(item))
+        elif isinstance(value, list):
+            for item in cast(list[object], value):
+                maximum = max(maximum, cls._max_dict_fields(item))
+        return maximum
+
+    @staticmethod
+    def _available_marker_key(mapping: dict[str, object], base: str) -> str:
+        key = base
+        while key in mapping:
+            key = f"_{key}"
+        return key
+
+    def _minimal_value(self, value: object, *, max_chars: int, pretty: bool) -> object:
+        """Returns the smallest informative JSON value available for pathological budgets."""
+        candidates: list[object]
+        if isinstance(value, dict):
+            candidates = [{"_serena_truncated": True}, {}]
+        elif isinstance(value, list):
+            marker = [{self._OMITTED_ITEMS_KEY: len(value)}]
+            candidates = [marker, []]
+        elif isinstance(value, str):
+            candidates = [self.truncate_text(value, max_chars)]
+        else:
+            candidates = [value, None]
+
+        for candidate in candidates:
+            if self._serialized_length(candidate, pretty=pretty) <= max_chars:
+                return candidate
+        return 0
 
     @staticmethod
     def _decode_structured_string(value: object) -> object:
@@ -248,7 +533,7 @@ class StructuredOutputCompactor:
         return len(self._dumps(value, pretty=pretty))
 
     @staticmethod
-    def _dumps(value: object, *, pretty: bool = False, default: Any = None) -> str:
+    def _dumps(value: object, *, pretty: bool = False) -> str:
         if pretty:
-            return json.dumps(value, ensure_ascii=False, indent=2, default=default)
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=default)
+            return json.dumps(value, ensure_ascii=False, indent=2)
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
