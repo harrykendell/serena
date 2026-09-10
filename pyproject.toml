@@ -28,6 +28,7 @@ dependencies = [
   "sensai-utils==1.5.0",
   "tqdm==4.67.1",
   "typing-extensions==4.15.0",
+  "zstandard==0.25.0",
 ]
 
 [project.scripts]

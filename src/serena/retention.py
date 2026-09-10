@@ -10,7 +10,7 @@ from datetime import timedelta
 class SessionRetentionPolicy:
     """Defines lifetime and emergency disk budget for retained ChatGPT-session work."""
 
-    max_age: timedelta = timedelta(days=7)
+    max_age: timedelta = timedelta(days=30)
     max_artifact_bytes: int = 10 * 1024 * 1024 * 1024
 
     def is_expired(self, updated_at: float, now: float) -> bool:

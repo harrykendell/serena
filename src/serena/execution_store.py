@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from serena.retention import DEFAULT_SESSION_RETENTION, JobRetentionState, SessionRetentionPolicy
+from serena.storage_compression import RetainedTextCompression
 
 _FILE_RESOURCE_RE = re.compile(r"serena-file://export/([0-9a-f]{64}|[0-9a-f]{48})(?![0-9a-f])")
 _JOB_ID_RE = re.compile(r'"job_id"\s*:\s*"([0-9a-f]{32})"')
@@ -427,9 +428,8 @@ class ExecutionStore:
         """Returns snapshot tokens from canonical persisted state without constructing runtime services."""
         path = cls._default_root() / "state.json"
         try:
-            with path.open("r", encoding="utf-8") as stream:
-                payload = json.load(stream)
-        except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError, ValueError):
+            payload = json.loads(RetainedTextCompression.read_text(path))
+        except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
             return set()
         tokens: set[str] = set()
         executions = payload.get("executions", {}) if isinstance(payload, dict) else {}
@@ -508,9 +508,8 @@ class ExecutionStore:
         if not self._state_path.is_file():
             return
         try:
-            with self._state_path.open("r", encoding="utf-8") as stream:
-                payload = json.load(stream)
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            payload = json.loads(RetainedTextCompression.read_text(self._state_path))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
             return
         if not isinstance(payload, dict):
             return
@@ -560,17 +559,16 @@ class ExecutionStore:
             "activity_runs": {key: asdict(value) for key, value in self._activity_runs.items()},
         }
         fd, temporary_name = tempfile.mkstemp(prefix=".state.", suffix=".tmp", dir=self._root)
+        temporary_path = Path(temporary_name)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 json.dump(payload, stream, ensure_ascii=False, separators=(",", ":"))
                 stream.write("\n")
-            os.chmod(temporary_name, 0o600)
-            os.replace(temporary_name, self._state_path)
+            os.chmod(temporary_path, 0o600)
+            RetainedTextCompression.compress_file(temporary_path)
+            os.replace(temporary_path, self._state_path)
         finally:
-            try:
-                os.unlink(temporary_name)
-            except FileNotFoundError:
-                pass
+            temporary_path.unlink(missing_ok=True)
 
     def _drop_session(self, session_id: str) -> bool:
         """Drops one retained session and its now-unowned artifact blobs atomically."""
@@ -681,7 +679,7 @@ class ExecutionStore:
             if self._session_has_dangling_execution_reference(session_id):
                 changed = self._drop_session(session_id) or changed
 
-        # expire inactive sessions seven days after their most recent activity
+        # expire inactive sessions after the configured retention period
         now = time.time()
         for session in sorted(self._sessions.values(), key=lambda item: item.updated_at):
             if session.session_id in protected:

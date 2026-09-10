@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from serena.errors import UserFacingError
 from serena.execution_store import ExecutionStore
+from serena.storage_compression import RetainedTextCompression
 
 
 @dataclass(frozen=True)
@@ -123,8 +124,8 @@ class ToolOutputStore:
             total_chars = execution.retained_output_chars
             if total_chars is None:
                 try:
-                    total_chars = len(path.read_text(encoding="utf-8"))
-                except OSError:
+                    total_chars = len(RetainedTextCompression.read_text(path))
+                except (OSError, UnicodeDecodeError):
                     continue
             self._records[output_id] = _ToolOutputRecord(
                 tool_name=execution.tool_name,
@@ -168,10 +169,13 @@ class ToolOutputStore:
             record.total_chars += len(content)
 
     def finish(self, output_id: str) -> None:
-        """Mark a live retained result complete without changing its identity."""
+        """Mark a live retained result complete and compress its persisted text."""
         with self._lock:
             record = self._record(output_id)
+            if not record.is_open:
+                return
             record.is_open = False
+            RetainedTextCompression.compress_file(record.path)
 
     def retain_with_tail(
         self,
@@ -241,15 +245,19 @@ class ToolOutputStore:
             if offset > record.total_chars:
                 raise UserFacingError(f"offset {offset} exceeds retained output length {record.total_chars}")
 
-            # seek by characters rather than bytes so cursors remain correct for arbitrary UTF-8 output
-            with record.path.open("r", encoding="utf-8", newline="") as output_file:
-                remaining = offset
-                while remaining:
-                    skipped = output_file.read(min(65_536, remaining))
-                    if not skipped:
-                        break
-                    remaining -= len(skipped)
-                content = output_file.read(max_chars)
+            # finalized output is compressed; live output remains directly seekable UTF-8 text
+            if RetainedTextCompression.is_compressed(record.path):
+                full_content = RetainedTextCompression.read_text(record.path)
+                content = full_content[offset : offset + max_chars]
+            else:
+                with record.path.open("r", encoding="utf-8", newline="") as output_file:
+                    remaining = offset
+                    while remaining:
+                        skipped = output_file.read(min(65_536, remaining))
+                        if not skipped:
+                            break
+                        remaining -= len(skipped)
+                    content = output_file.read(max_chars)
 
             next_offset_value = offset + len(content)
             next_offset = next_offset_value if next_offset_value < record.total_chars else None

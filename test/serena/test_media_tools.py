@@ -14,6 +14,7 @@ from mcp.types import CallToolResult, ResourceLink
 
 from serena.config.serena_config import SerenaConfig
 from serena.errors import UserFacingError
+from serena.file_snapshots import FileSnapshotStore
 from serena.project import Project
 from serena.tools import DownloadFileTool, FetchMediaFileTool, RenderPdfPageTool, UploadFileTool
 from serena.tools.media_tools import OpenAIFile, get_result_file_link, read_result_file_link
@@ -235,7 +236,7 @@ def test_upload_file_writes_chatgpt_file_inside_project(project: Project, tmp_pa
     assert stat.S_IMODE(destination.stat().st_mode) == expected_new_mode
     assert result.startswith("OK; uploaded=incoming/edited.txt; source_snapshot=serena-file://export/")
     snapshot_token = result.rsplit("/", maxsplit=1)[1]
-    assert (tmp_path / ".serena-home" / "chat_file_snapshots" / snapshot_token).read_bytes() == data
+    assert FileSnapshotStore.read(snapshot_token) == data
     assert tool.get_mcp_tool_meta() == {"openai/fileParams": ["file"]}
 
     with pytest.raises(UserFacingError):

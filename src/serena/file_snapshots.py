@@ -14,6 +14,7 @@ from mcp.types import ResourceLink
 from pydantic import AnyUrl
 
 from serena.errors import UserFacingError
+from serena.storage_compression import RetainedTextCompression
 
 FILE_EXPORT_MAX_SIZE = 100 * 1024 * 1024
 
@@ -90,6 +91,7 @@ class FileSnapshotStore:
 
         name = display_name or source_path.name
         mime_type, _ = mimetypes.guess_type(name)
+        resolved_mime_type = mime_type or "application/octet-stream"
         content_digest = hashlib.sha256()
 
         with cls._LOCK:
@@ -110,6 +112,8 @@ class FileSnapshotStore:
                 token = content_digest.hexdigest()
                 snapshot_path = root / token
                 os.replace(temporary_path, snapshot_path)
+                if RetainedTextCompression.is_text_mime_type(resolved_mime_type):
+                    RetainedTextCompression.compress_file(snapshot_path)
             finally:
                 temporary_path.unlink(missing_ok=True)
 
@@ -122,7 +126,7 @@ class FileSnapshotStore:
                 type="resource_link",
                 name=name,
                 uri=AnyUrl(f"serena-file://export/{token}"),
-                mimeType=mime_type or "application/octet-stream",
+                mimeType=resolved_mime_type,
                 size=bytes_written,
                 description=description,
             ),
@@ -149,6 +153,9 @@ class FileSnapshotStore:
                 raise FileNotFoundError("Serena file snapshot no longer exists")
             if path.stat().st_size > FILE_EXPORT_MAX_SIZE:
                 raise ValueError(f"File exceeds the {FILE_EXPORT_MAX_SIZE // (1024 * 1024)} MiB export limit")
-            data = path.read_bytes()
+            expected_sha256 = token if len(token) == cls._SHA256_HEX_LENGTH else None
+            data = RetainedTextCompression.read_bytes(path, expected_sha256=expected_sha256)
+            if len(data) > FILE_EXPORT_MAX_SIZE:
+                raise ValueError(f"File exceeds the {FILE_EXPORT_MAX_SIZE // (1024 * 1024)} MiB export limit")
             os.utime(path, None)
             return data
