@@ -72,6 +72,47 @@ def test_overflow_returns_identified_tail_and_full_output_can_be_paged() -> None
         store.close()
 
 
+def test_overflow_preserves_structured_json_for_model_consumption() -> None:
+    store = ToolOutputStore()
+    agent = _agent_with_store(store)
+    overflow_tool = OverflowProbeTool(agent)
+    content = json.dumps(
+        [
+            {
+                "name_path": "Thing/run",
+                "kind": "Method",
+                "relative_path": "src/thing.py",
+                "body_location": {"start_line": 10, "end_line": 900},
+                "body": "def run():\n" + "    value += 1\n" * 800,
+            }
+        ]
+    )
+
+    try:
+        response = overflow_tool.apply(content, max_answer_chars=700)
+        payload = json.loads(response)
+        result = payload["result"]
+
+        assert payload["truncated"] is True
+        assert payload["total_chars"] == len(content)
+        assert isinstance(result, list)
+        assert result[0]["name_path"] == "Thing/run"
+        assert result[0]["kind"] == "Method"
+        assert result[0]["relative_path"] == "src/thing.py"
+        assert result[0]["body_location"] == {"start_line": 10, "end_line": 900}
+        assert "chars omitted" in result[0]["body"]
+        body_lines = result[0]["body"].splitlines()
+        marker_index = next(index for index, line in enumerate(body_lines) if "chars omitted" in line)
+        assert body_lines[marker_index - 1].strip() == "value += 1"
+        assert body_lines[marker_index + 1].strip() == "value += 1"
+
+        retained = store.read(payload["output_id"], offset=0, max_chars=len(content))
+        assert retained.complete is True
+        assert retained.content == content
+    finally:
+        store.close()
+
+
 def test_implicit_budget_uses_approximate_tokens_with_canonical_retained_paging() -> None:
     store = ToolOutputStore()
     agent = _agent_with_store(store)

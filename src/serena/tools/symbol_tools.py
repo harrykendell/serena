@@ -230,7 +230,12 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead):
 
         grouped_symbol_dicts = self.symbol_dict_grouper.group(symbol_dicts)
         result = self._to_json(grouped_symbol_dicts)
-        return self._limit_length(result, max_answer_chars, shortened_result_factories=[create_short_result_relative_path_to_name_paths])
+        return self._limit_length(
+            result,
+            max_answer_chars,
+            shortened_result_factories=[create_short_result_relative_path_to_name_paths],
+            prefer_structured_preview=include_body,
+        )
 
     @classmethod
     def get_param_aliases(cls) -> dict[str, str]:

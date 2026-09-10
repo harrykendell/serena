@@ -13,6 +13,7 @@ from typing import Any
 
 from serena.retention import DEFAULT_SESSION_RETENTION, JobRetentionState, SessionRetentionPolicy
 from serena.storage_compression import RetainedTextCompression
+from serena.structured_output import StructuredOutputCompactor
 
 _FILE_RESOURCE_RE = re.compile(r"serena-file://export/([0-9a-f]{64}|[0-9a-f]{48})(?![0-9a-f])")
 _JOB_ID_RE = re.compile(r'"job_id"\s*:\s*"([0-9a-f]{32})"')
@@ -115,13 +116,7 @@ class ExecutionStore:
     @staticmethod
     def serialize_value(value: object) -> str:
         """Serializes one bounded display-safe execution field for persistence."""
-        try:
-            text = json.dumps(value, ensure_ascii=False, indent=2, default=str)
-        except (TypeError, ValueError):
-            text = str(value)
-        if len(text) <= 8000:
-            return text
-        return f"{text[:3900]}\n... detail omitted ...\n{text[-3900:]}"
+        return StructuredOutputCompactor().serialize_for_storage(value, max_chars=8_000)
 
     def start_execution(
         self,

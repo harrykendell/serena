@@ -307,12 +307,16 @@ def test_activity_tracker_exposes_tool_detail_on_demand() -> None:
 
     assert call_id is not None
     detail = tracker.get_call_detail("conversation-a", run["run_id"], call_id)
+    arguments = json.loads(detail["arguments"])
+    result = json.loads(detail["result"])
+
     assert detail["tool_name"] == "execute_shell_command"
     assert detail["status"] == "completed"
-    assert '"command": "echo hello"' in detail["arguments"]
-    assert "... detail omitted ..." in detail["arguments"]
-    assert '"ok": true' in detail["result"]
-    assert "... detail omitted ..." in detail["result"]
+    assert arguments["command"] == "echo hello"
+    assert "chars omitted" in arguments["payload"]
+    assert result["ok"] is True
+    assert "chars omitted" in result["payload"]
+    assert detail["structured_result"] == result
 
 
 def test_activity_tracker_exposes_typed_shell_result_for_rich_rendering() -> None:
@@ -324,6 +328,38 @@ def test_activity_tracker_exposes_typed_shell_result_for_rich_rendering() -> Non
     assert call_id is not None
     detail = tracker.get_call_detail("conversation-a", run["run_id"], call_id)
     assert detail["structured_result"] == {"return_code": 0, "stdout": "hello"}
+
+
+def test_activity_tracker_preserves_structure_of_large_json_string_result() -> None:
+    tracker = ActivityTracker(_FakeJobSource())
+    run = tracker.start_run("conversation-a", "serena")
+    call_id = tracker.start_tool(
+        "conversation-a",
+        "find_symbol",
+        {"name_path_pattern": "Thing/run", "include_body": True},
+    )
+    symbol_result = json.dumps(
+        [
+            {
+                "name_path": "Thing/run",
+                "kind": "Method",
+                "relative_path": "src/thing.py",
+                "body_location": {"start_line": 10, "end_line": 900},
+                "body": "def run():\n" + "    value += 1\n" * 800,
+            }
+        ]
+    )
+    tracker.finish_tool(call_id, succeeded=True, result=symbol_result)
+
+    assert call_id is not None
+    detail = tracker.get_call_detail("conversation-a", run["run_id"], call_id)
+    stored_result = json.loads(detail["result"])
+
+    assert isinstance(stored_result, list)
+    assert stored_result[0]["name_path"] == "Thing/run"
+    assert stored_result[0]["body_location"] == {"start_line": 10, "end_line": 900}
+    assert "chars omitted" in stored_result[0]["body"]
+    assert detail["structured_result"] == stored_result
 
 
 def test_activity_tracker_exposes_media_without_serialized_payload_text() -> None:
