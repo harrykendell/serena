@@ -357,23 +357,17 @@ class ActivityDetailFormatter:
         return None
 
     def parse_result(self, result: str | None) -> Any:
-        """Decodes a persisted tool result into the typed value intended for rich rendering."""
+        """Decodes exactly one persisted JSON layer for lossless rich rendering."""
         if result is None:
             return None
 
-        # unwrap persistence JSON and one nested JSON-string tool result when present
-        value: Any = result
-        for _ in range(2):
-            if not isinstance(value, str):
-                break
-            text = value.strip()
-            if not text:
-                return ""
-            try:
-                value = json.loads(text)
-            except json.JSONDecodeError:
-                break
-        return self._json_safe_literal(value)
+        text = result.strip()
+        if not text:
+            return ""
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return result
 
     @classmethod
     def _json_safe_literal(cls, value: Any) -> Any:
@@ -663,7 +657,7 @@ class ActivityTracker:
         return payload
 
     def get_call_detail(self, session_id: str, run_id: str, call_id: str) -> dict[str, Any]:
-        """Returns bounded parameters and result detail for one execution in a session-owned run."""
+        """Returns parameters and the persisted canonical result for one session-owned execution."""
         record = self._execution_in_run(session_id, run_id, call_id)
         media = ActivityMedia.from_storage_dict(record.media)
         formatter = ActivityDetailFormatter()
@@ -1027,6 +1021,9 @@ def activity_widget_html() -> str:
   .detail-block + .detail-block { margin-top: 5px; }
   .detail-label { display: block; margin-bottom: 2px; color: color-mix(in srgb, #00491e 82%, CanvasText); font-size: 10px; font-weight: 700; letter-spacing: .035em; text-transform: uppercase; }
   .detail-value { margin: 0; min-width: 0; overflow: visible; }
+  .result-retained { display: flex; flex-wrap: wrap; gap: 3px 5px; align-items: baseline; margin: 0 0 5px; padding: 4px 6px; border: 1px solid color-mix(in srgb, #b45309 24%, transparent); border-radius: 5px; background: color-mix(in srgb, #b45309 7%, transparent); font-size: 10px; line-height: 1.35; }
+  .result-retained code { min-width: 0; font: 10px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+  .result-retained .rich-copy { margin-left: auto; }
   .rich-value { font-size: 10.5px; line-height: 1.4; }
   .rich-structure { display: grid; gap: 3px; min-width: 0; }
   .rich-field { display: grid; grid-template-columns: minmax(44px, 20%) minmax(0, 1fr); gap: 6px; align-items: start; min-width: 0; padding: 2px 0; border-bottom: 1px solid color-mix(in srgb, CanvasText 5%, transparent); }
@@ -1523,11 +1520,6 @@ def activity_widget_html() -> str:
     }
 
     const text = String(value);
-    const parsed = parsedJsonValue(text);
-    if (parsed.parsed) {
-      appendStructuredValue(container, parsed.value, 0, key);
-      return;
-    }
     if (looksLikeCode(text, key)) {
       appendCodeBlock(container, text, key);
       return;
@@ -1607,6 +1599,25 @@ def activity_widget_html() -> str:
     else appendScalarValue(container, rawValue ?? "");
   }
 
+  function updateRetainedResultNotice(container, structuredValue) {
+    container.replaceChildren();
+    const metadata = structuredValue && typeof structuredValue === "object" && !Array.isArray(structuredValue)
+      && structuredValue.truncated === true && typeof structuredValue.output_id === "string" && structuredValue.output_id
+      ? structuredValue
+      : null;
+    container.hidden = !metadata;
+    if (!metadata) return;
+
+    const label = document.createElement("span");
+    const size = typeof metadata.total_chars === "number" ? ` · ${metadata.total_chars.toLocaleString()} chars` : "";
+    label.textContent = `Centrally truncated${size} · full result retained as`;
+    const outputId = document.createElement("code");
+    outputId.textContent = metadata.output_id;
+    const copy = copyButton(metadata.output_id);
+    copy.textContent = "Copy ID";
+    container.append(label, outputId, copy);
+  }
+
   async function loadToolDetail(row) {
     const refs = row._activityRefs;
     const callId = row.dataset.callId;
@@ -1622,12 +1633,18 @@ def activity_widget_html() -> str:
       renderRichValue(refs.arguments, detail.arguments || "{}", detail.structured_arguments);
       const hasMedia = Boolean(detail.media);
       refs.result.parentElement.hidden = hasMedia;
-      if (hasMedia) refs.result.replaceChildren();
-      else renderRichValue(
-        refs.result,
-        detail.result ?? (detail.status === "running" ? "Tool is still running." : "No result returned."),
-        detail.structured_result,
-      );
+      if (hasMedia) {
+        refs.resultNotice.hidden = true;
+        refs.resultNotice.replaceChildren();
+        refs.result.replaceChildren();
+      } else {
+        updateRetainedResultNotice(refs.resultNotice, detail.structured_result);
+        renderRichValue(
+          refs.result,
+          detail.result ?? (detail.status === "running" ? "Tool is still running." : "No result returned."),
+          detail.structured_result,
+        );
+      }
       await loadToolMedia(row, detail.media);
       refs.loading.hidden = true;
       refs.content.hidden = false;
@@ -1779,6 +1796,7 @@ def activity_widget_html() -> str:
     const content = document.createElement("div");
     content.hidden = true;
     let argumentsValue = null;
+    let resultNotice = null;
     let resultValue = null;
     let mediaBlock = null;
     let mediaImage = null;
@@ -1828,9 +1846,12 @@ def activity_widget_html() -> str:
       const resultLabel = document.createElement("span");
       resultLabel.className = "detail-label";
       resultLabel.textContent = "Result";
+      resultNotice = document.createElement("div");
+      resultNotice.className = "result-retained";
+      resultNotice.hidden = true;
       resultValue = document.createElement("div");
       resultValue.className = "detail-value rich-value";
-      resultBlock.append(resultLabel, resultValue);
+      resultBlock.append(resultLabel, resultNotice, resultValue);
 
       mediaBlock = document.createElement("div");
       mediaBlock.className = "detail-block detail-media";
@@ -1892,6 +1913,7 @@ def activity_widget_html() -> str:
       loading,
       content,
       arguments: argumentsValue,
+      resultNotice,
       result: resultValue,
       mediaBlock,
       mediaImage,

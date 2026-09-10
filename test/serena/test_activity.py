@@ -356,12 +356,27 @@ def test_activity_tracker_exposes_typed_shell_result_for_rich_rendering() -> Non
     tracker = ActivityTracker(_FakeJobSource())
     run = tracker.start_run("conversation-a", "serena")
     call_id = tracker.start_tool("conversation-a", "execute_shell_command", {"command": "printf hello"})
-    logical_result = '{"return_code": 0, "stdout": "hello"}'
-    tracker.finish_tool(call_id, succeeded=True, result_serialization=json.dumps(logical_result))
+    canonical_result = '{"return_code":0,"stdout":"hello"}'
+    tracker.finish_tool(call_id, succeeded=True, result_serialization=canonical_result)
 
     assert call_id is not None
     detail = tracker.get_call_detail("conversation-a", run["run_id"], call_id)
+    assert detail["result"] == canonical_result
     assert detail["structured_result"] == {"return_code": 0, "stdout": "hello"}
+
+
+def test_activity_tracker_preserves_json_looking_string_result_for_rich_rendering() -> None:
+    tracker = ActivityTracker(_FakeJobSource())
+    run = tracker.start_run("conversation-a", "serena")
+    call_id = tracker.start_tool("conversation-a", "read_file", {"relative_path": "payload.txt"})
+    logical_result = '{"message": "this is text, not a structured result"}'
+    canonical_result = json.dumps(logical_result)
+    tracker.finish_tool(call_id, succeeded=True, result_serialization=canonical_result)
+
+    assert call_id is not None
+    detail = tracker.get_call_detail("conversation-a", run["run_id"], call_id)
+    assert detail["result"] == canonical_result
+    assert detail["structured_result"] == logical_result
 
 
 def test_activity_tracker_preserves_canonical_result_serialization_byte_for_byte() -> None:

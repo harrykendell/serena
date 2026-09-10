@@ -1,6 +1,6 @@
 # Serena Central Result Presentation Plan
 
-Status: C00-C06 COMPLETE (2026-09-10); C07 NEXT
+Status: C00-C07 COMPLETE (2026-09-10); C08 NEXT
 
 Scope: successful Serena tool results, retained-output paging, MCP transport, `ExecutionStore`, activity/dashboard inspection, and the removal of tool-local presentation truncation.
 
@@ -411,6 +411,15 @@ Completion condition: tool schemas no longer expose the implementation detail of
 Add one visible marker/control for centrally truncated results so the dashboard can clearly expose the `output_id` and, later if desired, an explicit full-retained-output view.
 
 Completion condition: inspecting a tool call on the dashboard shows the same fields, omission markers, and preview text that the model received.
+
+#### C07 completion captured 2026-09-10
+
+- Confirmed successful execution records already persist the C01/C02 canonical presentation directly after C03; the remaining 8k execution-store compaction is restricted to auxiliary arguments/errors and is not applied to successful results.
+- `ActivityDetailFormatter.parse_result()` now decodes exactly one persistence JSON layer. Canonical structured values remain typed, while JSON-looking logical strings remain strings instead of being reinterpreted into a different dashboard value.
+- Both inline activity and the retained dashboard expose the persisted `result` unchanged and use `structured_result` only as the lossless one-layer parsed rendering of that same serialization.
+- Rich rendering no longer recursively parses JSON-looking string leaves. Existing code/output/path/scalar rendering therefore changes layout only; multiline text and code/output lines wrap without horizontal clipping, while nested structures may collapse locally without dropping fields.
+- Centrally truncated envelopes now show a visible retained-result notice with `total_chars`, the exact `output_id`, and a Copy ID control while still rendering the complete canonical preview envelope underneath.
+- Validation completed with `uv run poe format`, `uv run poe type-check`, `uv run poe test` (`800 passed, 265 deselected`), and a Node syntax check of the generated activity-widget JavaScript.
 
 ### C08 — Behavioural equivalence and retention tests
 

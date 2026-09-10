@@ -709,7 +709,7 @@ class SerenaMCPFactory:
         @mcp.tool(
             name="get_activity_detail",
             title="Get Serena Activity Detail",
-            description="Returns bounded detail for one Serena tool call. Intended for the activity app only.",
+            description="Returns parameters and the persisted canonical result for one Serena tool call. Intended for the activity app only.",
             annotations=ToolAnnotations(title="Get Serena Activity Detail", readOnlyHint=True, destructiveHint=False),
             meta={
                 "ui": {"visibility": ["app"]},

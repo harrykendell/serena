@@ -363,7 +363,7 @@ class DashboardSerenaActivityOverview:
         return hashlib.blake2s("\x1f".join(parts).encode("utf-8"), digest_size=8).hexdigest()
 
     def get_call_detail(self, panel_id: str, call_id: str) -> dict[str, Any]:
-        """Returns one retained tool call's bounded detail."""
+        """Returns one retained tool call with its persisted canonical result unchanged."""
         call = self._archive.get_call(panel_id, call_id)
         media = ActivityMedia.from_storage_dict(call.get("media")) or ActivityMedia.from_serialized_result(str(call.get("result") or ""))
         parameters = str(call.get("parameters") or "")
