@@ -13,9 +13,10 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, ResourceLink
 
 from serena.execution_store import ExecutionRecord, ExecutionStore
+from serena.git_metrics import GitMetricsSource
 from serena.jobs import JobManager, JobRecord, JobSnapshot, JobStatus
 
-ACTIVITY_RESOURCE_URI = "ui://serena/activity-v29.html"
+ACTIVITY_RESOURCE_URI = "ui://serena/activity-v31.html"
 _ACTIVITY_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
 _MAX_RUNS = 128
 
@@ -354,9 +355,11 @@ class ActivityTracker:
         self,
         job_source: ActivityJobSource | None = None,
         execution_store: ExecutionStore | None = None,
+        git_metrics_source: GitMetricsSource | None = None,
     ) -> None:
         self._lock = threading.RLock()
         self._job_source = job_source or JobManager()
+        self._git_metrics_source = git_metrics_source
         self._job_cache_at = 0.0
         self._job_cache: list[JobRecord] = []
         self._temporary_store_dir: TemporaryDirectory[str] | None = None
@@ -376,9 +379,9 @@ class ActivityTracker:
         return self._execution_store
 
     def start_run(self, session_id: str, project_name: str) -> dict[str, Any]:
-        """Starts a new activity panel run for ``session_id`` and returns its snapshot."""
+        """Starts a new activity panel run for ``session_id`` with freshly measured Git metrics."""
         run = self._execution_store.start_activity_run(session_id, project_name)
-        return self.get_run(session_id, run.run_id)
+        return self.get_run(session_id, run.run_id, refresh_git_metrics=True)
 
     def update_project(self, session_id: str, project_name: str) -> None:
         """Updates project attribution for the current activity run and session."""
@@ -462,7 +465,7 @@ class ActivityTracker:
                 self._execution_store.update_activity_run_jobs(run.run_id, job_ids=next_job_ids)
             self._job_cache_at = 0.0
 
-    def get_run(self, session_id: str, run_id: str) -> dict[str, Any]:
+    def get_run(self, session_id: str, run_id: str, *, refresh_git_metrics: bool = False) -> dict[str, Any]:
         """Returns one session-owned activity run enriched with its relevant durable jobs."""
         run = self._execution_store.get_activity_run(run_id)
         if run is None or run.session_id != session_id:
@@ -474,10 +477,19 @@ class ActivityTracker:
             if (record := self._execution_store.get_execution(execution_id)) is not None
         ]
         session = self._execution_store.get_session_by_panel_id(self._execution_store.panel_id_for_session(session_id))
+        if self._git_metrics_source is None:
+            git_metrics = None
+        elif refresh_git_metrics:
+            git_metrics = self._git_metrics_source.refresh_project_git_metrics(run.project_name)
+        else:
+            git_metrics = self._git_metrics_source.get_project_git_metrics(run.project_name)
         payload: dict[str, Any] = {
             "run_id": run.run_id,
             "project_name": run.project_name,
             "session_title": session.display_name if session is not None else "",
+            "git_additions": git_metrics.additions if git_metrics is not None else 0,
+            "git_deletions": git_metrics.deletions if git_metrics is not None else 0,
+            "git_ahead_commits": git_metrics.ahead_commits if git_metrics is not None else None,
             "started_at": run.started_at,
             "superseded": run.superseded,
             "calls": calls,
@@ -736,7 +748,7 @@ def activity_widget_html() -> str:
       </span>
       <span class="header-overview">
         <strong id="activity-header-title">Serena</strong>
-        <span id="activity-header-stats" class="header-stats">0 tools · 0 jobs</span>
+        <span id="activity-header-stats" class="header-stats"><span id="activity-header-stats-base" class="header-stats-base">0 tools · 0 jobs</span><span id="activity-header-git" class="header-git"></span></span>
       </span>
     </span>
     <span class="header-meta">
@@ -789,8 +801,13 @@ def activity_widget_html() -> str:
   .header-tool-line { min-width: 0; display: flex; gap: 5px; align-items: baseline; overflow: hidden; }
   #activity-header-tool { flex: 0 0 auto; white-space: nowrap; }
   .header-scope { min-width: 0; flex: 1 1 0; overflow: hidden; direction: rtl; text-align: left; text-overflow: ellipsis; white-space: nowrap; font: 10.5px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .48; }
-  .header-detail, .header-stats { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; line-height: 1.2; opacity: .58; }
+  .header-detail, .header-stats { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; line-height: 1.2; }
+  .header-detail, .header-stats-base { opacity: .58; }
   .header-detail { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .header-git { margin-left: 5px; font-variant-numeric: tabular-nums; }
+  .git-additions { color: #1a7f37; }
+  .git-deletions { margin-left: 4px; color: #cf222e; }
+  .git-ahead { margin-left: 4px; color: CanvasText; }
   .header-meta { justify-self: end; min-width: 0; }
   .header-times { display: grid; gap: 1px; justify-items: end; }
   .header-submitted, .summary, .header-duration { white-space: nowrap; font-size: 11px; font-variant-numeric: tabular-nums; }
@@ -884,7 +901,7 @@ def activity_widget_html() -> str:
   .other-jobs:hover { opacity: .78; }
   .empty { padding: 5px 0 2px; opacity: .58; }
   @keyframes pulse { 50% { opacity: .28; } }
-  @media (prefers-color-scheme: dark) { .logo { color: #70c990; } .call.running .status, .job-entry.running .status { color: #70c990; } }
+  @media (prefers-color-scheme: dark) { .logo { color: #70c990; } .call.running .status, .job-entry.running .status { color: #70c990; } .git-additions { color: #3fb950; } .git-deletions { color: #f85149; } }
   @media (prefers-reduced-motion: reduce) { .call.running .status { animation: none; } .chevron, .other-jobs-chevron, .row-chevron { transition: none; } }
   @media (max-width: 520px) {
     body { font-size: 12px; }
@@ -913,6 +930,8 @@ def activity_widget_html() -> str:
   const headerDetail = document.getElementById("activity-header-detail");
   const headerTitle = document.getElementById("activity-header-title");
   const headerStats = document.getElementById("activity-header-stats");
+  const headerStatsBase = document.getElementById("activity-header-stats-base");
+  const headerGit = document.getElementById("activity-header-git");
   const headerSubmitted = document.getElementById("activity-header-submitted");
   const headerElapsed = document.getElementById("activity-header-elapsed");
   const headerDuration = document.getElementById("activity-header-duration");
@@ -1846,8 +1865,37 @@ def activity_widget_html() -> str:
     headerTitle.textContent = sessionTitle;
     headerTitle.title = sessionTitle;
     const projectName = next.project_name || "no project";
-    headerStats.textContent = `${countLabel(toolCount, "tool")} · ${countLabel(jobCount, "job")} · ${projectName}`;
-    headerStats.title = headerStats.textContent;
+    const statsBase = `${countLabel(toolCount, "tool")} · ${countLabel(jobCount, "job")} · ${projectName}`;
+    headerStatsBase.textContent = statsBase;
+    const gitAdditions = Number.isFinite(next.git_additions) ? next.git_additions : 0;
+    const gitDeletions = Number.isFinite(next.git_deletions) ? next.git_deletions : 0;
+    const gitAheadCommits = Number.isFinite(next.git_ahead_commits) ? next.git_ahead_commits : 0;
+    const hasGitMetrics = gitAdditions > 0 || gitDeletions > 0 || gitAheadCommits > 0;
+    headerGit.replaceChildren();
+    if (hasGitMetrics) {
+      const separator = document.createTextNode(" · ");
+      headerGit.append(separator);
+      if (gitAdditions > 0 || gitDeletions > 0) {
+        const additions = document.createElement("span");
+        additions.className = "git-additions";
+        additions.textContent = `+${gitAdditions}`;
+        const deletions = document.createElement("span");
+        deletions.className = "git-deletions";
+        deletions.textContent = `-${gitDeletions}`;
+        headerGit.append(additions, deletions);
+      }
+      if (gitAheadCommits > 0) {
+        const ahead = document.createElement("span");
+        ahead.className = "git-ahead";
+        ahead.textContent = `(+${gitAheadCommits})`;
+        headerGit.append(ahead);
+      }
+    }
+    const gitTitle = [
+      gitAdditions > 0 || gitDeletions > 0 ? `+${gitAdditions} -${gitDeletions}` : "",
+      gitAheadCommits > 0 ? `(+${gitAheadCommits} commits ahead)` : "",
+    ].filter(Boolean).join(" ");
+    headerStats.title = `${statsBase}${gitTitle ? ` · ${gitTitle}` : ""}`;
 
     headerDuration.textContent = submissionSpan(next);
     headerDuration.title = headerDuration.textContent ? "Time between first and latest submitted tool" : "";

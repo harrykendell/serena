@@ -5,6 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from serena.execution import ProjectExecutionCoordinator, RuntimeReadiness
+from serena.git_metrics import GitProjectMetrics
 from serena.ls_manager import LanguageServerManager
 from serena.memories.memory_manager import MemoryManager
 from serena.project import Project
@@ -60,6 +61,7 @@ class ProjectRuntime:
 
     project: Project
     active_tools: AvailableTools
+    git_metrics: GitProjectMetrics
     execution_coordinator: ProjectExecutionCoordinator = field(default_factory=ProjectExecutionCoordinator)
     readiness: RuntimeReadiness = field(default_factory=RuntimeReadiness)
     prompt_status: ProjectPromptStatus = field(default_factory=ProjectPromptStatus)

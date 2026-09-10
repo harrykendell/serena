@@ -31,6 +31,7 @@ from serena.execution import (
     reset_execution_id,
 )
 from serena.execution_store import ExecutionStore
+from serena.git_metrics import GitLineMetrics, GitProjectMetrics
 from serena.jobs import JobManager
 from serena.ls_manager import LanguageServerManager
 from serena.memories.memory_manager import MemoryManager
@@ -207,6 +208,31 @@ class SerenaAgent:
     def execution_store(self) -> ExecutionStore:
         """Returns the authoritative persisted Serena execution/session store."""
         return self._execution_store
+
+    def get_project_git_metrics(self, project_name: str) -> GitLineMetrics | None:
+        """Returns cached Git line metrics for one loaded project without performing Git work."""
+        runtime = self._get_project_runtime_by_name(project_name)
+        return runtime.git_metrics.current if runtime is not None else None
+
+    def refresh_project_git_metrics(self, project_name: str) -> GitLineMetrics | None:
+        """Recomputes Git line metrics for one loaded project."""
+        runtime = self._get_project_runtime_by_name(project_name)
+        if runtime is None:
+            return None
+        try:
+            return runtime.git_metrics.refresh()
+        except Exception as error:
+            log.warning("Could not refresh Git state for %s: %s", project_name, error)
+            return runtime.git_metrics.current
+
+    def _get_project_runtime_by_name(self, project_name: str) -> ProjectRuntime | None:
+        """Returns the unique loaded runtime named ``project_name``."""
+        if not project_name:
+            return None
+        matches = [runtime for runtime in self._session_registry.get_runtimes() if runtime.project.project_name == project_name]
+        if len(matches) != 1:
+            return None
+        return matches[0]
 
     @property
     def tool_output_store(self) -> ToolOutputStore:
@@ -447,6 +473,7 @@ class SerenaAgent:
         return ProjectRuntime(
             project=project,
             active_tools=self._create_active_tools_for_project(project),
+            git_metrics=GitProjectMetrics(project.project_root),
         )
 
     def _start_project_runtime_initialization(self, runtime: ProjectRuntime) -> None:
@@ -516,7 +543,19 @@ class SerenaAgent:
                 with self.session_context(session_id):
                     if runtime is not None and access is not ExecutionAccess.SESSION_CONTROL:
                         runtime.readiness.wait_until_ready()
-                    return coordinator.execute(access, call, symbolic_read=symbolic_read)
+
+                    def coordinated_call() -> T:
+                        if access is not ExecutionAccess.WRITE or runtime is None or project is None:
+                            return call()
+                        try:
+                            return call()
+                        finally:
+                            try:
+                                runtime.git_metrics.refresh()
+                            except Exception as error:
+                                log.warning("Could not refresh Git state for %s: %s", project.project_name, error)
+
+                    return coordinator.execute(access, coordinated_call, symbolic_read=symbolic_read)
             finally:
                 if access is not ExecutionAccess.READ:
                     try:

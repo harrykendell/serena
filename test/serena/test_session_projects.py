@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import shutil
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -19,6 +20,7 @@ from serena.agent import SerenaAgent
 from serena.config.serena_config import ProjectConfig, RegisteredProject, SerenaConfig
 from serena.errors import UserFacingError
 from serena.execution import ExecutionAccess
+from serena.git_metrics import GitLineMetrics
 from serena.mcp import SerenaMCPFactory
 from serena.project import Project
 from serena.tools import (
@@ -1588,6 +1590,34 @@ def test_same_project_writes_are_serialized(
     assert second_entered.is_set()
     assert (roots["project_a"] / "first.txt").read_text() == "first"
     assert (roots["project_a"] / "second.txt").read_text() == "second"
+
+
+def test_git_metrics_refresh_after_write_but_not_read(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
+) -> None:
+    agent, roots = multi_project_agent
+    root = roots["project_a"]
+    subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "serena@example.invalid"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Serena Test"], cwd=root, check=True)
+    tracked = root / "tracked.txt"
+    tracked.write_text("base\n")
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True, capture_output=True, text=True)
+
+    _activate(agent, "session-a", "project_a")
+    assert agent.get_project_git_metrics("project_a") is None
+
+    tracked.write_text("changed\nextra\n")
+    agent.get_tool(ReadFileTool).apply_ex(relative_path="tracked.txt", mcp_ctx=_mcp_context("session-a"))
+    assert agent.get_project_git_metrics("project_a") is None
+
+    agent.get_tool(CreateTextFileTool).apply_ex(
+        relative_path="new.txt",
+        content="new\n",
+        mcp_ctx=_mcp_context("session-a"),
+    )
+    assert agent.get_project_git_metrics("project_a") == GitLineMetrics(additions=3, deletions=1)
 
 
 def test_timed_out_writer_keeps_exclusion_until_operation_stops(

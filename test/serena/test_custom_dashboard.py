@@ -8,6 +8,7 @@ from orchestrator.config import OrchestratorConfig
 from orchestrator.dashboard_sessions import OrchestratorDashboardSessionArchive
 from serena.dashboard import DashboardServer
 from serena.execution_store import ExecutionStore
+from serena.git_metrics import GitLineMetrics
 from serena.jobs import JobManager
 from solidlsp.ls_config import LanguageServerId
 
@@ -34,6 +35,16 @@ class _DashboardAgent:
 
     def get_exposed_tool_instances(self):
         return []
+
+    @staticmethod
+    def get_project_git_metrics(project_name: str) -> GitLineMetrics | None:
+        if project_name == "serena":
+            return GitLineMetrics(additions=17, deletions=4, ahead_commits=3)
+        return None
+
+    @staticmethod
+    def refresh_project_git_metrics(project_name: str) -> GitLineMetrics | None:
+        return _DashboardAgent.get_project_git_metrics(project_name)
 
 
 def test_dashboard_serves_kendell_frontend_and_session_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -159,12 +170,18 @@ def test_dashboard_bootstraps_inactive_serena_panels_with_compact_history(tmp_pa
     assert state["summary_only"] is True
     assert state["tool_count"] == 12
     assert state["submission_span_seconds"] == 11.0
+    assert state["git_additions"] == 17
+    assert state["git_deletions"] == 4
+    assert state["git_ahead_commits"] == 3
     assert len(state["calls"]) == 8
     assert state["calls"][-1]["scope"] == "file-12.txt"
 
     full_state = client.get(f"/dashboard/api/serena/panels/{panel['panel_id']}").get_json()
     assert full_state["summary_only"] is False
     assert full_state["submission_span_seconds"] == 11.0
+    assert full_state["git_additions"] == 17
+    assert full_state["git_deletions"] == 4
+    assert full_state["git_ahead_commits"] == 3
     assert len(full_state["calls"]) == 12
 
 

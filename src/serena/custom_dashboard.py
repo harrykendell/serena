@@ -21,6 +21,7 @@ from orchestrator.delegates import DelegateError, DelegateStore
 from serena.activity import ActivityDetailFormatter, ActivityMedia
 from serena.dashboard_activity import DashboardActivityArchive, DashboardActivitySessionSummary
 from serena.dashboard_widgets import orchestrator_dashboard_widget_html, serena_dashboard_widget_html
+from serena.git_metrics import GitLineMetrics, GitMetricsSource
 from serena.jobs import JobManager, JobStatus
 from serena.tools.media_tools import read_result_file_link
 
@@ -188,9 +189,11 @@ class DashboardSerenaActivityOverview:
         self,
         archive: DashboardActivityArchive,
         job_overview: DashboardJobOverview,
+        git_metrics_source: GitMetricsSource | None = None,
     ) -> None:
         self._archive = archive
         self._job_overview = job_overview
+        self._git_metrics_source = git_metrics_source
         self._activity_formatter = ActivityDetailFormatter()
         self._jobs_cache_lock = threading.Lock()
         self._jobs_cache_at = 0.0
@@ -203,17 +206,18 @@ class DashboardSerenaActivityOverview:
         for summary in self._archive.list_session_summaries():
             job_ids = list(summary.job_ids)
             active = summary.has_active_calls or any(jobs.get(job_id, {}).get("status") == "running" for job_id in job_ids)
+            git_metrics = self._git_metrics(summary.project_name)
             panel = {
                 "panel_id": summary.panel_id,
                 "project_name": summary.project_name,
                 "display_name": summary.display_name,
                 "started_at": summary.started_at,
                 "updated_at": summary.updated_at,
-                "revision": self._summary_revision(summary, jobs),
+                "revision": self._summary_revision(summary, jobs, git_metrics),
                 "active": active,
             }
             if include_state:
-                panel["initial_state"] = self._summary_panel_state(summary, jobs)
+                panel["initial_state"] = self._summary_panel_state(summary, jobs, git_metrics)
             panels.append(panel)
         panels.sort(key=lambda item: (float(item.get("started_at") or 0.0), str(item["panel_id"])), reverse=True)
         return {"status": "success", "panels": panels}
@@ -221,12 +225,14 @@ class DashboardSerenaActivityOverview:
     def get_panel(self, panel_id: str, changed_since: float | None = None) -> dict[str, Any]:
         """Returns one retained Serena session, optionally restricted to changes after ``changed_since``."""
         session = self._archive.get_session(panel_id)
-        return self._panel_state(session, self._jobs_by_id(), changed_since=changed_since)
+        git_metrics = self._git_metrics(str(session.get("project_name") or ""))
+        return self._panel_state(session, self._jobs_by_id(), git_metrics, changed_since=changed_since)
 
     def _summary_panel_state(
         self,
         summary: DashboardActivitySessionSummary,
         jobs: dict[str, dict[str, Any]],
+        git_metrics: GitLineMetrics,
     ) -> dict[str, Any]:
         """Returns bounded first-paint state for one retained session."""
         visible_jobs = [self._job_payload(jobs[job_id]) for job_id in summary.job_ids if job_id in jobs]
@@ -257,7 +263,7 @@ class DashboardSerenaActivityOverview:
             "session_title": summary.display_name,
             "started_at": summary.started_at,
             "updated_at": summary.updated_at,
-            "revision": self._summary_revision(summary, jobs),
+            "revision": self._summary_revision(summary, jobs, git_metrics),
             "superseded": False,
             "summary_only": True,
             "partial": False,
@@ -265,6 +271,9 @@ class DashboardSerenaActivityOverview:
             "tool_count": summary.tool_count,
             "job_count": len(visible_jobs),
             "submission_span_seconds": summary.submission_span_seconds,
+            "git_additions": git_metrics.additions,
+            "git_deletions": git_metrics.deletions,
+            "git_ahead_commits": git_metrics.ahead_commits,
             "calls": calls,
             "jobs": payload_jobs,
         }
@@ -273,6 +282,7 @@ class DashboardSerenaActivityOverview:
         self,
         session: dict[str, Any],
         jobs: dict[str, dict[str, Any]],
+        git_metrics: GitLineMetrics,
         *,
         summary: bool = False,
         changed_since: float | None = None,
@@ -301,13 +311,16 @@ class DashboardSerenaActivityOverview:
             "session_title": session.get("display_name") or "",
             "started_at": session.get("started_at"),
             "updated_at": float(session.get("updated_at") or 0.0),
-            "revision": self._panel_revision(session, jobs, job_ids),
+            "revision": self._panel_revision(session, jobs, job_ids, git_metrics),
             "superseded": False,
             "summary_only": summary,
             "partial": changed_since is not None and not summary,
             "tool_count": len(calls),
             "job_count": len(visible_jobs),
             "submission_span_seconds": DashboardActivitySessionSummary.compute_submission_span(calls),
+            "git_additions": git_metrics.additions,
+            "git_deletions": git_metrics.deletions,
+            "git_ahead_commits": git_metrics.ahead_commits,
             "calls": [self._call_payload(call) for call in payload_calls],
             "jobs": payload_jobs,
         }
@@ -327,9 +340,15 @@ class DashboardSerenaActivityOverview:
     def _summary_revision(
         summary: DashboardActivitySessionSummary,
         jobs: dict[str, dict[str, Any]],
+        git_metrics: GitLineMetrics,
     ) -> str:
-        """Returns a compact revision from retained-session metadata and visible jobs."""
-        parts = [str(summary.updated_at)]
+        """Returns a compact revision from retained-session, Git, and visible-job state."""
+        parts = [
+            str(summary.updated_at),
+            str(git_metrics.additions),
+            str(git_metrics.deletions),
+            str(git_metrics.ahead_commits),
+        ]
         for job_id in summary.job_ids:
             item = jobs.get(job_id)
             if item is None:
@@ -345,9 +364,19 @@ class DashboardSerenaActivityOverview:
         return hashlib.blake2s("\x1f".join(parts).encode("utf-8"), digest_size=8).hexdigest()
 
     @staticmethod
-    def _panel_revision(session: dict[str, Any], jobs: dict[str, dict[str, Any]], job_ids: list[str]) -> str:
-        """Returns a compact revision that changes with visible tool or job state."""
-        parts = [str(session.get("updated_at") or 0.0)]
+    def _panel_revision(
+        session: dict[str, Any],
+        jobs: dict[str, dict[str, Any]],
+        job_ids: list[str],
+        git_metrics: GitLineMetrics,
+    ) -> str:
+        """Returns a compact revision that changes with visible tool, Git, or job state."""
+        parts = [
+            str(session.get("updated_at") or 0.0),
+            str(git_metrics.additions),
+            str(git_metrics.deletions),
+            str(git_metrics.ahead_commits),
+        ]
         for job_id in job_ids:
             item = jobs.get(job_id)
             if item is None:
@@ -361,6 +390,13 @@ class DashboardSerenaActivityOverview:
                 )
             )
         return hashlib.blake2s("\x1f".join(parts).encode("utf-8"), digest_size=8).hexdigest()
+
+    def _git_metrics(self, project_name: str) -> GitLineMetrics:
+        """Returns current Git metrics for a panel project, defaulting to a clean state."""
+        if self._git_metrics_source is None or not project_name:
+            return GitLineMetrics()
+        metrics = self._git_metrics_source.get_project_git_metrics(project_name)
+        return metrics or GitLineMetrics()
 
     def get_call_detail(self, panel_id: str, call_id: str) -> dict[str, Any]:
         """Returns one retained tool call with its persisted canonical result unchanged."""
@@ -566,6 +602,7 @@ class CustomDashboard:
         self._serena_activity_overview = DashboardSerenaActivityOverview(
             self._activity_archive,
             self._job_overview,
+            git_metrics_source=agent,
         )
         self._orchestrator_overview = DashboardOrchestratorOverview()
         self._register_routes(app)

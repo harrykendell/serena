@@ -14,6 +14,7 @@ from pydantic import AnyUrl
 
 from serena.activity import ACTIVITY_RESOURCE_URI, ActivityTracker, register_activity_resource
 from serena.execution_store import ExecutionStore
+from serena.git_metrics import GitLineMetrics
 from serena.jobs import JobOutputChunk, JobRecord, JobRuntimeInfo, JobSnapshot, JobStatus
 from serena.mcp import SerenaMCPFactory
 from serena.session import get_mcp_session_id
@@ -113,6 +114,36 @@ class _FakeJobSource:
         )
 
 
+class _FixedGitMetricsSource:
+    """Provides deterministic cached Git metrics without repository access."""
+
+    def get_project_git_metrics(self, project_name: str) -> GitLineMetrics | None:
+        if project_name == "serena":
+            return GitLineMetrics(additions=12, deletions=4, ahead_commits=3)
+        return None
+
+    def refresh_project_git_metrics(self, project_name: str) -> GitLineMetrics | None:
+        return self.get_project_git_metrics(project_name)
+
+
+class _RefreshingGitMetricsSource:
+    """Exposes distinct cached and refreshed metrics for activity polling tests."""
+
+    def __init__(self) -> None:
+        self.refresh_calls = 0
+
+    def get_project_git_metrics(self, project_name: str) -> GitLineMetrics | None:
+        if project_name == "serena":
+            return GitLineMetrics(additions=1, deletions=1, ahead_commits=1)
+        return None
+
+    def refresh_project_git_metrics(self, project_name: str) -> GitLineMetrics | None:
+        self.refresh_calls += 1
+        if project_name == "serena":
+            return GitLineMetrics(additions=8, deletions=3, ahead_commits=4)
+        return None
+
+
 def _job_record(job_id: str, label: str, status: JobStatus = JobStatus.RUNNING, project_name: str = "thesis") -> JobRecord:
     now = datetime.now(UTC).isoformat()
     return JobRecord(
@@ -129,7 +160,7 @@ def _job_record(job_id: str, label: str, status: JobStatus = JobStatus.RUNNING, 
 
 
 def test_activity_tracker_records_tool_lifecycle() -> None:
-    tracker = ActivityTracker(_FakeJobSource())
+    tracker = ActivityTracker(_FakeJobSource(), git_metrics_source=_FixedGitMetricsSource())
     run = tracker.start_run("conversation-a", "serena")
 
     call_id = tracker.start_tool(
@@ -141,6 +172,9 @@ def test_activity_tracker_records_tool_lifecycle() -> None:
 
     snapshot = tracker.get_run("conversation-a", run["run_id"])
     assert snapshot["project_name"] == "serena"
+    assert snapshot["git_additions"] == 12
+    assert snapshot["git_deletions"] == 4
+    assert snapshot["git_ahead_commits"] == 3
     assert snapshot["calls"] == [
         {
             "call_id": call_id,
@@ -153,6 +187,29 @@ def test_activity_tracker_records_tool_lifecycle() -> None:
         }
     ]
     assert snapshot["calls"][0]["finished_at"] is not None
+
+
+def test_activity_run_refreshes_git_metrics_only_when_requested() -> None:
+    source = _RefreshingGitMetricsSource()
+    tracker = ActivityTracker(_FakeJobSource(), git_metrics_source=source)
+
+    run = tracker.start_run("conversation-a", "serena")
+    assert source.refresh_calls == 1
+    assert run["git_additions"] == 8
+    assert run["git_deletions"] == 3
+    assert run["git_ahead_commits"] == 4
+
+    cached = tracker.get_run("conversation-a", run["run_id"])
+    assert source.refresh_calls == 1
+    assert cached["git_additions"] == 1
+    assert cached["git_deletions"] == 1
+    assert cached["git_ahead_commits"] == 1
+
+    refreshed = tracker.get_run("conversation-a", run["run_id"], refresh_git_metrics=True)
+    assert source.refresh_calls == 2
+    assert refreshed["git_additions"] == 8
+    assert refreshed["git_deletions"] == 3
+    assert refreshed["git_ahead_commits"] == 4
 
 
 def test_activity_tracker_rehydrates_historical_turn_after_restart(tmp_path: Path) -> None:
@@ -718,7 +775,14 @@ def test_activity_resource_uses_mcp_app_contract() -> None:
     assert 'scope.className = "scope"' in content.content
     assert 'id="activity-header-submitted" class="header-submitted"' in content.content
     assert 'id="activity-header-elapsed" class="summary"' in content.content
-    assert 'id="activity-header-stats" class="header-stats">0 tools · 0 jobs</span>' in content.content
+    assert (
+        'id="activity-header-stats" class="header-stats"><span id="activity-header-stats-base" class="header-stats-base">0 tools · 0 jobs</span>'
+        '<span id="activity-header-git" class="header-git"></span></span>' in content.content
+    )
+    assert ".git-additions { color: #1a7f37; }" in content.content
+    assert ".git-deletions { margin-left: 4px; color: #cf222e; }" in content.content
+    assert ".git-ahead { margin-left: 4px; color: CanvasText; }" in content.content
+    assert "ahead.textContent = `(+${gitAheadCommits})`;" in content.content
     assert 'id="activity-header-duration" class="header-duration"></span>' in content.content
     assert 'id="activity-other-jobs" class="other-jobs" type="button" aria-expanded="false" hidden' in content.content
 

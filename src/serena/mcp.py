@@ -716,7 +716,12 @@ class SerenaMCPFactory:
             structured_output=True,
         )
         async def get_activity(run_id: str, mcp_ctx: Context) -> dict[str, Any]:
-            return await asyncio.to_thread(activity_tracker.get_run, get_mcp_session_id(mcp_ctx), run_id)
+            return await asyncio.to_thread(
+                activity_tracker.get_run,
+                get_mcp_session_id(mcp_ctx),
+                run_id,
+                refresh_git_metrics=True,
+            )
 
         @mcp.tool(
             name="get_activity_detail",
@@ -847,6 +852,7 @@ class SerenaMCPFactory:
             self._activity_tracker = ActivityTracker(
                 job_source=self.agent.job_manager,
                 execution_store=self.agent.execution_store,
+                git_metrics_source=self.agent,
             )
         except Exception as e:
             show_fatal_exception_safe(e)
