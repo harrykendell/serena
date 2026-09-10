@@ -66,7 +66,7 @@ class ActivityMedia:
         """Recovers media metadata from activity history written before structured media storage."""
         if not result:
             return None
-        token_match = re.search(r"serena-file://export/([0-9a-f]{48})", result)
+        token_match = re.search(r"serena-file://export/([0-9a-f]{64}|[0-9a-f]{48})(?![0-9a-f])", result)
         if token_match is None:
             return None
         name_match = re.search(r"ResourceLink\(name=(['\"])(.*?)\1", result, re.DOTALL)

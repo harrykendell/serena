@@ -265,7 +265,7 @@ def test_retained_serena_panel_serves_rendered_media_instead_of_result_repr(tmp_
     snapshot_root = serena_home / "chat_file_snapshots"
     snapshot_root.mkdir(parents=True, mode=0o700)
     snapshot_root.chmod(0o700)
-    token = "a" * 48
+    token = "a" * 64
     image_bytes = b"\x89PNG\r\n\x1a\nretained-preview"
 
     agent = _DashboardAgent()

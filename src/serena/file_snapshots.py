@@ -3,8 +3,8 @@
 import hashlib
 import mimetypes
 import os
-import secrets
 import stat
+import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,7 +35,8 @@ class FileSnapshotStore:
     retained ChatGPT session that references them.
     """
 
-    _TOKEN_BYTES = 24
+    _SHA256_HEX_LENGTH = hashlib.sha256().digest_size * 2
+    _LEGACY_TOKEN_HEX_LENGTH = 48
     _LOCK: ClassVar[threading.Lock] = threading.Lock()
 
     @classmethod
@@ -54,7 +55,7 @@ class FileSnapshotStore:
     @classmethod
     def _validate_token(cls, token: str) -> None:
         """Rejects tokens that cannot name one snapshot in the private store."""
-        if len(token) != cls._TOKEN_BYTES * 2:
+        if len(token) not in {cls._SHA256_HEX_LENGTH, cls._LEGACY_TOKEN_HEX_LENGTH}:
             raise ValueError("Invalid Serena file resource")
         try:
             bytes.fromhex(token)
@@ -89,15 +90,13 @@ class FileSnapshotStore:
 
         name = display_name or source_path.name
         mime_type, _ = mimetypes.guess_type(name)
-        token = secrets.token_hex(cls._TOKEN_BYTES)
-        content_digest = hashlib.sha256() if version_display_name_by_content else None
+        content_digest = hashlib.sha256()
 
         with cls._LOCK:
             root = cls._root()
-            snapshot_path = root / token
-            temporary_path = root / f".{token}.tmp"
-
-            fd = os.open(temporary_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            fd, temporary_name = tempfile.mkstemp(prefix=".snapshot-", suffix=".tmp", dir=root)
+            temporary_path = Path(temporary_name)
+            os.fchmod(fd, 0o600)
             bytes_written = 0
             try:
                 with os.fdopen(fd, "wb") as output:
@@ -106,15 +105,16 @@ class FileSnapshotStore:
                             bytes_written += len(chunk)
                             if bytes_written > max_size:
                                 raise UserFacingError(f"File exceeds the {max_size // (1024 * 1024)} MiB export limit")
-                            if content_digest is not None:
-                                content_digest.update(chunk)
+                            content_digest.update(chunk)
                             output.write(chunk)
+                token = content_digest.hexdigest()
+                snapshot_path = root / token
                 os.replace(temporary_path, snapshot_path)
             finally:
                 temporary_path.unlink(missing_ok=True)
 
-        if content_digest is not None:
-            name = cls._content_versioned_display_name(name, content_digest.hexdigest())
+        if version_display_name_by_content:
+            name = cls._content_versioned_display_name(name, token)
 
         return FileSnapshot(
             path=snapshot_path,

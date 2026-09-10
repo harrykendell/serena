@@ -322,7 +322,7 @@ def test_activity_tracker_exposes_media_without_serialized_payload_text() -> Non
     link = ResourceLink(
         type="resource_link",
         name="figure-p1.png",
-        uri=AnyUrl("serena-file://export/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        uri=AnyUrl("serena-file://export/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
         mimeType="image/png",
         size=123,
     )
@@ -334,7 +334,7 @@ def test_activity_tracker_exposes_media_without_serialized_payload_text() -> Non
     assert detail["result"] is None
     assert detail["media"] == {"type": "image", "name": "figure-p1.png", "mime_type": "image/png"}
     media = tracker.get_call_media("conversation-a", run["run_id"], call_id)
-    assert media.uri == "serena-file://export/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    assert media.uri == "serena-file://export/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 
 def test_activity_tracker_exposes_media_from_prepared_mcp_result() -> None:
@@ -344,7 +344,7 @@ def test_activity_tracker_exposes_media_from_prepared_mcp_result() -> None:
     link = ResourceLink(
         type="resource_link",
         name="figure.png",
-        uri=AnyUrl("serena-file://export/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        uri=AnyUrl("serena-file://export/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
         mimeType="image/png",
         size=123,
     )
@@ -356,7 +356,7 @@ def test_activity_tracker_exposes_media_from_prepared_mcp_result() -> None:
     assert detail["result"] is None
     assert detail["media"] == {"type": "image", "name": "figure.png", "mime_type": "image/png"}
     media = tracker.get_call_media("conversation-a", run["run_id"], call_id)
-    assert media.uri == "serena-file://export/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    assert media.uri == "serena-file://export/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 
 def test_activity_tracker_marks_current_turn_job_and_exposes_other_running_jobs() -> None:

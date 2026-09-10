@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import os
 import shutil
 import stat
@@ -135,6 +136,22 @@ def test_download_file_returns_resource_link(project: Project, tmp_path: Path) -
     output_schema = DownloadFileTool.get_apply_fn_metadata_from_cls().output_schema
     assert output_schema is None
     assert DownloadFileTool.get_mcp_tool_meta() is None
+
+
+def test_download_file_uses_sha256_identity_and_deduplicates(project: Project, tmp_path: Path) -> None:
+    data = b"content-addressed snapshot\n"
+    source = tmp_path / "notes.txt"
+    source.write_bytes(data)
+    tool = _make_tool(DownloadFileTool, project)
+
+    first = tool.apply("notes.txt")
+    second = tool.apply("notes.txt")
+
+    expected_token = hashlib.sha256(data).hexdigest()
+    assert str(first.uri) == f"serena-file://export/{expected_token}"
+    assert str(second.uri) == str(first.uri)
+    snapshot_root = Path(os.environ["SERENA_HOME"]) / "chat_file_snapshots"
+    assert [path.name for path in snapshot_root.iterdir() if not path.name.startswith(".")] == [expected_token]
 
 
 def test_download_file_is_snapshot_of_invocation_time(project: Project, tmp_path: Path) -> None:

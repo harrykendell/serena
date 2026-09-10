@@ -13,7 +13,7 @@ from typing import Any
 
 from serena.retention import DEFAULT_SESSION_RETENTION, JobRetentionState, SessionRetentionPolicy
 
-_FILE_RESOURCE_RE = re.compile(r"serena-file://export/([0-9a-f]{48})")
+_FILE_RESOURCE_RE = re.compile(r"serena-file://export/([0-9a-f]{64}|[0-9a-f]{48})(?![0-9a-f])")
 _JOB_ID_RE = re.compile(r'"job_id"\s*:\s*"([0-9a-f]{32})"')
 _STATE_VERSION = 2
 
@@ -636,32 +636,19 @@ class ExecutionStore:
                 if path.stem not in retained_outputs:
                     path.unlink(missing_ok=True)
 
-    def _session_artifact_bytes(self, session_id: str) -> int:
-        """Returns retained snapshot and pageable-output bytes owned by one session."""
+    def _retained_artifact_bytes(self) -> int:
+        """Returns on-disk bytes referenced by retained sessions, counting shared blobs once."""
         serena_home = self._serena_home()
         snapshot_root = serena_home / "chat_file_snapshots"
         output_root = serena_home / "tool_outputs"
         total = 0
 
-        # count immutable snapshots referenced by this session
-        snapshot_tokens: set[str] = set()
-        output_ids: set[str] = set()
-        for record in self._executions.values():
-            if record.session_id != session_id:
-                continue
-            if record.media is not None:
-                snapshot_tokens.update(_FILE_RESOURCE_RE.findall(record.media.get("uri", "")))
-            if record.result:
-                snapshot_tokens.update(_FILE_RESOURCE_RE.findall(record.result))
-            if record.retained_output_id is not None:
-                output_ids.add(record.retained_output_id)
-
-        for token in snapshot_tokens:
+        for token in self.retained_file_tokens():
             try:
                 total += (snapshot_root / token).stat().st_size
             except FileNotFoundError:
                 pass
-        for output_id in output_ids:
+        for output_id in self.retained_output_ids():
             try:
                 total += (output_root / f"{output_id}.txt").stat().st_size
             except FileNotFoundError:
@@ -703,14 +690,14 @@ class ExecutionStore:
                 changed = self._drop_session(session.session_id) or changed
 
         # emergency capacity guard: evict the oldest inactive sessions whole
-        retained_bytes = sum(self._session_artifact_bytes(session_id) for session_id in self._sessions)
+        retained_bytes = self._retained_artifact_bytes()
         while retained_bytes > self._retention.max_artifact_bytes:
             candidates = [session for session in self._sessions.values() if session.session_id not in protected]
             if not candidates:
                 break
             oldest = min(candidates, key=lambda session: (session.updated_at, session.created_at, session.session_id))
-            retained_bytes -= self._session_artifact_bytes(oldest.session_id)
             changed = self._drop_session(oldest.session_id) or changed
+            retained_bytes = self._retained_artifact_bytes()
 
         return changed
 
