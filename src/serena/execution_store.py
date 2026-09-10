@@ -216,18 +216,6 @@ class ExecutionStore:
             self._prune()
             self._save()
 
-    def set_retained_output(self, execution_id: str, output_id: str | None, total_chars: int | None) -> None:
-        """Associates retained-output metadata with one existing execution."""
-        if output_id is None:
-            return
-        with self._lock:
-            record = self._executions.get(execution_id)
-            if record is None:
-                return
-            record.retained_output_id = output_id
-            record.retained_output_chars = total_chars
-            self._save()
-
     def get_execution(self, execution_id: str) -> ExecutionRecord | None:
         """Returns one execution record if retained."""
         with self._lock:

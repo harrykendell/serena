@@ -27,10 +27,12 @@ class _GitTool(Tool):
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or f"git exited with status {result.returncode}"
             raise UserFacingError(detail)
-        output = result.stdout.strip()
-        if result.stderr.strip():
-            output = f"{output}\n{result.stderr.strip()}".strip()
-        return output or "OK"
+
+        # preserve successful command output exactly, adding only a separator when both captured streams need one
+        if result.stdout and result.stderr:
+            separator = "" if result.stdout.endswith("\n") else "\n"
+            return f"{result.stdout}{separator}{result.stderr}"
+        return result.stdout or result.stderr or "OK"
 
     @classmethod
     def _validate_git_name(cls, value: str, kind: str) -> str:

@@ -6,6 +6,7 @@ from pathlib import Path
 from mcp.types import ResourceLink
 from pydantic import AnyUrl
 
+from serena.result_metadata import ResultIdentityText
 from serena.result_presentation import ToolResultPresenter
 from serena.tool_output import ToolOutputStore
 
@@ -19,7 +20,7 @@ def test_oversized_text_is_retained_exactly_and_presented_once(tmp_path: Path) -
     presenter, store = _presenter(tmp_path)
     logical_result = "first line\n" + "middle line\n" * 200 + "last line\n"
 
-    presentation = presenter.present(logical_result, tool_name="synthetic_text", execution_id="execution-text")
+    presentation = presenter.present(logical_result)
 
     assert isinstance(presentation.transport_value, dict)
     assert presentation.transport_value["truncated"] is True
@@ -55,7 +56,7 @@ def test_oversized_structured_result_stays_structured_and_retains_exact_serializ
     }
     exact_serialization = json.dumps(logical_result, ensure_ascii=False, separators=(",", ":"))
 
-    presentation = presenter.present(logical_result, tool_name="synthetic_structured", execution_id="execution-structured")
+    presentation = presenter.present(logical_result)
 
     assert isinstance(presentation.transport_value, dict)
     assert presentation.transport_value["truncated"] is True
@@ -79,33 +80,12 @@ def test_small_ordinary_result_is_unchanged_and_not_retained(tmp_path: Path) -> 
     presenter, _ = _presenter(tmp_path)
     logical_result = {"return_code": 0, "stdout": "done"}
 
-    presentation = presenter.present(logical_result, tool_name="synthetic_small", execution_id="execution-small")
+    presentation = presenter.present(logical_result)
 
     assert presentation.transport_value == logical_result
     assert presentation.persisted_serialization == '{"return_code":0,"stdout":"done"}'
     assert presentation.retained_output_id is None
     assert presentation.retained_output_chars is None
-
-
-def test_existing_retained_output_metadata_survives_small_transitional_result(tmp_path: Path) -> None:
-    presenter, store = _presenter(tmp_path)
-    execution_id = "execution-legacy"
-    complete_result = "full result " + "x" * 2_000
-    output_id = store.retain("legacy_tool", complete_result, execution_id=execution_id)
-    descriptor = store.describe_execution(execution_id)
-    assert descriptor is not None
-
-    presentation = presenter.present(
-        "legacy bounded result",
-        tool_name="legacy_tool",
-        execution_id=execution_id,
-        retained_output=descriptor,
-    )
-
-    assert presentation.transport_value == "legacy bounded result"
-    assert presentation.persisted_serialization == '"legacy bounded result"'
-    assert presentation.retained_output_id == output_id
-    assert presentation.retained_output_chars == len(complete_result)
 
 
 def test_native_resource_result_bypasses_ordinary_presentation(tmp_path: Path) -> None:
@@ -118,7 +98,7 @@ def test_native_resource_result_bypasses_ordinary_presentation(tmp_path: Path) -
         size=123,
     )
 
-    presentation = presenter.present(logical_result, tool_name="synthetic_media", execution_id="execution-media")
+    presentation = presenter.present(logical_result)
 
     assert presentation.transport_value is logical_result
     assert presentation.persisted_serialization is None
@@ -145,8 +125,8 @@ def test_adversarial_structured_values_never_exceed_any_positive_budget(tmp_path
 
     for budget in (1, 2, 3, 7, 16, 31, 64, 97, 128, 257, 511, 1024, 2048):
         presenter, _ = _presenter(tmp_path / str(budget), max_chars=budget)
-        first = presenter.present(logical_result, tool_name="adversarial", execution_id=f"execution-{budget}")
-        second = presenter.present(logical_result, tool_name="adversarial", execution_id=f"execution-repeat-{budget}")
+        first = presenter.present(logical_result)
+        second = presenter.present(logical_result)
         first_serialized = json.dumps(first.transport_value, ensure_ascii=False, separators=(",", ":"))
         first_comparable = dict(first.transport_value) if isinstance(first.transport_value, dict) else first.transport_value
         second_comparable = dict(second.transport_value) if isinstance(second.transport_value, dict) else second.transport_value
@@ -176,7 +156,7 @@ def test_structured_fitting_uses_available_budget_and_preserves_collection_bread
         "count": 20,
     }
 
-    presentation = presenter.present(logical_result, tool_name="find_symbol", execution_id="execution-wide")
+    presentation = presenter.present(logical_result)
     serialized = json.dumps(presentation.transport_value, ensure_ascii=False, separators=(",", ":"))
     result = presentation.transport_value["result"]
 
@@ -191,13 +171,49 @@ def test_structured_fitting_uses_available_budget_and_preserves_collection_bread
     assert all("omitted" in record["body"] or "…" in record["body"] for record in records)
 
 
+def test_many_medium_strings_are_previewed_before_collection_breadth_is_lost(tmp_path: Path) -> None:
+    presenter, _ = _presenter(tmp_path, max_chars=3_000)
+    logical_result = {
+        "records": [
+            {
+                "id": index,
+                "value": f"record-{index:03d}-" + "x" * 70,
+            }
+            for index in range(100)
+        ]
+    }
+
+    presentation = presenter.present(logical_result)
+    result = presentation.transport_value["result"]
+    records = result["records"]
+
+    assert len(records) == 100
+    assert all(record["id"] == index for index, record in enumerate(records))
+    assert all("…" in record["value"] for record in records)
+    assert len(json.dumps(presentation.transport_value, ensure_ascii=False, separators=(",", ":"))) <= 3_000
+
+
+def test_identity_text_is_kept_exact_when_collection_compaction_is_required(tmp_path: Path) -> None:
+    presenter, _ = _presenter(tmp_path, max_chars=3_000)
+    paths = [ResultIdentityText("src/" + "very_long_directory_name/" * 5 + f"file_{index:03d}.py") for index in range(100)]
+
+    presentation = presenter.present({"files": paths})
+    files = presentation.transport_value["result"]["files"]
+    retained_paths = [item for item in files if isinstance(item, str)]
+
+    assert retained_paths
+    assert len(retained_paths) < len(paths)
+    assert all(path in paths for path in retained_paths)
+    assert any(isinstance(item, dict) and "_serena_omitted_items" in item for item in files)
+
+
 def test_repeated_verbose_fields_receive_fair_preview_space(tmp_path: Path) -> None:
     presenter, _ = _presenter(tmp_path, max_chars=1_800)
     logical_result = {
         "records": [{"name": f"record-{index}", "payload": f"record {index}\n" + ("payload line\n" * 80)} for index in range(10)]
     }
 
-    presentation = presenter.present(logical_result, tool_name="fair_records", execution_id="execution-fair")
+    presentation = presenter.present(logical_result)
     result = presentation.transport_value["result"]
     records = result["records"]
     preview_lengths = [len(record["payload"]) for record in records]
@@ -210,14 +226,14 @@ def test_repeated_verbose_fields_receive_fair_preview_space(tmp_path: Path) -> N
 def test_structural_compaction_uses_explicit_omission_markers(tmp_path: Path) -> None:
     list_presenter, _ = _presenter(tmp_path / "list", max_chars=260)
     list_result = {"items": [{"id": index, "label": f"item-{index}"} for index in range(100)]}
-    list_presentation = list_presenter.present(list_result, tool_name="many_items", execution_id="execution-list")
+    list_presentation = list_presenter.present(list_result)
     compacted_items = list_presentation.transport_value["result"]["items"]
 
     assert any(isinstance(item, dict) and "_serena_omitted_items" in item for item in compacted_items)
 
     dict_presenter, _ = _presenter(tmp_path / "dict", max_chars=260)
     dict_result = {f"field_{index:03d}": index for index in range(100)}
-    dict_presentation = dict_presenter.present(dict_result, tool_name="many_fields", execution_id="execution-dict")
+    dict_presentation = dict_presenter.present(dict_result)
     compacted_mapping = dict_presentation.transport_value["result"]
 
     assert any(key.endswith("_serena_omitted_fields") for key in compacted_mapping)
@@ -227,7 +243,7 @@ def test_json_looking_string_remains_text_and_unknown_objects_normalize_safely(t
     presenter, store = _presenter(tmp_path / "json-string", max_chars=320)
     logical_text = '{"records":[' + ",".join(f'{{"value":{index}}}' for index in range(200)) + "]}"
 
-    presentation = presenter.present(logical_text, tool_name="json_looking_text", execution_id="execution-json-text")
+    presentation = presenter.present(logical_text)
 
     assert isinstance(presentation.transport_value["result"], str)
     assert presentation.retained_output_id is not None
@@ -239,7 +255,7 @@ def test_json_looking_string_remains_text_and_unknown_objects_normalize_safely(t
             return "unknown-result:" + "x" * 500
 
     unknown_presenter, _ = _presenter(tmp_path / "unknown", max_chars=240)
-    unknown = unknown_presenter.present(UnknownResult(), tool_name="unknown", execution_id="execution-unknown")
+    unknown = unknown_presenter.present(UnknownResult())
 
     assert isinstance(unknown.transport_value, dict)
     assert isinstance(unknown.transport_value["result"], str)

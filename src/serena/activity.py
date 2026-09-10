@@ -1,10 +1,9 @@
 import ast
 import json
-import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -62,30 +61,6 @@ class ActivityMedia:
         )
 
     @classmethod
-    def from_serialized_result(cls, result: str | None) -> "ActivityMedia | None":
-        """Recovers media metadata from activity history written before structured media storage."""
-        if not result:
-            return None
-        token_match = re.search(r"serena-file://export/([0-9a-f]{64}|[0-9a-f]{48})(?![0-9a-f])", result)
-        if token_match is None:
-            return None
-        name_match = re.search(r"ResourceLink\(name=(['\"])(.*?)\1", result, re.DOTALL)
-        mime_match = re.search(r"mimeType=(['\"])(.*?)\1", result, re.DOTALL)
-        mime_type = mime_match.group(2) if mime_match is not None else "application/octet-stream"
-        if mime_type.startswith("image/"):
-            media_type: Literal["image", "audio", "file"] = "image"
-        elif mime_type.startswith("audio/"):
-            media_type = "audio"
-        else:
-            media_type = "file"
-        return cls(
-            media_type=media_type,
-            name=name_match.group(2) if name_match is not None else "Serena file",
-            mime_type=mime_type,
-            uri=f"serena-file://export/{token_match.group(1)}",
-        )
-
-    @classmethod
     def from_storage_dict(cls, payload: object) -> "ActivityMedia | None":
         """Reconstructs media metadata from persisted activity state."""
         if not isinstance(payload, dict):
@@ -118,132 +93,6 @@ class ActivityResultMetadata:
     media: ActivityMedia | None
     durable_job_id: str | None
     durable_job_label: str | None
-
-
-@dataclass
-class ActivityCall:
-    """One tool invocation displayed in the ChatGPT activity panel."""
-
-    call_id: str
-    tool_name: str
-    detail: str
-    started_at: float
-    scope: str = ""
-    project_name: str = ""
-    arguments: str = field(default="{}", repr=False)
-    finished_at: float | None = None
-    status: str = "running"
-    result: str | None = field(default=None, repr=False)
-    media: ActivityMedia | None = field(default=None, repr=False)
-    job_id: str | None = None
-    job_label: str | None = None
-
-    def as_dict(self) -> dict[str, Any]:
-        """Serializes the lightweight call state used by the activity widget."""
-        payload: dict[str, Any] = {
-            "call_id": self.call_id,
-            "tool_name": self.tool_name,
-            "detail": self.detail,
-            "project_name": self.project_name,
-            "started_at": self.started_at,
-            "finished_at": self.finished_at,
-            "status": self.status,
-        }
-        if self.scope:
-            payload["scope"] = self.scope
-        if self.job_id is not None:
-            payload["job_id"] = self.job_id
-        if self.job_label is not None:
-            payload["job_label"] = self.job_label
-        return payload
-
-    def storage_dict(self) -> dict[str, Any]:
-        """Serializes complete bounded call state required for historical rehydration."""
-        return {
-            **self.as_dict(),
-            "scope": self.scope,
-            "arguments": self.arguments,
-            "result": self.result,
-            "media": self.media.storage_dict() if self.media is not None else None,
-            "job_id": self.job_id,
-            "job_label": self.job_label,
-        }
-
-    @classmethod
-    def from_storage_dict(cls, payload: dict[str, Any]) -> "ActivityCall":
-        """Reconstructs one retained call from its persisted representation."""
-        finished_at = payload.get("finished_at")
-        stored_result = str(payload["result"]) if payload.get("result") is not None else None
-        media = ActivityMedia.from_storage_dict(payload.get("media")) or ActivityMedia.from_serialized_result(stored_result)
-        return cls(
-            call_id=str(payload["call_id"]),
-            tool_name=str(payload.get("tool_name") or ""),
-            detail=str(payload.get("detail") or ""),
-            scope=str(payload.get("scope") or ""),
-            project_name=str(payload.get("project_name") or ""),
-            arguments=str(payload.get("arguments") or "{}"),
-            started_at=float(payload.get("started_at") or 0.0),
-            finished_at=float(finished_at) if isinstance(finished_at, int | float) else None,
-            status=str(payload.get("status") or "completed"),
-            result=None if media is not None else stored_result,
-            media=media,
-            job_id=str(payload["job_id"]) if payload.get("job_id") is not None else None,
-            job_label=str(payload["job_label"]) if payload.get("job_label") is not None else None,
-        )
-
-
-@dataclass
-class ActivityRun:
-    """One model-driven Serena activity panel within a client session."""
-
-    run_id: str
-    session_id: str
-    project_name: str
-    started_at: float
-    calls: list[ActivityCall] = field(default_factory=list)
-    job_ids: list[str] = field(default_factory=list)
-    retained_jobs: list[dict[str, Any]] = field(default_factory=list, repr=False)
-    superseded: bool = False
-
-    def as_dict(self) -> dict[str, Any]:
-        """Serializes the run-local state used by the activity widget."""
-        return {
-            "run_id": self.run_id,
-            "project_name": self.project_name,
-            "started_at": self.started_at,
-            "superseded": self.superseded,
-            "calls": [call.as_dict() for call in self.calls],
-        }
-
-    def storage_dict(self) -> dict[str, Any]:
-        """Serializes complete bounded run state required for historical rehydration."""
-        return {
-            "run_id": self.run_id,
-            "session_id": self.session_id,
-            "project_name": self.project_name,
-            "started_at": self.started_at,
-            "superseded": self.superseded,
-            "calls": [call.storage_dict() for call in self.calls],
-            "job_ids": list(self.job_ids),
-            "retained_jobs": self.retained_jobs,
-        }
-
-    @classmethod
-    def from_storage_dict(cls, payload: dict[str, Any]) -> "ActivityRun":
-        """Reconstructs one retained run from its persisted representation."""
-        calls = payload.get("calls")
-        job_ids = payload.get("job_ids")
-        retained_jobs = payload.get("retained_jobs")
-        return cls(
-            run_id=str(payload["run_id"]),
-            session_id=str(payload["session_id"]),
-            project_name=str(payload.get("project_name") or ""),
-            started_at=float(payload.get("started_at") or 0.0),
-            calls=[ActivityCall.from_storage_dict(call) for call in calls if isinstance(call, dict)] if isinstance(calls, list) else [],
-            job_ids=[str(job_id) for job_id in job_ids if isinstance(job_id, str)] if isinstance(job_ids, list) else [],
-            retained_jobs=[dict(job) for job in retained_jobs if isinstance(job, dict)] if isinstance(retained_jobs, list) else [],
-            superseded=bool(payload.get("superseded")),
-        )
 
 
 class ActivityJobSource(Protocol):
@@ -346,7 +195,7 @@ class ActivityDetailFormatter:
         except (SyntaxError, ValueError, TypeError):
             pass
 
-        # accept older detail sources that stored a complete JSON or Python-literal mapping
+        # accept the canonical JSON auxiliary serialization plus Python-literal diagnostic inputs
         for parser in (json.loads, ast.literal_eval):
             try:
                 value = parser(parameters)
@@ -677,7 +526,7 @@ class ActivityTracker:
     def get_call_media(self, session_id: str, run_id: str, call_id: str) -> ActivityMedia:
         """Returns retrievable media metadata for one session-owned activity execution."""
         record = self._execution_in_run(session_id, run_id, call_id)
-        media = ActivityMedia.from_storage_dict(record.media) or ActivityMedia.from_serialized_result(record.result)
+        media = ActivityMedia.from_storage_dict(record.media)
         if media is None:
             raise ValueError("Activity call has no retained media")
         return media

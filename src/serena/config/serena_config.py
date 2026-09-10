@@ -506,7 +506,7 @@ class SerenaConfig(SharedConfig):
 
     max_memory_chars: int = 150_000
     """Default maximum content length accepted by ``write_memory``."""
-    default_max_tool_answer_tokens: int = 4_000
+    default_max_tool_answer_tokens: int = 3_000
     """Approximate default response budget when retained output paging is available.
 
     The budget uses a deterministic four-characters-per-token approximation and is applied centrally to ordinary tool results.

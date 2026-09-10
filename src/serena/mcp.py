@@ -4,7 +4,6 @@ The Serena Model Context Protocol (MCP) Server
 
 import asyncio
 import base64
-import json
 import sys
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -21,7 +20,7 @@ from mcp.server.fastmcp.tools.base import Tool as FastMCPTool
 from mcp.server.session import ServerSessionT
 from mcp.shared.context import LifespanContextT, RequestT
 from mcp.shared.exceptions import UrlElicitationRequiredError
-from mcp.types import AudioContent, CallToolResult, Icon, ImageContent, ResourceLink, TextContent, ToolAnnotations
+from mcp.types import AudioContent, CallToolResult, ContentBlock, Icon, ImageContent, ResourceLink, TextContent, ToolAnnotations
 from pydantic import AnyUrl, ValidationError
 from pydantic_settings import SettingsConfigDict
 from sensai.util import logging
@@ -37,8 +36,7 @@ from serena.errors import UserFacingError
 from serena.execution import ExecutionAccess, bind_execution_id, get_current_execution_id, reset_execution_id
 from serena.result_presentation import ToolResultPresentation, ToolResultPresenter
 from serena.session import get_mcp_session_id
-from serena.tool_output import ToolOutputDescriptor
-from serena.tools import Tool
+from serena.tools import Tool, ToolMarkerExplicitResultPaging
 from serena.tools.media_tools import read_result_file_link, register_file_export_resource
 from serena.util.exception import show_fatal_exception_safe
 
@@ -111,7 +109,8 @@ class SerenaFastMCPTool(FastMCPTool):
         func_name = tool.get_name()
         func_doc = tool.get_apply_docstring() or ""
         func_arg_metadata = tool.get_apply_fn_metadata(structured_output=structured_output)
-        func_arg_metadata.output_schema = ToolResultPresenter.extend_output_schema(func_arg_metadata.output_schema)
+        if not isinstance(tool, ToolMarkerExplicitResultPaging):
+            func_arg_metadata.output_schema = ToolResultPresenter.extend_output_schema(func_arg_metadata.output_schema)
         is_async = False
         parameters = func_arg_metadata.arg_model.model_json_schema()
         if openai_tool_compatible:
@@ -179,38 +178,53 @@ class SerenaFastMCPTool(FastMCPTool):
         self._execution_access = tool.get_execution_access()
         self._execution_store = activity_tracker.execution_store if activity_tracker is not None else tool.agent.execution_store
 
-    def _present_result(self, logical_result: object, execution_id: str) -> ToolResultPresentation:
+    def _present_result(self, logical_result: object) -> ToolResultPresentation:
         """Presents one complete logical result at the MCP execution boundary."""
         max_chars = int(self._agent.serena_config.default_max_tool_answer_tokens) * 4
         presenter = ToolResultPresenter(self._agent.tool_output_store, max_chars=max_chars)
-        describe_output = getattr(self._agent, "describe_tool_execution_output", None)
-        retained_output = cast(ToolOutputDescriptor | None, describe_output(execution_id)) if callable(describe_output) else None
         return presenter.present(
             logical_result,
-            tool_name=self.name,
-            execution_id=execution_id,
-            retained_output=retained_output,
+            semantic_paging=isinstance(self._tool, ToolMarkerExplicitResultPaging),
         )
 
     def _convert_presented_result(self, presentation: ToolResultPresentation, prepared_result: object) -> object:
         """Converts one canonical presentation to FastMCP's model-facing result shape."""
-        if presentation.retained_output_id is None:
+        # native MCP results already own their content representation
+        if isinstance(prepared_result, CallToolResult):
             return self.fn_metadata.convert_result(prepared_result)
 
-        if isinstance(prepared_result, CallToolResult):
-            return prepared_result
-        if not isinstance(presentation.transport_value, dict):
-            raise TypeError("Truncated ordinary result must use the canonical structured envelope")
+        # ordinary content uses the exact serialization measured by the central presenter
+        persisted = presentation.persisted_serialization
+        if persisted is None:
+            raise TypeError("Ordinary presented result must have a persisted serialization")
+        transport_value = presentation.transport_value
+        transport_text = transport_value if isinstance(transport_value, str) else persisted
+        content: list[ContentBlock] = [TextContent(type="text", text=transport_text)]
 
-        content = [
-            TextContent(
-                type="text",
-                text=json.dumps(presentation.transport_value, ensure_ascii=False, indent=2),
-            )
-        ]
+        # ordinary truncation uses the canonical envelope; pathological budgets may only fit a smaller JSON value
+        if presentation.retained_output_id is not None:
+            canonical_envelope = False
+            if isinstance(transport_value, dict):
+                envelope = cast(dict[str, object], transport_value)
+                canonical_envelope = envelope.get("truncated") is True and {
+                    "total_chars",
+                    "output_id",
+                    "result",
+                }.issubset(envelope)
+            if self.fn_metadata.output_schema is None:
+                return content
+            if not canonical_envelope:
+                return CallToolResult(content=content, isError=False)
+            return content, transport_value
+
+        # preserve FastMCP's original structured-output validation/wrapping without its alternate text rendering
         if self.fn_metadata.output_schema is None:
             return content
-        return content, presentation.transport_value
+        structured_value = {"result": prepared_result} if self.fn_metadata.wrap_output else prepared_result
+        assert self.fn_metadata.output_model is not None, "Output model must be set if output schema is defined"
+        validated = self.fn_metadata.output_model.model_validate(structured_value)
+        structured_content = validated.model_dump(mode="json", by_alias=True)
+        return content, structured_content
 
     async def run(
         self,
@@ -287,15 +301,6 @@ class SerenaFastMCPTool(FastMCPTool):
                     durable_job_id=durable_job_id,
                     durable_job_label=durable_job_label,
                 )
-
-            if succeeded:
-                return
-
-            # preserve retained output produced before a failed worker reaches presentation
-            describe_output = getattr(self._agent, "describe_tool_execution_output", None)
-            descriptor = cast(ToolOutputDescriptor | None, describe_output(execution_id)) if callable(describe_output) else None
-            if descriptor is not None:
-                execution_store.set_retained_output(execution_id, descriptor.output_id, descriptor.total_chars)
 
         def completed_project_name() -> str:
             current_project = self._agent.get_active_project_for_session(session_id)
@@ -401,7 +406,7 @@ class SerenaFastMCPTool(FastMCPTool):
             logical_result = result
             try:
                 result_metadata = ActivityTracker.extract_result_metadata(logical_result)
-                presentation = self._present_result(logical_result, execution_id)
+                presentation = self._present_result(logical_result)
                 prepared_result = self._tool.prepare_mcp_result(presentation.transport_value)
                 result = self._convert_presented_result(presentation, prepared_result) if convert_result else prepared_result
             except Exception as error:
@@ -651,9 +656,9 @@ class SerenaMCPFactory:
                 "openai/toolInvocation/invoking": "Opening Serena activity...",
                 "openai/toolInvocation/invoked": "Serena activity",
             },
-            structured_output=True,
+            structured_output=False,
         )
-        async def show_activity(conversation_title: str, mcp_ctx: Context) -> dict[str, Any]:
+        async def show_activity(conversation_title: str, mcp_ctx: Context) -> CallToolResult:
             session_id = get_mcp_session_id(mcp_ctx)
             project = agent.get_active_project_for_session(session_id)
             project_name = project.project_name if project is not None else ""
@@ -680,7 +685,7 @@ class SerenaMCPFactory:
             presentation = ToolResultPresenter(
                 agent.tool_output_store,
                 max_chars=int(agent.serena_config.default_max_tool_answer_tokens) * 4,
-            ).present(result, tool_name="show_activity", execution_id=execution_id)
+            ).present(result)
             store.finish_execution(
                 execution_id,
                 succeeded=True,
@@ -689,7 +694,14 @@ class SerenaMCPFactory:
                 retained_output_id=presentation.retained_output_id,
                 retained_output_chars=presentation.retained_output_chars,
             )
-            return cast(dict[str, Any], presentation.transport_value)
+            payload = cast(dict[str, Any], presentation.transport_value)
+            serialized = presentation.persisted_serialization
+            assert serialized is not None
+            return CallToolResult(
+                content=[TextContent(type="text", text=serialized)],
+                structuredContent=payload,
+                isError=False,
+            )
 
         @mcp.tool(
             name="get_activity",

@@ -475,6 +475,37 @@ Completion condition: one result-presentation path is authoritative in both code
 - Verified retained-output exact paging and restart rehydration, native media handling, jobs, shell/search/symbol result behaviour, and model/dashboard canonical-result equivalence through the complete behavioural suite.
 - Validation completed with `uv run poe format`, `uv run poe type-check`, `uv run poe test` (`798 passed, 265 deselected`), `git diff --check`, and a Node syntax check of the generated activity-widget JavaScript.
 
+#### Post-C09 implementation audit captured 2026-09-10
+
+A second end-to-end audit checked the completed implementation against both the literal C00-C09 requirements and the architectural intent of the plan. It found and removed the remaining edge paths that could still undermine the single-presentation contract:
+
+- `read_tool_output` now returns a native structured semantic page and is explicitly exempt from ordinary presentation truncation. A requested retained page can therefore be larger than the ordinary result budget without being retained/truncated a second time; regression coverage verifies exact two-page recovery and that page executions do not create nested retained outputs.
+- Removed the transitional pre-presenter retained-output association path (`ToolOutputDescriptor`, execution-to-output lookup, late `set_retained_output`) and the unused live retained-output writer/append/finalize machinery. Ordinary foreground results are now retained only once, after the complete logical result exists; `ExecutionStore` remains the sole owner of execution association and retention lifetime, while durable jobs retain their separate journal semantics.
+- Removed the dormant `ActivityCall`/`ActivityRun` persistence model and serialized-`ResourceLink` media recovery. Activity and dashboard history now derive only from canonical v2 `ExecutionStore` records and structured media metadata, eliminating a second historical result interpretation path.
+- Corrected remaining native-structure violations: edit diagnostics no longer JSON-encode their diagnostic mapping; blocked `safe_delete_symbol` returns structured references rather than prose containing JSON; `upload_file` returns its destination and immutable snapshot identity as structured fields; `read_tool_output` no longer JSON-encodes its page.
+- Corrected the CLI project health check, which still attempted to `json.loads()` the now-native symbol-tool results after C05. The real project health check now succeeds against the current implementation.
+- Removed residual dead representation code, including the unused dashboard job-id regex and obsolete mocks/tests for transitional retained-output APIs. Presenter inputs were reduced to the logical result plus the one meaningful semantic-paging distinction; tool/execution identity no longer leaks into retention presentation internals.
+
+The final static sweep found no ordinary tool-local result truncation, generic `max_answer_chars`, result JSON-string reconstruction, alternate retained-output association path, or dashboard-only result compaction in `src/serena`. Remaining limits are semantic query/paging controls, input bounds, auxiliary argument/error storage, or local UI presentation that does not alter canonical result content.
+
+Post-audit validation completed with `uv run poe format`, `uv run poe type-check`, `uv run poe test` (`797 passed, 265 deselected`), `uv run serena project health-check .`, `git diff --check`, public-tool schema generation via `scripts/print_tool_overview.py`, and a Node syntax check of the generated activity-widget JavaScript.
+
+#### Final implementation audit follow-up captured 2026-09-10
+
+A further contract-level audit found five remaining edge cases beyond the post-C09 cleanup and corrected them:
+
+- Model-facing JSON now uses the same compact deterministic serialization used for central budgeting and canonical persistence. FastMCP's alternate pretty-printed JSON conversion is bypassed for ordinary results, including small wrapped string/list outputs and truncated envelopes. `show_activity`, the one manually registered model-visible structured tool outside the ordinary wrapper, now follows the same compact-text rule while retaining structured app content. Dashboard rendering remains free to pretty-format or richly render the parsed canonical value because whitespace/layout is not result content.
+- Structured fitting now handles collections containing many medium-sized strings adaptively instead of relying on a fixed verbose-string threshold. It shortens only as many of the longest previewable leaves as required to preserve collection breadth, then distributes remaining text budget fairly.
+- Added typed `ResultIdentityText` presentation metadata for exact location/identity strings. File listings, memory names, and symbolic names/paths mark these complete strings without shortening them at the tool boundary; the central fitter either preserves each selected identity byte-for-byte or compacts the surrounding collection with explicit omission counts rather than abbreviating identifiers into unusable paths/name paths.
+- Successful Git output is no longer `.strip()`-normalised. Git stdout/stderr content now reaches the logical-result boundary unchanged apart from the explicit separator needed when both captured streams are present.
+- The code-level `SerenaConfig` default result budget is now 3,000 approximate tokens, matching the shipped configuration template and live default; the smaller default is intentional now that exact retained-output recovery is central and reliable.
+
+The actual MCP boundary is also covered for pathological tiny positive budgets: when the configured budget is physically too small to contain the full retained-output envelope, the bounded fallback remains a successful valid MCP result rather than failing output-schema validation. Normal budgets continue to expose the full canonical `truncated` / `total_chars` / `output_id` / `result` envelope.
+
+A final static sweep again found no ordinary tool-local result truncation, tool-local JSON result serialization, generic `max_answer_chars`, alternate retained-output association, or dashboard-only result compaction. Remaining slices/limits are semantic operation controls, input validation, durable-job paging, auxiliary argument/error persistence, or presentation-only dashboard layout.
+
+Final follow-up validation completed with `uv run poe format`, `uv run poe type-check`, `uv run poe test` (`803 passed, 265 deselected`), `uv run serena project health-check .`, `git diff --check`, public-tool schema generation with no `max_answer_chars`, and Node syntax checks for both the generated activity-widget JavaScript and custom dashboard JavaScript.
+
 ## 7. Migration ledger
 
 Baseline captured for C00 on 2026-09-10. There are **19 `_limit_length()` call sites** in `src/serena/tools` that C05/C06 must remove or deliberately reclassify before `_limit_length()` itself is deleted:

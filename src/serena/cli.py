@@ -1,5 +1,4 @@
 import collections
-import json
 import os
 import subprocess
 import sys
@@ -639,7 +638,7 @@ class ProjectCommands(AutoRegisteringGroup):
                         lambda: find_symbol_tool.apply(symbol_name, relative_path=target_file, include_body=True),
                         access=ExecutionAccess.READ,
                     )
-                find_symbol_data = json.loads(find_symbol_result)
+                find_symbol_data = find_symbol_result
                 log.info("FindSymbolTool found %d matches for symbol %s", len(find_symbol_data), symbol_name)
 
                 # Test 3: FindReferencingSymbolsTool
@@ -649,7 +648,7 @@ class ProjectCommands(AutoRegisteringGroup):
                         find_refs_result = agent.execute_task(
                             lambda: find_refs_tool.apply(symbol_name, relative_path=target_file), access=ExecutionAccess.READ
                         )
-                        find_refs_data = json.loads(find_refs_result)
+                        find_refs_data = find_refs_result
                         log.info("FindReferencingSymbolsTool found %d references for symbol %s", len(find_refs_data), symbol_name)
                 except Exception as e:
                     log.warning("FindReferencingSymbolsTool failed for symbol %s: %s", symbol_name, str(e))

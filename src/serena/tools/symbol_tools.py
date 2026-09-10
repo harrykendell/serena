@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from serena.errors import UserFacingError
+from serena.result_metadata import ResultIdentityText
 from serena.symbol import LanguageServerSymbol, LanguageServerSymbolDictGrouper
 from serena.tools import (
     SUCCESS_RESULT,
@@ -19,6 +20,25 @@ from serena.tools import (
 from serena.util.ls_diagnostics import GroupedDiagnostics
 from serena.util.text_utils import find_text_coordinates
 from solidlsp.ls_types import SymbolKind
+
+
+def _mark_symbol_result_identities(value: Any, *, all_strings: bool = False, identity_context: bool = False) -> Any:
+    """Marks exact symbol identities/locations for central presentation without changing their string value."""
+    if isinstance(value, str):
+        return ResultIdentityText(value) if all_strings or identity_context else value
+    if isinstance(value, list):
+        return [_mark_symbol_result_identities(item, all_strings=all_strings, identity_context=identity_context) for item in value]
+    if isinstance(value, dict):
+        identity_fields = {"name", "name_path", "relative_path", "children", "symbols"}
+        return {
+            key: _mark_symbol_result_identities(
+                item,
+                all_strings=all_strings,
+                identity_context=identity_context or key in identity_fields,
+            )
+            for key, item in value.items()
+        }
+    return value
 
 
 class GetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead):
@@ -45,7 +65,7 @@ class GetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead):
             depth = 0
 
         result = self.get_symbol_overview(relative_path, depth=depth)
-        return self.symbol_dict_grouper.group(result)
+        return _mark_symbol_result_identities(self.symbol_dict_grouper.group(result), all_strings=True)
 
     def get_symbol_overview(self, relative_path: str, depth: int = 0) -> list[LanguageServerSymbol.OutputDict]:
         """Returns the symbol hierarchy for one analyzable source file."""
@@ -169,11 +189,13 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead):
             relative_path_to_name_paths: defaultdict[str, list[str]] = defaultdict(list)
             for symbol in symbols:
                 relative_path_to_name_paths[symbol.location.relative_path or "unknown"].append(symbol.get_name_path())
-            return {
-                "matched": n_matches,
-                "max_matches": max_matches,
-                "symbols": dict(relative_path_to_name_paths),
-            }
+            return _mark_symbol_result_identities(
+                {
+                    "matched": n_matches,
+                    "max_matches": max_matches,
+                    "symbols": dict(relative_path_to_name_paths),
+                }
+            )
 
         symbol_dicts = [
             s.to_dict(
@@ -198,7 +220,7 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead):
                     # If we ever upgrade to 3.15, we can remove the type: ignore[typeddict-unknown-key]
                     s_dict["info"] = symbol_info
 
-        return self.symbol_dict_grouper.group(symbol_dicts)
+        return _mark_symbol_result_identities(self.symbol_dict_grouper.group(symbol_dicts))
 
     @classmethod
     def get_param_aliases(cls) -> dict[str, str]:
@@ -271,7 +293,7 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
             ref_dict["content_around_reference"] = content_around_ref.to_display_string()
             reference_dicts.append(ref_dict)
 
-        return self.symbol_dict_grouper.group(reference_dicts)
+        return _mark_symbol_result_identities(self.symbol_dict_grouper.group(reference_dicts))
 
 
 class FindImplementationsTool(Tool, ToolMarkerSymbolicRead):
@@ -331,7 +353,7 @@ class FindImplementationsTool(Tool, ToolMarkerSymbolicRead):
                     s_dict["info"] = symbol_info
                     s_dict.pop("name", None)  # name is included in the info
 
-        return symbol_dicts
+        return _mark_symbol_result_identities(symbol_dicts)
 
 
 class FindDeclarationTool(Tool, ToolMarkerSymbolicRead):
@@ -393,11 +415,13 @@ class FindDeclarationTool(Tool, ToolMarkerSymbolicRead):
             raise UserFacingError(f"No symbol declaration found at {relative_path}:{coords.line}:{coords.col}.")
 
         # create output
-        return self._defining_symbol_to_result_dict(
-            symbol_retriever,
-            defining_symbol,
-            include_body,
-            include_info,
+        return _mark_symbol_result_identities(
+            self._defining_symbol_to_result_dict(
+                symbol_retriever,
+                defining_symbol,
+                include_body,
+                include_info,
+            )
         )
 
     @staticmethod
@@ -501,7 +525,7 @@ class ReplaceSymbolBodyTool(EditingToolWithDiagnostics):
         name_path: str,
         relative_path: str,
         body: str,
-    ) -> str:
+    ) -> str | dict[str, object]:
         r"""
         Replaces the body of the given symbol.
 
@@ -534,7 +558,7 @@ class InsertAfterSymbolTool(EditingToolWithDiagnostics):
         name_path: str,
         relative_path: str,
         body: str,
-    ) -> str:
+    ) -> str | dict[str, object]:
         """
         Use this to insert code after a class/method/function definition.
         Don't use to insert after assignments (constants, fields).
@@ -560,7 +584,7 @@ class InsertBeforeSymbolTool(EditingToolWithDiagnostics):
         name_path: str,
         relative_path: str,
         body: str,
-    ) -> str:
+    ) -> str | dict[str, object]:
         """
         Inserts the given content before the beginning of the definition of the given symbol (via the symbol's location).
         A typical use case is to insert a new class, function, method, field or variable assignment; or
@@ -609,10 +633,10 @@ class SafeDeleteSymbol(Tool, ToolMarkerSymbolicEdit):
         self,
         name_path_pattern: str,
         relative_path: str,
-    ) -> str:
+    ) -> str | dict[str, object]:
         """
         Deletes the symbol if it is safe to do so (i.e., if there are no references to it)
-        or returns a list of references to it.
+        or returns structured reference locations that block deletion.
 
         :param name_path_pattern: name path of the symbol to delete
         :param relative_path: the relative path to the file containing the symbol to delete
@@ -641,7 +665,11 @@ class SafeDeleteSymbol(Tool, ToolMarkerSymbolicEdit):
                     continue
                 file_to_lines[ref_relative_path].append(ref_loc["range"]["start"]["line"])
         if file_to_lines:
-            return f"Cannot delete, the symbol {symbol_name_path} is referenced in: {self._to_json(file_to_lines)}"
+            return {
+                "deleted": False,
+                "symbol": ResultIdentityText(symbol_name_path),
+                "references": dict(file_to_lines),
+            }
         code_editor = self.create_ls_code_editor()
         code_editor.delete_symbol(symbol_name_path, relative_file_path=symbol_rel_path)
         return SUCCESS_RESULT

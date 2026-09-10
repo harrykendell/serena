@@ -1,6 +1,5 @@
 """Behaviour tests for retained oversized tool output."""
 
-import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -44,16 +43,16 @@ def test_paging_uses_stable_output_id_after_later_tool_output(tmp_path: Path) ->
     second_content = "SECOND-" + "b" * 1_500 + "-SECOND-END"
 
     try:
-        first_presentation = presenter.present(first_content, tool_name="probe", execution_id="execution-first")
-        second_presentation = presenter.present(second_content, tool_name="probe", execution_id="execution-second")
+        first_presentation = presenter.present(first_content)
+        second_presentation = presenter.present(second_content)
         first_id = first_presentation.retained_output_id
         second_id = second_presentation.retained_output_id
         assert first_id is not None
         assert second_id is not None
         assert first_id != second_id
 
-        first_page = json.loads(read_tool.apply(output_id=first_id, offset=1_200, max_chars=400))
-        second_page = json.loads(read_tool.apply(output_id=second_id, offset=1_200, max_chars=400))
+        first_page = read_tool.apply(output_id=first_id, offset=1_200, max_chars=400)
+        second_page = read_tool.apply(output_id=second_id, offset=1_200, max_chars=400)
 
         assert "FIRST" in first_page["content"]
         assert "SECOND" not in first_page["content"]
@@ -68,14 +67,14 @@ def test_unicode_paging_uses_character_offsets_and_lengths() -> None:
     agent = _agent_with_store(store)
     read_tool = ReadToolOutputTool(agent)
     content = "A🙂漢字éβZ" * 80
-    output_id = store.retain("unicode_probe", content)
+    output_id = store.retain(content)
 
     try:
-        first_page = json.loads(read_tool.apply(output_id=output_id, offset=1, max_chars=5))
+        first_page = read_tool.apply(output_id=output_id, offset=1, max_chars=5)
         middle_offset = len(content) // 2 - 3
-        middle_page = json.loads(read_tool.apply(output_id=output_id, offset=middle_offset, max_chars=7))
+        middle_page = read_tool.apply(output_id=output_id, offset=middle_offset, max_chars=7)
         final_offset = len(content) - 4
-        final_page = json.loads(read_tool.apply(output_id=output_id, offset=final_offset, max_chars=10))
+        final_page = read_tool.apply(output_id=output_id, offset=final_offset, max_chars=10)
 
         assert first_page["total_chars"] == len(content)
         assert first_page["content"] == content[1:6]
@@ -97,9 +96,14 @@ def test_retained_output_survives_store_restart(tmp_path: Path) -> None:
         arguments="{}",
     )
     store = ToolOutputStore(tmp_path / "tool-outputs", execution_store=execution_store)
-    output_id = store.retain("overflow_probe", "persistent-output", execution_id="execution-a")
-    execution_store.finish_execution("execution-a", succeeded=True, result="persistent-output")
-    execution_store.set_retained_output("execution-a", output_id, len("persistent-output"))
+    output_id = store.retain("persistent-output")
+    execution_store.finish_execution(
+        "execution-a",
+        succeeded=True,
+        result="persistent-output",
+        retained_output_id=output_id,
+        retained_output_chars=len("persistent-output"),
+    )
     store.close()
 
     restored_execution_store = ExecutionStore(tmp_path / "execution-store")

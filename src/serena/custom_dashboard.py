@@ -365,7 +365,7 @@ class DashboardSerenaActivityOverview:
     def get_call_detail(self, panel_id: str, call_id: str) -> dict[str, Any]:
         """Returns one retained tool call with its persisted canonical result unchanged."""
         call = self._archive.get_call(panel_id, call_id)
-        media = ActivityMedia.from_storage_dict(call.get("media")) or ActivityMedia.from_serialized_result(str(call.get("result") or ""))
+        media = ActivityMedia.from_storage_dict(call.get("media"))
         parameters = str(call.get("parameters") or "")
         raw_result = call.get("error") or call.get("result")
         return {
@@ -382,7 +382,7 @@ class DashboardSerenaActivityOverview:
     def get_call_media(self, panel_id: str, call_id: str) -> DashboardMediaContent:
         """Returns retained media bytes for one dashboard activity call."""
         call = self._archive.get_call(panel_id, call_id)
-        media = ActivityMedia.from_storage_dict(call.get("media")) or ActivityMedia.from_serialized_result(str(call.get("result") or ""))
+        media = ActivityMedia.from_storage_dict(call.get("media"))
         if media is None:
             raise ValueError("Activity call has no retained media")
         link = ResourceLink(

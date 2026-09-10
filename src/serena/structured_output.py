@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import cast
 
+from serena.result_metadata import ResultIdentityText
+
 
 class StructuredOutputCompactor:
     """Fits JSON-safe values adaptively while preserving useful structure."""
@@ -155,25 +157,42 @@ class StructuredOutputCompactor:
         list_limit: int | None = None,
         dict_limit: int | None = None,
     ) -> object | None:
-        """Fits bulky text leaves fairly inside one fixed structural shape."""
+        """Fits text leaves adaptively while preserving the requested structural shape."""
         shaped = self._shape(value, list_limit=list_limit, dict_limit=dict_limit)
-        verbose_lengths = self._verbose_text_lengths(shaped)
-        if not verbose_lengths:
-            return shaped if self._serialized_length(shaped, pretty=pretty) <= max_chars else None
+        if self._serialized_length(shaped, pretty=pretty) <= max_chars:
+            return shaped
 
-        # reserve one explicit ellipsis character for every bulky text leaf before spending preview space
-        minimum_budget = len(verbose_lengths)
-        smallest = self._apply_text_budget(shaped, minimum_budget)
-        if self._serialized_length(smallest, pretty=pretty) > max_chars:
+        # shorten only as many of the longest text leaves as necessary to preserve this topology
+        all_lengths = self._previewable_text_lengths(shaped, 2)
+        if not all_lengths:
+            return None
+        candidate_lengths = sorted(set(all_lengths))
+        low = 0
+        high = len(candidate_lengths) - 1
+        chosen_min_length: int | None = None
+        chosen_lengths: list[int] = []
+        while low <= high:
+            index = (low + high) // 2
+            min_length = candidate_lengths[index]
+            preview_lengths = [length for length in all_lengths if length >= min_length]
+            smallest = self._apply_text_budget(shaped, len(preview_lengths), min_length=min_length)
+            if self._serialized_length(smallest, pretty=pretty) <= max_chars:
+                chosen_min_length = min_length
+                chosen_lengths = preview_lengths
+                low = index + 1
+            else:
+                high = index - 1
+
+        if chosen_min_length is None:
             return None
 
-        # binary-search the aggregate preview budget; fair allocation avoids spending it all on one record
-        low = minimum_budget
-        high = sum(verbose_lengths)
-        best = smallest
+        # use the remaining budget fairly across the selected leaves
+        low = len(chosen_lengths)
+        high = sum(chosen_lengths)
+        best = self._apply_text_budget(shaped, low, min_length=chosen_min_length)
         while low <= high:
             text_budget = (low + high) // 2
-            candidate = self._apply_text_budget(shaped, text_budget)
+            candidate = self._apply_text_budget(shaped, text_budget, min_length=chosen_min_length)
             if self._serialized_length(candidate, pretty=pretty) <= max_chars:
                 best = candidate
                 low = text_budget + 1
@@ -229,6 +248,8 @@ class StructuredOutputCompactor:
         """Ranks fields generically so compact scalar identity survives verbose leaves."""
         if value is None or isinstance(value, bool | int | float):
             return (0, self._serialized_length(value, pretty=False))
+        if isinstance(value, ResultIdentityText):
+            return (0, len(value))
         if isinstance(value, str):
             if len(value) <= self._ESSENTIAL_TEXT_MAX:
                 return (1, len(value))
@@ -238,15 +259,17 @@ class StructuredOutputCompactor:
             return (2 if size <= self._SMALL_STRUCTURE_MAX else 3, size)
         return (3, self._serialized_length(value, pretty=False))
 
-    def _apply_text_budget(self, value: object, total_budget: int) -> object:
-        """Distributes one aggregate text budget fairly over all bulky text leaves."""
-        lengths = self._verbose_text_lengths(value)
+    def _apply_text_budget(self, value: object, total_budget: int, *, min_length: int) -> object:
+        """Distributes one aggregate text budget fairly over eligible text leaves."""
+        lengths = self._previewable_text_lengths(value, min_length)
         allocations = self._fair_text_allocations(lengths, total_budget)
         allocation_iter = iter(allocations)
 
         def apply(item: object) -> object:
+            if isinstance(item, ResultIdentityText):
+                return item
             if isinstance(item, str):
-                if self._is_verbose_text(item):
+                if len(item) >= min_length:
                     return self.truncate_text(item, next(allocation_iter))
                 return item
             if isinstance(item, list):
@@ -257,13 +280,16 @@ class StructuredOutputCompactor:
 
         return apply(value)
 
-    @classmethod
-    def _verbose_text_lengths(cls, value: object) -> list[int]:
+    @staticmethod
+    def _previewable_text_lengths(value: object, min_length: int) -> list[int]:
+        """Collects text-leaf lengths eligible for adaptive previewing."""
         lengths: list[int] = []
 
         def collect(item: object) -> None:
+            if isinstance(item, ResultIdentityText):
+                return
             if isinstance(item, str):
-                if cls._is_verbose_text(item):
+                if len(item) >= min_length:
                     lengths.append(len(item))
                 return
             if isinstance(item, list):
@@ -276,10 +302,6 @@ class StructuredOutputCompactor:
 
         collect(value)
         return lengths
-
-    @classmethod
-    def _is_verbose_text(cls, text: str) -> bool:
-        return len(text) > cls._ESSENTIAL_TEXT_MAX
 
     @staticmethod
     def _fair_text_allocations(lengths: list[int], total_budget: int) -> list[int]:

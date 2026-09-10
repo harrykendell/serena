@@ -12,7 +12,6 @@ from serena.execution_store import ExecutionRecord, ExecutionStore, SessionRecor
 
 _FILE_RESOURCE_RE = re.compile(r"serena-file://export/([0-9a-f]{64}|[0-9a-f]{48})(?![0-9a-f])")
 _PANEL_ID_RE = re.compile(r"[0-9a-f]{16}")
-_JOB_ID_RE = re.compile(r"['\"]job_id['\"]\s*:\s*['\"]([^'\"]+)['\"]")
 
 
 @dataclass(frozen=True)

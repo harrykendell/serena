@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Literal
 
 from serena.errors import UserFacingError
+from serena.result_metadata import ResultIdentityText
 from serena.tools import SUCCESS_RESULT, EditedFileContext, EditingToolWithDiagnostics, Tool
 from serena.util.file_system import scan_directory
 from serena.util.text_utils import (
@@ -56,7 +57,7 @@ class CreateTextFileTool(EditingToolWithDiagnostics):
     Creates/overwrites a file in the project directory.
     """
 
-    def apply(self, relative_path: str, content: str) -> str:
+    def apply(self, relative_path: str, content: str) -> str | dict[str, object]:
         """Writes a new file or overwrites an existing file.
 
         :param relative_path: the relative path to the file to create
@@ -112,7 +113,10 @@ class ListDirTool(Tool):
             is_ignored_dir=is_ignored_path_fn,
             is_ignored_file=is_ignored_path_fn,
         )
-        return {"dirs": dirs, "files": files}
+        return {
+            "dirs": [ResultIdentityText(path) for path in dirs],
+            "files": [ResultIdentityText(path) for path in files],
+        }
 
 
 class FindFileTool(Tool):
@@ -148,7 +152,7 @@ class FindFileTool(Tool):
             is_ignored_file=is_ignored_file,
             relative_to=self.get_project_root(),
         )
-        return {"files": files}
+        return {"files": [ResultIdentityText(path) for path in files]}
 
 
 class ReplaceContentTool(EditingToolWithDiagnostics):
@@ -163,7 +167,7 @@ class ReplaceContentTool(EditingToolWithDiagnostics):
         repl: str,
         mode: Literal["literal", "regex"],
         allow_multiple_occurrences: bool = False,
-    ) -> str:
+    ) -> str | dict[str, object]:
         r"""
         Replaces one or more occurrences of a given pattern in a file with new content.
 
@@ -221,7 +225,7 @@ class ReplaceInFilesTool(EditingToolWithDiagnostics):
         dry_run: bool = False,
         occurrence_ids: list[str] | None = None,
         expected_count: int = -1,
-    ) -> str:
+    ) -> str | dict[str, object]:
         r"""
         Replaces occurrences of a pattern across multiple files in ONE call.
 
@@ -387,7 +391,7 @@ class ReplaceInFilesTool(EditingToolWithDiagnostics):
         contents: dict[str, str],
         needle: str,
         repl: str,
-    ) -> str:
+    ) -> str | dict[str, object]:
         occurrences_by_file: dict[str, list[ReplacementOccurrence]] = {}
         for occ in occurrences:
             occurrences_by_file.setdefault(occ.relative_path, []).append(occ)

@@ -916,6 +916,7 @@ def test_retained_output_round_trip_is_exact_through_mcp(
 ) -> None:
     agent, roots = multi_project_agent
     _activate(agent, "session-a", "project_a")
+    agent.serena_config.default_max_tool_answer_tokens = 1_000
     content = "start-" + "x" * 18_000 + "-useful-tail"
     (roots["project_a"] / "large.txt").write_text(content)
     read_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(ReadFileTool))
@@ -945,11 +946,17 @@ def test_retained_output_round_trip_is_exact_through_mcp(
             {"output_id": output_id, "offset": 9_000, "max_chars": 9_100},
             context=_mcp_context("session-a"),
         )
-        first_payload = json.loads(cast(str, first_page))
-        second_payload = json.loads(cast(str, second_page))
-        assert first_payload["output_id"] == output_id
-        assert first_payload["complete"] is False
-        assert first_payload["content"] + second_payload["content"] == content
+        assert isinstance(first_page, dict)
+        assert isinstance(second_page, dict)
+        assert first_page["output_id"] == output_id
+        assert first_page["complete"] is False
+        assert first_page["content"] + second_page["content"] == content
+        assert "truncated" not in first_page
+        assert "truncated" not in second_page
+
+        page_executions = agent.execution_store.list_executions(newest_first=True)[:2]
+        assert all(execution.retained_output_id is None for execution in page_executions)
+        assert json.loads(cast(str, page_executions[0].result)) == second_page
 
     asyncio.run(scenario())
 
@@ -985,8 +992,9 @@ def test_central_result_presentation_is_used_at_actual_mcp_boundary(
         assert isinstance(structured, dict)
         assert structured["truncated"] is True
         assert structured["total_chars"] == len(logical_result)
-        assert json.loads(result.content[0].text) == structured
-        assert len(json.dumps(structured, ensure_ascii=False, separators=(",", ":"))) <= 4_000
+        canonical_text = json.dumps(structured, ensure_ascii=False, separators=(",", ":"))
+        assert result.content[0].text == canonical_text
+        assert len(result.content[0].text) <= 4_000
 
         output_id = cast(str, structured["output_id"])
         retained = agent.read_tool_output(output_id, 0, len(logical_result))
@@ -998,6 +1006,131 @@ def test_central_result_presentation_is_used_at_actual_mcp_boundary(
         assert execution.retained_output_chars == len(logical_result)
         assert execution.result == json.dumps(structured, ensure_ascii=False, separators=(",", ":"))
         assert json.loads(execution.result) == structured
+
+    asyncio.run(scenario())
+
+
+def test_actual_mcp_boundary_keeps_pathological_tiny_budget_valid(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "global", "project_a")
+    agent.serena_config.default_max_tool_answer_tokens = 1
+    logical_result = "x" * 1_000
+    tool = agent.get_tool(ReadFileTool)
+    monkeypatch.setattr(tool, "apply", lambda **kwargs: logical_result)
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(tool)
+    mcp = FastMCP("tiny-presentation-test")
+    mcp._tool_manager._tools[mcp_tool.name] = mcp_tool
+
+    async def scenario() -> None:
+        handler = mcp._mcp_server.request_handlers[CallToolRequest]
+        server_result = await handler(
+            CallToolRequest(
+                params=CallToolRequestParams(
+                    name=mcp_tool.name,
+                    arguments={"relative_path": "synthetic.txt"},
+                )
+            )
+        )
+        result = server_result.root
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is False
+        assert len(result.content[0].text) <= 4
+        assert result.structuredContent is None
+
+        execution = agent.execution_store.list_executions(newest_first=True)[0]
+        assert execution.result == result.content[0].text
+        assert execution.retained_output_id is not None
+        assert execution.retained_output_chars == len(logical_result)
+
+    asyncio.run(scenario())
+
+
+def test_mcp_boundary_uses_compact_canonical_text_for_small_wrapped_results(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "global", "project_a")
+    cases: list[tuple[type, dict[str, object], object]] = [
+        (ReadFileTool, {"relative_path": "synthetic.txt"}, "plain text result"),
+        (
+            FindSymbolTool,
+            {"name_path_pattern": "Thing"},
+            [
+                {"name_path": "Thing/run", "relative_path": "src/example.py", "kind": "Method"},
+                {"name_path": "Thing/stop", "relative_path": "src/example.py", "kind": "Method"},
+            ],
+        ),
+    ]
+
+    async def scenario() -> None:
+        for index, (tool_cls, arguments, logical_result) in enumerate(cases):
+            tool = agent.get_tool(tool_cls)
+            monkeypatch.setattr(tool, "apply", lambda logical_result=logical_result, **kwargs: logical_result)
+            mcp_tool = SerenaMCPFactory.make_mcp_tool(tool)
+            mcp = FastMCP(f"canonical-wrapped-result-{index}")
+            mcp._tool_manager._tools[mcp_tool.name] = mcp_tool
+            handler = mcp._mcp_server.request_handlers[CallToolRequest]
+
+            server_result = await handler(
+                CallToolRequest(
+                    params=CallToolRequestParams(
+                        name=mcp_tool.name,
+                        arguments=arguments,
+                    )
+                )
+            )
+            result = server_result.root
+
+            assert isinstance(result, CallToolResult)
+            assert result.isError is False
+            expected_text = (
+                logical_result if isinstance(logical_result, str) else json.dumps(logical_result, ensure_ascii=False, separators=(",", ":"))
+            )
+            assert result.content[0].text == expected_text
+            assert result.structuredContent == {"result": logical_result}
+
+            execution = agent.execution_store.list_executions(newest_first=True)[0]
+            assert execution.result == json.dumps(logical_result, ensure_ascii=False, separators=(",", ":"))
+            assert execution.retained_output_id is None
+
+    asyncio.run(scenario())
+
+
+def test_show_activity_uses_compact_model_json_with_structured_app_content(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "global", "project_a")
+    tracker = ActivityTracker(_EmptyJobSource(), execution_store=agent.execution_store)
+    factory = SerenaMCPFactory(transport="stdio")
+    factory.agent = agent
+    factory._activity_tracker = tracker
+    mcp = FastMCP("activity-presentation-test")
+    factory._register_activity_tools(mcp)
+
+    async def scenario() -> None:
+        handler = mcp._mcp_server.request_handlers[CallToolRequest]
+        server_result = await handler(
+            CallToolRequest(
+                params=CallToolRequestParams(
+                    name="show_activity",
+                    arguments={"conversation_title": "Presentation audit"},
+                )
+            )
+        )
+        result = server_result.root
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is False
+        assert isinstance(result.structuredContent, dict)
+        assert result.content[0].text == json.dumps(
+            result.structuredContent,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
 
     asyncio.run(scenario())
 
@@ -1065,6 +1198,7 @@ def test_model_and_dashboard_share_canonical_presentation_for_small_and_large_re
             execution = agent.execution_store.list_executions(newest_first=True)[0]
             assert execution.result is not None
             assert json.loads(execution.result) == model_value
+            assert result.content[0].text == execution.result
 
             detail = tracker.get_call_detail("global", run["run_id"], execution.execution_id)
             assert detail["result"] == execution.result

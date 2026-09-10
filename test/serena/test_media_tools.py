@@ -234,8 +234,9 @@ def test_upload_file_writes_chatgpt_file_inside_project(project: Project, tmp_pa
 
     assert destination.read_bytes() == data
     assert stat.S_IMODE(destination.stat().st_mode) == expected_new_mode
-    assert result.startswith("OK; uploaded=incoming/edited.txt; source_snapshot=serena-file://export/")
-    snapshot_token = result.rsplit("/", maxsplit=1)[1]
+    assert result["uploaded"] == "incoming/edited.txt"
+    assert result["source_snapshot"].startswith("serena-file://export/")
+    snapshot_token = result["source_snapshot"].rsplit("/", maxsplit=1)[1]
     assert FileSnapshotStore.read(snapshot_token) == data
     assert tool.get_mcp_tool_meta() == {"openai/fileParams": ["file"]}
 

@@ -1,5 +1,4 @@
 import inspect
-import json
 from abc import ABC
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -82,6 +81,10 @@ class ToolMarkerCanEdit(ToolMarker):
 
 class ToolMarkerDoesNotRequireActiveProject(ToolMarker):
     pass
+
+
+class ToolMarkerExplicitResultPaging(ToolMarker):
+    """Marks a tool whose result size is explicitly selected by semantic paging arguments."""
 
 
 class ToolMarkerSymbolicRead(ToolMarker):
@@ -383,10 +386,6 @@ class Tool(Component):
             symbolic_read=isinstance(self, ToolMarkerSymbolicRead),
         )
 
-    @staticmethod
-    def _to_json(x: Any) -> str:
-        return json.dumps(x, ensure_ascii=False)
-
 
 class EditingToolWithDiagnostics(Tool, ToolMarkerCanEdit):
     """
@@ -423,7 +422,8 @@ class EditingToolWithDiagnostics(Tool, ToolMarkerCanEdit):
         def format_result(
             self,
             base_result: str,
-        ) -> str:
+        ) -> str | dict[str, object]:
+            """Returns the edit result, preserving any diagnostic structure as a native mapping."""
             if not self._is_diagnostics_enabled:
                 return base_result
 
@@ -436,12 +436,10 @@ class EditingToolWithDiagnostics(Tool, ToolMarkerCanEdit):
 
             if not grouped_diagnostics:
                 return base_result
-            else:
-                result_dict = {
-                    "result": base_result,
-                    EditingToolWithDiagnostics.DIAGNOSTICS_KEY: grouped_diagnostics,
-                }
-                return self._tool._to_json(result_dict)
+            return {
+                "result": base_result,
+                EditingToolWithDiagnostics.DIAGNOSTICS_KEY: grouped_diagnostics,
+            }
 
 
 class EditedFileContext:

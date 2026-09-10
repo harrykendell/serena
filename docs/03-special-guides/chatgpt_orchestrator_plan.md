@@ -835,11 +835,11 @@ Work:
 - stable retained output IDs/cursors;
 - explicit completeness/truncation metadata.
 
-Implemented checkpoint: when `read_tool_output` is available, implicit Serena tool responses now use a configurable approximate token budget (8,000 tokens by default, using four characters per token) instead of the legacy 150,000-character ceiling. Explicit `max_answer_chars` values remain exact character overrides, and contexts without retained-output paging retain the legacy default. The shared bounded-response path covers high-volume file/search/Git-style tools, while shell execution reuses the same resolved budget with its existing retained live transcript path; Serena jobs remain independently bounded by their existing cursor-based output mechanism.
+Implemented checkpoint, subsequently superseded by `serena_central_result_presentation_plan.md`: O08 first introduced bounded Serena responses and stable retained-output recovery. The current implementation has one central presenter at the MCP boundary instead of tool-local budgeting. Ordinary tools return complete logical values, no ordinary public tool exposes `max_answer_chars`, and oversized results are retained exactly before one canonical model/dashboard presentation is produced.
 
-Any oversized bounded result in the retained-output context now keeps the exact full result under a stable output ID even when a compact shortening fits the response budget. Tail responses and `read_tool_output` pages expose explicit `complete`, `truncated`, range/cursor, and live/open state metadata so callers do not need to infer whether they have the whole result. Existing character offsets remain stable across later tool calls.
+`read_tool_output` remains explicit semantic paging over that retained result. Its native structured page is already bounded by the caller's `max_chars` request and therefore is not recursively truncated or retained again by the ordinary presentation budget. Durable jobs remain independently paged by their journal/cursor semantics; there is no retained live-output path for ordinary foreground tools.
 
-Acceptance coverage verifies context-sensitive implicit budgeting without changing explicit character limits, exact recovery after compact search shortening, stable output IDs across later results, complete versus partial retained pages, and live-output completeness semantics.
+Current acceptance coverage verifies central model/dashboard identity, exact retained recovery, stable output IDs across later results and restart, structured search/symbol/shell results, explicit retained-page semantics, and the absence of recursive truncation when a requested retained page is larger than the ordinary presentation budget.
 
 ### O09 - Routing guidance and polish
 

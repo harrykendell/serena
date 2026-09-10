@@ -12,7 +12,7 @@ from mcp.types import CallToolResult, ResourceLink
 from pydantic import BaseModel
 
 from serena.structured_output import StructuredOutputCompactor
-from serena.tool_output import ToolOutputDescriptor, ToolOutputStore
+from serena.tool_output import ToolOutputStore
 
 
 @dataclass(frozen=True)
@@ -35,37 +35,27 @@ class ToolResultPresenter:
         self._max_chars = max_chars
         self._structured_compactor = StructuredOutputCompactor()
 
-    def present(
-        self,
-        logical_result: object,
-        *,
-        tool_name: str,
-        execution_id: str | None = None,
-        retained_output: ToolOutputDescriptor | None = None,
-    ) -> ToolResultPresentation:
-        """Returns the canonical bounded presentation of one complete logical result."""
+    def present(self, logical_result: object, *, semantic_paging: bool = False) -> ToolResultPresentation:
+        """Returns the canonical presentation of one complete logical result."""
         # bypass native MCP media/resource results without reducing their content
         if self._is_native_result(logical_result):
             return ToolResultPresentation(transport_value=logical_result, persisted_serialization=None)
 
-        # normalize ordinary values once before measuring or retaining them
+        # normalize ordinary values once before measuring, persisting, or retaining them
         normalized = self._normalize(logical_result)
         complete_serialization = self._serialize_logical_result(normalized)
-        if self._transport_length(normalized) <= self._max_chars:
+
+        # Explicit retained-output pages are already bounded by their semantic paging arguments.
+        # Reapplying the ordinary result budget here would create recursive retained-output pages.
+        if semantic_paging or self._transport_length(normalized) <= self._max_chars:
             return ToolResultPresentation(
                 transport_value=normalized,
                 persisted_serialization=self._serialize_presentation(normalized),
-                retained_output_id=retained_output.output_id if retained_output is not None else None,
-                retained_output_chars=retained_output.total_chars if retained_output is not None else None,
             )
 
-        # retain the exact complete logical serialization unless an earlier execution stage already owns it
-        if retained_output is None:
-            output_id = self._output_store.retain(tool_name, complete_serialization, execution_id=execution_id)
-            total_chars = len(complete_serialization)
-        else:
-            output_id = retained_output.output_id
-            total_chars = retained_output.total_chars
+        # retain the exact complete logical serialization before constructing the bounded preview
+        output_id = self._output_store.retain(complete_serialization)
+        total_chars = len(complete_serialization)
 
         # construct one canonical bounded envelope shared by transport and persistence
         if isinstance(normalized, str):

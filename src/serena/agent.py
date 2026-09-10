@@ -37,7 +37,7 @@ from serena.memories.memory_manager import MemoryManager
 from serena.project import Project
 from serena.prompt_factory import SerenaPromptFactory
 from serena.runtime import AvailableTools, ProjectPromptStatus, ProjectRuntime, SessionRegistry
-from serena.tool_output import ToolOutputDescriptor, ToolOutputPage, ToolOutputStore
+from serena.tool_output import ToolOutputPage, ToolOutputStore
 from serena.tools import (
     OnboardingTool,
     OpenDashboardTool,
@@ -217,10 +217,6 @@ class SerenaAgent:
     def job_manager(self) -> JobManager:
         """Returns the process-wide persistent Serena job manager."""
         return self._job_manager
-
-    def describe_tool_execution_output(self, execution_id: str) -> ToolOutputDescriptor | None:
-        """Return retained-output metadata for one exact tool execution, if available."""
-        return self._tool_output_store.describe_execution(execution_id)
 
     def get_dashboard_url(self) -> str | None:
         """

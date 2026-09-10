@@ -14,7 +14,6 @@ The following supported operational failures now use the user-facing/tool-operat
 - `Project.create_language_server_manager`: invalid tool/idle timeout configuration.
 - `Project.get_language_server_manager_or_raise`: known unavailable manager state.
 - `RuntimeReadiness.wait_until_ready`: preserves an existing `UserFacingError`; arbitrary initialization failures remain internal.
-- `Tool._effective_max_answer_chars`: invalid resolved answer budget.
 - `Tool._apply_with_lsp_recovery`: typed `LanguageServerOperationError` failures are user-facing; plain `SolidLSPException` remains internal, while termination still follows the existing read-retry/write-no-replay recovery path.
 - `Request.get_result` and `LanguageServerInterface.send_request`: request timeouts and server-reported request failures use `LanguageServerOperationError` rather than generic exceptions or payload-heavy request diagnostics.
 - `SolidLanguageServer.PathWorkspaceStatus.check_within_workspace_or_raise`, `request_full_symbol_tree`, `request_overview`, and `FileUtils.read_file`: explicit missing, ignored, outside-workspace, or concurrently removed files use the LSP operational exception path.

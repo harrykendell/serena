@@ -36,9 +36,6 @@ class _MockAgent:
         del session_id
         return nullcontext()
 
-    def describe_tool_execution_output(self, execution_id: str):
-        return self.tool_output_store.describe_execution(execution_id)
-
 
 class _EchoCommandTool(Tool):
     def __init__(self) -> None:

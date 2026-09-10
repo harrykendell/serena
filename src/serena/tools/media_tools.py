@@ -280,7 +280,7 @@ class UploadFileTool(Tool, ToolMarkerCanEdit):
             return candidate
         raise RuntimeError("Could not allocate a temporary upload file")
 
-    def apply(self, file: OpenAIFile, relative_path: str, overwrite: bool = False) -> str:
+    def apply(self, file: OpenAIFile, relative_path: str, overwrite: bool = False) -> dict[str, str]:
         """Uploads one ChatGPT file into the active project.
 
         :param file: ChatGPT file reference supplied by ``openai/fileParams``
@@ -327,7 +327,10 @@ class UploadFileTool(Tool, ToolMarkerCanEdit):
         finally:
             temporary_path.unlink(missing_ok=True)
 
-        return f"OK; uploaded={relative_path}; source_snapshot={source_snapshot.link.uri}"
+        return {
+            "uploaded": relative_path,
+            "source_snapshot": str(source_snapshot.link.uri),
+        }
 
 
 class FetchMediaFileTool(_McpMediaTool):

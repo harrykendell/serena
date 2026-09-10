@@ -2,6 +2,7 @@ import logging
 from typing import Literal
 
 from serena.errors import UserFacingError
+from serena.result_metadata import ResultIdentityText
 from serena.tools import SUCCESS_RESULT, Tool, ToolMarkerCanEdit
 
 log = logging.getLogger(__name__)
@@ -62,7 +63,8 @@ class ListMemoriesTool(Tool):
         :param topic: optional memory topic to list
         :return: complete native memory listing
         """
-        return self.memory_manager.list_memories(topic).to_dict()
+        listing = self.memory_manager.list_memories(topic).to_dict()
+        return {key: [ResultIdentityText(name) for name in names] for key, names in listing.items()}
 
 
 class DeleteMemoryTool(Tool, ToolMarkerCanEdit):

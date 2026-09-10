@@ -28,11 +28,6 @@ class MockAgent:
         del session_id
         return
 
-    @staticmethod
-    def describe_tool_execution_output(execution_id: str):
-        del execution_id
-        return
-
 
 class BaseMockTool(Tool):
     """A mock Tool class for testing."""

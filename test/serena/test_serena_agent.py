@@ -477,11 +477,12 @@ def read_project_file(project: Project, relative_path: str) -> str:
         return f.read()
 
 
-def parse_edit_diagnostics_result(result: str) -> dict:
-    """Utility function to parse the diagnostic payload returned by edit tools."""
-    assert EditingToolWithDiagnostics.DIAGNOSTICS_KEY in result
-    d = json.loads(result)
-    return d[EditingToolWithDiagnostics.DIAGNOSTICS_KEY]
+def parse_edit_diagnostics_result(result: str | dict[str, object]) -> dict:
+    """Utility function to extract the diagnostic payload returned by edit tools."""
+    assert isinstance(result, dict)
+    diagnostics = result.get(EditingToolWithDiagnostics.DIAGNOSTICS_KEY)
+    assert isinstance(diagnostics, dict)
+    return diagnostics
 
 
 @contextmanager
@@ -938,15 +939,19 @@ class TestSerenaAgent:
     def test_safe_delete_symbol_blocked_by_references(self, serena_agent: SerenaAgent, case: SafeDeleteCase):
         """
         Tests that SafeDeleteSymbol refuses to delete a symbol that is referenced elsewhere
-        and returns a message listing the referencing files.
+        and returns structured referencing locations.
         """
         # wrap in modification context as a safety net: if the tool has a bug and deletes anyway,
         # the file will be restored, preventing corruption of test resources
         with project_file_modification_context(serena_agent, case.relative_path):
             safe_delete_tool = serena_agent.get_tool(SafeDeleteSymbol)
             result = safe_delete_tool.apply(name_path_pattern=case.name_path, relative_path=case.relative_path)
-            assert "Cannot delete" in result, f"Expected deletion to be blocked due to existing references, but got: {result}"
-            assert "referenced in" in result, f"Expected reference information in result, but got: {result}"
+            assert isinstance(result, dict), f"Expected structured reference information, but got: {result}"
+            assert result["deleted"] is False
+            assert result["symbol"]
+            references = result["references"]
+            assert isinstance(references, dict)
+            assert references
 
     @pytest.mark.parametrize("serena_agent,case", SAFE_DELETE_SUCCEEDS_CASES, indirect=["serena_agent"])
     def test_safe_delete_symbol_succeeds_when_no_references(self, serena_agent: SerenaAgent, case: SafeDeleteCase):

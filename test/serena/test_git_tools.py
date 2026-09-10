@@ -72,6 +72,21 @@ def test_git_read_tools_report_repository_state(git_project: tuple[Path, Project
     assert "initial" in log
 
 
+def test_git_diff_preserves_complete_successful_output(git_project: tuple[Path, Project]) -> None:
+    repo, project = git_project
+    (repo / "a.txt").write_text("a1\n")
+
+    expected = subprocess.run(
+        ["git", "diff", "--", "a.txt"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    assert _make_tool(GitDiffTool, project).apply(paths=["a.txt"]) == expected
+
+
 def test_git_commit_includes_only_explicit_paths(git_project: tuple[Path, Project]) -> None:
     repo, project = git_project
     (repo / "a.txt").write_text("a1\n")
