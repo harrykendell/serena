@@ -315,6 +315,17 @@ def test_activity_tracker_exposes_tool_detail_on_demand() -> None:
     assert "... detail omitted ..." in detail["result"]
 
 
+def test_activity_tracker_exposes_typed_shell_result_for_rich_rendering() -> None:
+    tracker = ActivityTracker(_FakeJobSource())
+    run = tracker.start_run("conversation-a", "serena")
+    call_id = tracker.start_tool("conversation-a", "execute_shell_command", {"command": "printf hello"})
+    tracker.finish_tool(call_id, succeeded=True, result='{"return_code": 0, "stdout": "hello"}')
+
+    assert call_id is not None
+    detail = tracker.get_call_detail("conversation-a", run["run_id"], call_id)
+    assert detail["structured_result"] == {"return_code": 0, "stdout": "hello"}
+
+
 def test_activity_tracker_exposes_media_without_serialized_payload_text() -> None:
     tracker = ActivityTracker(_FakeJobSource())
     run = tracker.start_run("conversation-a", "serena")

@@ -109,6 +109,9 @@ def test_custom_dashboard_can_name_retained_serena_conversation_before_first_too
 
     assert len(overview["panels"]) == 1
     assert overview["panels"][0]["display_name"] == "Dashboard naming"
+    panel_id = overview["panels"][0]["panel_id"]
+    state = client.get(f"/dashboard/api/serena/panels/{panel_id}").get_json()
+    assert state["session_title"] == "Dashboard naming"
 
 
 def test_dashboard_revalidates_unchanged_panel_overview_without_response_body(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -256,6 +259,31 @@ def test_retained_serena_panel_preserves_semantic_detail_and_scope(tmp_path: Pat
         "mode": "literal",
         "relative_path": "src/serena",
     }
+
+
+def test_retained_serena_panel_exposes_typed_shell_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
+    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
+    agent = _DashboardAgent()
+    agent.execution_store.start_execution(
+        execution_id="shell-execution",
+        session_id="session-a",
+        project_name="serena",
+        tool_name="execute_shell_command",
+        arguments='{"command": "printf hello"}',
+    )
+    agent.execution_store.finish_execution(
+        "shell-execution",
+        succeeded=True,
+        result='{"return_code": 0, "stdout": "hello"}',
+    )
+    dashboard = DashboardServer(agent=agent)
+    client = dashboard._app.test_client()
+
+    panel_id = client.get("/dashboard/api/serena").get_json()["panels"][0]["panel_id"]
+    detail = client.get(f"/dashboard/api/serena/panels/{panel_id}/calls/shell-execution").get_json()
+
+    assert detail["structured_result"] == {"return_code": 0, "stdout": "hello"}
 
 
 def test_retained_serena_panel_serves_rendered_media_instead_of_result_repr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

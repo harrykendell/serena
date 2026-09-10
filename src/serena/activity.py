@@ -16,7 +16,7 @@ from mcp.types import CallToolResult, ResourceLink
 from serena.execution_store import ExecutionRecord, ExecutionStore
 from serena.jobs import JobManager, JobRecord, JobSnapshot, JobStatus
 
-ACTIVITY_RESOURCE_URI = "ui://serena/activity-v28.html"
+ACTIVITY_RESOURCE_URI = "ui://serena/activity-v29.html"
 _ACTIVITY_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
 _MAX_RUNS = 128
 
@@ -347,6 +347,25 @@ class ActivityDetailFormatter:
                 return {str(key): self._json_safe_literal(item) for key, item in value.items()}
         return None
 
+    def parse_result(self, result: str | None) -> Any:
+        """Decodes a persisted tool result into the typed value intended for rich rendering."""
+        if result is None:
+            return None
+
+        # unwrap persistence JSON and one nested JSON-string tool result when present
+        value: Any = result
+        for _ in range(2):
+            if not isinstance(value, str):
+                break
+            text = value.strip()
+            if not text:
+                return ""
+            try:
+                value = json.loads(text)
+            except json.JSONDecodeError:
+                break
+        return self._json_safe_literal(value)
+
     @classmethod
     def _json_safe_literal(cls, value: Any) -> Any:
         """Normalizes literal values so Flask can serialize them without losing useful structure."""
@@ -588,9 +607,11 @@ class ActivityTracker:
             for execution_id in run.execution_ids
             if (record := self._execution_store.get_execution(execution_id)) is not None
         ]
+        session = self._execution_store.get_session_by_panel_id(self._execution_store.panel_id_for_session(session_id))
         payload: dict[str, Any] = {
             "run_id": run.run_id,
             "project_name": run.project_name,
+            "session_title": session.display_name if session is not None else "",
             "started_at": run.started_at,
             "superseded": run.superseded,
             "calls": calls,
@@ -622,12 +643,16 @@ class ActivityTracker:
         """Returns bounded parameters and result detail for one execution in a session-owned run."""
         record = self._execution_in_run(session_id, run_id, call_id)
         media = ActivityMedia.from_storage_dict(record.media)
+        formatter = ActivityDetailFormatter()
+        raw_result = record.error or record.result
         return {
             "call_id": record.execution_id,
             "tool_name": record.tool_name,
             "status": record.status,
             "arguments": record.arguments,
-            "result": record.result,
+            "structured_arguments": formatter.parse_parameters(record.arguments),
+            "result": None if media is not None else raw_result,
+            "structured_result": None if media is not None else formatter.parse_result(raw_result),
             "error": record.error,
             "media": media.public_dict() if media is not None else None,
         }
@@ -881,7 +906,7 @@ def activity_widget_html() -> str:
         <span id="activity-header-detail" class="header-detail"></span>
       </span>
       <span class="header-overview">
-        <strong>Serena</strong>
+        <strong id="activity-header-title">Serena</strong>
         <span id="activity-header-stats" class="header-stats">0 tools · 0 jobs</span>
       </span>
     </span>
@@ -1009,12 +1034,11 @@ def activity_widget_html() -> str:
   .rich-code-toolbar { display: flex; align-items: center; justify-content: space-between; min-height: 24px; padding: 3px 5px 3px 7px; border-bottom: 1px solid color-mix(in srgb, CanvasText 8%, transparent); color: color-mix(in srgb, CanvasText 50%, transparent); font: 9px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-transform: uppercase; letter-spacing: .045em; }
   .rich-copy { border: 0; border-radius: 4px; padding: 2px 5px; background: transparent; color: inherit; font: inherit; text-transform: none; letter-spacing: 0; cursor: pointer; }
   .rich-copy:hover { background: color-mix(in srgb, CanvasText 6%, transparent); color: CanvasText; }
-  .rich-code-scroll { display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: start; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10.5px; line-height: 1.45; tab-size: 2; }
-  .rich-code-numbers, .rich-code-content { margin: 0; padding-top: 6px; padding-bottom: 6px; font: inherit; line-height: inherit; white-space: pre; tab-size: inherit; }
-  .rich-code-numbers { min-width: 34px; padding-left: 4px; padding-right: 7px; border-right: 1px solid color-mix(in srgb, CanvasText 7%, transparent); background: color-mix(in srgb, Canvas 96%, CanvasText); color: color-mix(in srgb, CanvasText 34%, transparent); text-align: right; user-select: none; }
-  .rich-code-content-scroll { width: 100%; min-width: 0; overflow-x: auto; overflow-y: hidden; touch-action: pan-y pinch-zoom; }
-  .rich-code-content { display: block; width: max-content; min-width: 100%; padding-left: 8px; padding-right: 8px; color: color-mix(in srgb, CanvasText 90%, transparent); }
-  .rich-code-diff .rich-code-content { color: color-mix(in srgb, CanvasText 84%, transparent); }
+  .rich-code-lines { min-width: 0; padding: 6px 0; font: 10.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; tab-size: 2; }
+  .rich-code-line { display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: start; min-width: 0; }
+  .rich-code-line-number { min-width: 34px; padding: 0 7px 0 4px; border-right: 1px solid color-mix(in srgb, CanvasText 7%, transparent); background: color-mix(in srgb, Canvas 96%, CanvasText); color: color-mix(in srgb, CanvasText 34%, transparent); text-align: right; user-select: none; }
+  .rich-code-line-content { min-width: 0; padding: 0 8px; color: color-mix(in srgb, CanvasText 90%, transparent); font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+  .rich-code-diff .rich-code-line-content { color: color-mix(in srgb, CanvasText 84%, transparent); }
   .detail-media { margin-top: 5px; }
   .detail-media-preview { display: block; max-width: 100%; max-height: 420px; border-radius: 5px; object-fit: contain; }
   .detail-media-audio { width: min(100%, 420px); height: 32px; }
@@ -1056,6 +1080,7 @@ def activity_widget_html() -> str:
   const headerTool = document.getElementById("activity-header-tool");
   const headerScope = document.getElementById("activity-header-scope");
   const headerDetail = document.getElementById("activity-header-detail");
+  const headerTitle = document.getElementById("activity-header-title");
   const headerStats = document.getElementById("activity-header-stats");
   const headerSubmitted = document.getElementById("activity-header-submitted");
   const headerElapsed = document.getElementById("activity-header-elapsed");
@@ -1406,6 +1431,7 @@ def activity_widget_html() -> str:
 
   function looksLikeCode(text, key) {
     if (looksLikeDiff(text)) return true;
+    if (["output", "stderr", "stdout"].includes(key)) return true;
     if (richCodeKeys.has(key)) return text.includes("\n") || text.length > 52 || key === "command" || key === "regex";
     if (!text.includes("\n")) return false;
     return /^\s*(?:def|class|from|import|const|let|var|function|if|for|while|return|#include)\b/m.test(text)
@@ -1432,46 +1458,6 @@ def activity_widget_html() -> str:
     return button;
   }
 
-  function enableHorizontalTouchDrag(scroller) {
-    let pointerId = null;
-    let startX = 0;
-    let startY = 0;
-    let startScrollLeft = 0;
-    let horizontal = false;
-    let decided = false;
-
-    scroller.addEventListener("pointerdown", event => {
-      if (event.pointerType !== "touch" || scroller.scrollWidth <= scroller.clientWidth) return;
-      pointerId = event.pointerId;
-      startX = event.clientX;
-      startY = event.clientY;
-      startScrollLeft = scroller.scrollLeft;
-      horizontal = false;
-      decided = false;
-    });
-
-    scroller.addEventListener("pointermove", event => {
-      if (event.pointerId !== pointerId) return;
-      const dx = event.clientX - startX;
-      const dy = event.clientY - startY;
-      if (!decided) {
-        if (Math.max(Math.abs(dx), Math.abs(dy)) < 5) return;
-        horizontal = Math.abs(dx) > Math.abs(dy) * 1.15;
-        decided = true;
-        if (horizontal && scroller.setPointerCapture) scroller.setPointerCapture(pointerId);
-      }
-      if (horizontal) scroller.scrollLeft = startScrollLeft - dx;
-    });
-
-    const finish = event => {
-      if (event.pointerId !== pointerId) return;
-      if (scroller.hasPointerCapture?.(pointerId)) scroller.releasePointerCapture(pointerId);
-      pointerId = null;
-    };
-    scroller.addEventListener("pointerup", finish);
-    scroller.addEventListener("pointercancel", finish);
-  }
-
   function appendCodeBlock(container, text, key = "") {
     const language = codeLanguage(text, key);
     const block = document.createElement("div");
@@ -1481,21 +1467,22 @@ def activity_widget_html() -> str:
     const label = document.createElement("span");
     label.textContent = language;
     toolbar.append(label, copyButton(text));
-    const scroll = document.createElement("div");
-    scroll.className = "rich-code-scroll";
-    const lineCount = text.split("\n").length;
-    const numbers = document.createElement("pre");
-    numbers.className = "rich-code-numbers";
-    numbers.textContent = Array.from({ length: lineCount }, (_, index) => String(index + 1)).join("\n");
-    const content = document.createElement("pre");
-    content.className = "rich-code-content";
-    content.textContent = text || " ";
-    const contentScroll = document.createElement("div");
-    contentScroll.className = "rich-code-content-scroll";
-    contentScroll.append(content);
-    enableHorizontalTouchDrag(contentScroll);
-    scroll.append(numbers, contentScroll);
-    block.append(toolbar, scroll);
+
+    const lines = document.createElement("div");
+    lines.className = "rich-code-lines";
+    for (const [index, line] of text.split("\n").entries()) {
+      const row = document.createElement("div");
+      row.className = "rich-code-line";
+      const number = document.createElement("span");
+      number.className = "rich-code-line-number";
+      number.textContent = String(index + 1);
+      const content = document.createElement("code");
+      content.className = "rich-code-line-content";
+      content.textContent = line || " ";
+      row.append(number, content);
+      lines.append(row);
+    }
+    block.append(toolbar, lines);
     container.append(block);
   }
 
@@ -1619,6 +1606,7 @@ def activity_widget_html() -> str:
       else renderRichValue(
         refs.result,
         detail.result ?? (detail.status === "running" ? "Tool is still running." : "No result returned."),
+        detail.structured_result,
       );
       await loadToolMedia(row, detail.media);
       refs.loading.hidden = true;
@@ -2011,6 +1999,9 @@ def activity_widget_html() -> str:
     const toolCount = Number.isFinite(next.tool_count) ? next.tool_count : (next.calls || []).length;
     const jobCount = Number.isFinite(next.job_count) ? next.job_count : (next.jobs || []).length;
     root.classList.toggle("empty-state", toolCount + jobCount === 0);
+    const sessionTitle = next.session_title || "Serena";
+    headerTitle.textContent = sessionTitle;
+    headerTitle.title = sessionTitle;
     const projectName = next.project_name || "no project";
     headerStats.textContent = `${countLabel(toolCount, "tool")} · ${countLabel(jobCount, "job")} · ${projectName}`;
     headerStats.title = headerStats.textContent;

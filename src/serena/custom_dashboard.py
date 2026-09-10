@@ -254,6 +254,7 @@ class DashboardSerenaActivityOverview:
         return {
             "run_id": summary.panel_id,
             "project_name": summary.project_name,
+            "session_title": summary.display_name,
             "started_at": summary.started_at,
             "updated_at": summary.updated_at,
             "revision": self._summary_revision(summary, jobs),
@@ -297,6 +298,7 @@ class DashboardSerenaActivityOverview:
         return {
             "run_id": session["panel_id"],
             "project_name": session.get("project_name") or "",
+            "session_title": session.get("display_name") or "",
             "started_at": session.get("started_at"),
             "updated_at": float(session.get("updated_at") or 0.0),
             "revision": self._panel_revision(session, jobs, job_ids),
@@ -365,13 +367,15 @@ class DashboardSerenaActivityOverview:
         call = self._archive.get_call(panel_id, call_id)
         media = ActivityMedia.from_storage_dict(call.get("media")) or ActivityMedia.from_serialized_result(str(call.get("result") or ""))
         parameters = str(call.get("parameters") or "")
+        raw_result = call.get("error") or call.get("result")
         return {
             "call_id": call_id,
             "tool_name": call.get("tool_name") or "",
             "status": call.get("status") or "completed",
             "arguments": parameters or "{}",
             "structured_arguments": self._activity_formatter.parse_parameters(parameters),
-            "result": None if media is not None else call.get("error") or call.get("result"),
+            "result": None if media is not None else raw_result,
+            "structured_result": None if media is not None else self._activity_formatter.parse_result(raw_result),
             "media": media.public_dict() if media is not None else None,
         }
 
