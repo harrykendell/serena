@@ -223,6 +223,11 @@ class SerenaAgent:
         return self._execution_store
 
     @property
+    def tool_output_store(self) -> ToolOutputStore:
+        """Returns the retained-output store used by MCP result presentation."""
+        return self._tool_output_store
+
+    @property
     def job_manager(self) -> JobManager:
         """Returns the process-wide persistent Serena job manager."""
         return self._job_manager

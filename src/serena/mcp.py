@@ -4,6 +4,7 @@ The Serena Model Context Protocol (MCP) Server
 
 import asyncio
 import base64
+import json
 import sys
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -20,12 +21,12 @@ from mcp.server.fastmcp.tools.base import Tool as FastMCPTool
 from mcp.server.session import ServerSessionT
 from mcp.shared.context import LifespanContextT, RequestT
 from mcp.shared.exceptions import UrlElicitationRequiredError
-from mcp.types import AudioContent, CallToolResult, Icon, ImageContent, ResourceLink, ToolAnnotations
+from mcp.types import AudioContent, CallToolResult, Icon, ImageContent, ResourceLink, TextContent, ToolAnnotations
 from pydantic import AnyUrl, ValidationError
 from pydantic_settings import SettingsConfigDict
 from sensai.util import logging
 
-from serena.activity import ACTIVITY_RESOURCE_URI, ActivityMedia, ActivityTracker, register_activity_resource
+from serena.activity import ACTIVITY_RESOURCE_URI, ActivityResultMetadata, ActivityTracker, register_activity_resource
 from serena.agent import (
     SerenaAgent,
 )
@@ -34,7 +35,9 @@ from serena.config.serena_config import SerenaConfig
 from serena.constants import SERENA_LOG_FORMAT
 from serena.errors import UserFacingError
 from serena.execution import ExecutionAccess, bind_execution_id, get_current_execution_id, reset_execution_id
+from serena.result_presentation import ToolResultPresentation, ToolResultPresenter
 from serena.session import get_mcp_session_id
+from serena.tool_output import ToolOutputDescriptor
 from serena.tools import Tool
 from serena.tools.media_tools import read_result_file_link, register_file_export_resource
 from serena.util.exception import show_fatal_exception_safe
@@ -108,6 +111,7 @@ class SerenaFastMCPTool(FastMCPTool):
         func_name = tool.get_name()
         func_doc = tool.get_apply_docstring() or ""
         func_arg_metadata = tool.get_apply_fn_metadata(structured_output=structured_output)
+        func_arg_metadata.output_schema = ToolResultPresenter.extend_output_schema(func_arg_metadata.output_schema)
         is_async = False
         parameters = func_arg_metadata.arg_model.model_json_schema()
         if openai_tool_compatible:
@@ -143,7 +147,7 @@ class SerenaFastMCPTool(FastMCPTool):
             execution_id = get_current_execution_id()
             if execution_id is not None:
                 kwargs["execution_id"] = execution_id
-            return tool.prepare_mcp_result(tool.apply_ex(**kwargs))
+            return tool.apply_ex(**kwargs)
 
         # derive a readable title and MCP capability hints
         tool_title = " ".join(word.capitalize() for word in func_name.split("_"))
@@ -168,11 +172,45 @@ class SerenaFastMCPTool(FastMCPTool):
             meta=tool.get_mcp_tool_meta(),
         )
 
+        self._tool = tool
         self._param_aliases = tool.get_param_aliases()
         self._activity_tracker = activity_tracker
         self._agent = tool.agent
         self._execution_access = tool.get_execution_access()
         self._execution_store = activity_tracker.execution_store if activity_tracker is not None else tool.agent.execution_store
+
+    def _present_result(self, logical_result: object, execution_id: str) -> ToolResultPresentation:
+        """Presents one complete logical result at the MCP execution boundary."""
+        max_chars = int(self._agent.serena_config.default_max_tool_answer_tokens) * 4
+        presenter = ToolResultPresenter(self._agent.tool_output_store, max_chars=max_chars)
+        describe_output = getattr(self._agent, "describe_tool_execution_output", None)
+        retained_output = cast(ToolOutputDescriptor | None, describe_output(execution_id)) if callable(describe_output) else None
+        return presenter.present(
+            logical_result,
+            tool_name=self.name,
+            execution_id=execution_id,
+            retained_output=retained_output,
+        )
+
+    def _convert_presented_result(self, presentation: ToolResultPresentation, prepared_result: object) -> object:
+        """Converts one canonical presentation to FastMCP's model-facing result shape."""
+        if presentation.retained_output_id is None:
+            return self.fn_metadata.convert_result(prepared_result)
+
+        if isinstance(prepared_result, CallToolResult):
+            return prepared_result
+        if not isinstance(presentation.transport_value, dict):
+            raise TypeError("Truncated ordinary result must use the canonical structured envelope")
+
+        content = [
+            TextContent(
+                type="text",
+                text=json.dumps(presentation.transport_value, ensure_ascii=False, indent=2),
+            )
+        ]
+        if self.fn_metadata.output_schema is None:
+            return content
+        return content, presentation.transport_value
 
     async def run(
         self,
@@ -215,6 +253,7 @@ class SerenaFastMCPTool(FastMCPTool):
             result: object | None = None,
             error: str | None = None,
             project_name: str | None = None,
+            result_metadata: ActivityResultMetadata | None = None,
         ) -> None:
             if self._activity_tracker is not None:
                 self._activity_tracker.finish_tool(
@@ -223,9 +262,12 @@ class SerenaFastMCPTool(FastMCPTool):
                     result=result,
                     error=error,
                     project_name=project_name,
+                    result_metadata=result_metadata,
                 )
             else:
-                media = ActivityMedia.from_result(result) if succeeded and result is not None else None
+                metadata = result_metadata if result_metadata is not None else ActivityTracker.extract_result_metadata(result)
+                media = metadata.media if succeeded else None
+                durable_job_id = metadata.durable_job_id if succeeded else None
                 serialized = execution_store.serialize_value(result) if succeeded and result is not None and media is None else None
                 execution_store.finish_execution(
                     execution_id,
@@ -234,6 +276,7 @@ class SerenaFastMCPTool(FastMCPTool):
                     error=error,
                     project_name=project_name,
                     media=media.storage_dict() if media is not None else None,
+                    durable_job_id=durable_job_id,
                 )
 
             describe_output = getattr(self._agent, "describe_tool_execution_output", None)
@@ -342,18 +385,21 @@ class SerenaFastMCPTool(FastMCPTool):
                 finish_execution(succeeded=False, project_name=submission_project_name)
                 raise
 
-            activity_result = result
+            logical_result = result
             try:
-                if convert_result:
-                    result = self.fn_metadata.convert_result(result)
+                result_metadata = ActivityTracker.extract_result_metadata(logical_result)
+                presentation = self._present_result(logical_result, execution_id)
+                prepared_result = self._tool.prepare_mcp_result(presentation.transport_value)
+                result = self._convert_presented_result(presentation, prepared_result) if convert_result else prepared_result
             except Exception as error:
                 message = finish_unexpected(error, project_name=completed_project_name())
                 raise ToolError(message) from None
 
             finish_execution(
                 succeeded=True,
-                result=activity_result,
+                result=prepared_result,
                 project_name=completed_project_name(),
+                result_metadata=result_metadata,
             )
             return result
         finally:

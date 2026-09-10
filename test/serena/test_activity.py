@@ -4,6 +4,7 @@ import time
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 import pytest
@@ -16,11 +17,15 @@ from serena.execution_store import ExecutionStore
 from serena.jobs import JobOutputChunk, JobRecord, JobRuntimeInfo, JobSnapshot, JobStatus
 from serena.mcp import SerenaMCPFactory
 from serena.session import get_mcp_session_id
+from serena.tool_output import ToolOutputStore
 from serena.tools import Tool
 
 
 class _MockAgent:
-    serena_config = SimpleNamespace(tool_timeout=30)
+    def __init__(self) -> None:
+        self.serena_config = SimpleNamespace(tool_timeout=30, default_max_tool_answer_tokens=4_000)
+        self._output_dir = TemporaryDirectory(prefix="serena-activity-test-output-")
+        self.tool_output_store = ToolOutputStore(root=Path(self._output_dir.name))
 
     @staticmethod
     def get_active_project_for_session(session_id: str):
@@ -30,6 +35,9 @@ class _MockAgent:
     def submission_project_context(session_id: str):
         del session_id
         return nullcontext()
+
+    def describe_tool_execution_output(self, execution_id: str):
+        return self.tool_output_store.describe_execution(execution_id)
 
 
 class _EchoCommandTool(Tool):
@@ -594,6 +602,33 @@ def test_mcp_start_job_wrapper_associates_converted_result_with_current_turn() -
 
     snapshot = tracker.get_run("global", run["run_id"])
     assert [(job["job_id"], job["current_turn"]) for job in snapshot["jobs"]] == [("wrapped-job", True)]
+
+
+def test_mcp_start_job_metadata_is_extracted_before_central_presentation(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = _FakeJobSource([_job_record("wrapped-job", "wrapped label")])
+    tracker = ActivityTracker(source)
+    run = tracker.start_run("global", "serena")
+    tool = _StartJobResultTool()
+    logical_result = json.dumps(
+        {
+            "prefix": "x" * 10_000,
+            "job_id": "wrapped-job",
+            "label": "wrapped label",
+            "suffix": "y" * 10_000,
+        },
+        separators=(",", ":"),
+    )
+    monkeypatch.setattr(tool, "apply", lambda command, label: logical_result)
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(tool, activity_tracker=tracker)
+
+    result = asyncio.run(mcp_tool.run({"command": "sleep 1", "label": "wrapped label"}, convert_result=True))
+
+    snapshot = tracker.get_run("global", run["run_id"])
+    assert [(job["job_id"], job["current_turn"]) for job in snapshot["jobs"]] == [("wrapped-job", True)]
+    execution = tracker.execution_store.list_executions(newest_first=True)[0]
+    assert execution.durable_job_id == "wrapped-job"
+    assert execution.retained_output_id is not None
+    assert "wrapped-job" not in str(result)
 
 
 def test_activity_resource_uses_mcp_app_contract() -> None:

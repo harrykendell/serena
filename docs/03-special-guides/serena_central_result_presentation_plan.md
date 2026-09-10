@@ -1,6 +1,6 @@
 # Serena Central Result Presentation Plan
 
-Status: C00 COMPLETE (2026-09-10); C01 NEXT
+Status: C00-C02 COMPLETE (2026-09-10); C03 NEXT
 
 Scope: successful Serena tool results, retained-output paging, MCP transport, `ExecutionStore`, activity/dashboard inspection, and the removal of tool-local presentation truncation.
 
@@ -229,6 +229,14 @@ Do not put this behaviour back into `Tool` or individual tools.
 
 Completion condition: a synthetic full text result and a synthetic structured result can both pass through one central presenter and yield exact retained output plus one bounded presentation.
 
+#### C01 completion captured 2026-09-10
+
+- Added `ToolResultPresenter` and immutable `ToolResultPresentation` in `src/serena/result_presentation.py` as the single boundary-owned abstraction for successful-result presentation.
+- The presenter accepts logical result plus tool/execution identity, bypasses native MCP media/resource results, normalizes ordinary values deterministically, retains exact oversized logical serializations through `ToolOutputStore`, and returns one bounded canonical transport value together with its persisted serialization and retained-output metadata.
+- C01 deliberately reuses `StructuredOutputCompactor` only as a transitional structured fitter; replacing its fixed-tier/priority-key algorithm remains C04.
+- Added focused behavioural tests for oversized text, oversized structured data, small unretained results, and native resource bypass. The retained text/JSON is recovered exactly and bounded structured output remains machine-readable.
+- No MCP execution path was rewired and no old tool-local truncation path was removed; those changes remain C02 onward as planned.
+
 ### C02 — Move presentation to the MCP boundary
 
 Refactor `SerenaFastMCPTool.run()` so the successful worker result remains the complete logical result until the worker has finished.
@@ -246,11 +254,22 @@ Review `Tool.prepare_mcp_result()` and FastMCP conversion ordering so the value 
 
 Completion condition: ordinary tools no longer need `_limit_length()` for correctness; central presentation can be exercised through `SerenaFastMCPTool.run()`.
 
+#### C02 completion captured 2026-09-10
+
+- `SerenaFastMCPTool` now leaves `tool.apply_ex()` results logical through worker completion and invokes `ToolResultPresenter` once at the MCP execution boundary before transport conversion.
+- `Tool.prepare_mcp_result()` now runs after central presentation, preserving native media/resource conversion while preventing ordinary results from being serialized before the presenter sees them.
+- FastMCP output schemas are extended with the canonical truncation-envelope alternative, and truncated ordinary results are converted directly to matching text plus structured content rather than being revalidated against their original return type.
+- Durable-job/media bookkeeping metadata is extracted from the complete logical result before presentation and passed separately through execution finalization, so omitted preview content cannot break job association or native-media persistence.
+- Existing retained output for the same execution is reused when present, avoiding a second retained blob while the legacy tool-local path still coexists during migration.
+- Added an integration test through FastMCP's low-level `tools/call` handler. It verifies output-schema validation, equality between text/structured MCP views, exact retained recovery, retained metadata on the execution, and semantic equality with the persisted result.
+- Timeout, cancellation, user-facing/native MCP errors, durable-job association, activity tracking, and native media behaviour remain covered by the existing focused MCP/session/activity suite.
+- C03 still owns removal of the execution-store reserialization/8k compaction pass and byte-for-byte canonical result persistence; it should preserve the explicit metadata handoff established here.
+
 ### C03 — Make `ExecutionStore.result` the canonical presented result
 
 - Remove result compaction from `ExecutionStore.serialize_value()` or split argument/error serialization from result persistence so successful results are not reprocessed.
 - Update `ActivityTracker.finish_tool()` to accept the already-presented result/serialization rather than serializing the logical result again.
-- Pass explicit durable-job/media metadata separately where needed so activity bookkeeping does not require reparsing a truncated presentation.
+- Preserve the explicit durable-job/media metadata handoff introduced in C02 so activity bookkeeping never reparses a truncated presentation.
 - Ensure retained-output ID/character count recorded on the execution corresponds to the exact logical result retained by the presenter.
 - Keep error persistence on the existing canonical error path; this plan is about successful result presentation.
 

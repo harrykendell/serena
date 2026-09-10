@@ -111,6 +111,14 @@ class ActivityMedia:
         return {**self.public_dict(), "uri": self.uri}
 
 
+@dataclass(frozen=True)
+class ActivityResultMetadata:
+    """Metadata extracted from one complete logical tool result before presentation."""
+
+    media: ActivityMedia | None
+    durable_job_id: str | None
+
+
 @dataclass
 class ActivityCall:
     """One tool invocation displayed in the ChatGPT activity panel."""
@@ -560,6 +568,13 @@ class ActivityTracker:
         )
         return execution_id
 
+    @staticmethod
+    def extract_result_metadata(result: object | None) -> ActivityResultMetadata:
+        """Extracts bookkeeping metadata from one complete logical result."""
+        media = ActivityMedia.from_result(result) if result is not None else None
+        job_id, _ = ActivityTracker._extract_job_identity(result)
+        return ActivityResultMetadata(media=media, durable_job_id=job_id)
+
     def finish_tool(
         self,
         call_id: str | None,
@@ -567,6 +582,7 @@ class ActivityTracker:
         result: object | None = None,
         error: str | None = None,
         project_name: str | None = None,
+        result_metadata: ActivityResultMetadata | None = None,
     ) -> None:
         """Marks one execution terminal and updates activity-run job references."""
         if call_id is None:
@@ -575,9 +591,10 @@ class ActivityTracker:
         if record is None:
             return
 
-        media = ActivityMedia.from_result(result) if succeeded and result is not None else None
+        metadata = result_metadata if result_metadata is not None else self.extract_result_metadata(result)
+        media = metadata.media if succeeded else None
+        job_id = metadata.durable_job_id if succeeded else None
         serialized_result = self._execution_store.serialize_value(result) if succeeded and result is not None and media is None else None
-        job_id, _ = self._extract_job_identity(result) if succeeded else (None, None)
         self._execution_store.finish_execution(
             call_id,
             succeeded=succeeded,
@@ -986,7 +1003,6 @@ def activity_widget_html() -> str:
   .row-header { width: 100%; display: grid; grid-template-columns: 15px minmax(0, 1fr) auto 12px; grid-template-areas: "status tool submitted chevron" "status detail elapsed chevron"; column-gap: 5px; row-gap: 0; align-items: start; min-height: 0; padding: 3px 0; border: 0; background: transparent; color: inherit; text-align: left; }
   button.row-header { cursor: pointer; }
   .job-entry { margin: 1px 0; border-radius: 6px; }
-  .job-entry .row-header { padding-left: 4px; padding-right: 4px; }
   .status { grid-area: status; align-self: center; width: 15px; text-align: center; opacity: .78; font-size: larger; }
   .call.running .status { color: #00491e; animation: pulse 1.1s ease-in-out infinite; }
   .call.completed .status { color: #16a34a; }

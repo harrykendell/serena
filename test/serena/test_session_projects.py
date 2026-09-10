@@ -9,8 +9,9 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import CallToolResult, RequestParams
+from mcp.types import CallToolRequest, CallToolRequestParams, CallToolResult, RequestParams
 
 from serena.activity import ActivityTracker
 from serena.agent import SerenaAgent
@@ -951,6 +952,54 @@ def test_retained_output_round_trip_is_exact_through_mcp(
         assert payload["output_id"] == output_id
         assert payload["complete"] is True
         assert payload["content"] == content
+
+    asyncio.run(scenario())
+
+
+def test_central_result_presentation_is_used_at_actual_mcp_boundary(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "global", "project_a")
+    agent.serena_config.default_max_tool_answer_tokens = 1_000
+    logical_result = "head\n" + ("middle\n" * 5_000) + "tail\n"
+    tool = agent.get_tool(ReadFileTool)
+    monkeypatch.setattr(tool, "apply", lambda **kwargs: logical_result)
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(tool)
+    mcp = FastMCP("presentation-test")
+    mcp._tool_manager._tools[mcp_tool.name] = mcp_tool
+
+    async def scenario() -> None:
+        handler = mcp._mcp_server.request_handlers[CallToolRequest]
+        server_result = await handler(
+            CallToolRequest(
+                params=CallToolRequestParams(
+                    name=mcp_tool.name,
+                    arguments={"relative_path": "synthetic.txt"},
+                )
+            )
+        )
+        result = server_result.root
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is False
+        structured = result.structuredContent
+        assert isinstance(structured, dict)
+        assert structured["truncated"] is True
+        assert structured["total_chars"] == len(logical_result)
+        assert json.loads(result.content[0].text) == structured
+        assert len(json.dumps(structured, ensure_ascii=False, separators=(",", ":"))) <= 4_000
+
+        output_id = cast(str, structured["output_id"])
+        retained = agent.read_tool_output(output_id, 0, len(logical_result))
+        assert retained.content == logical_result
+        assert retained.complete
+
+        execution = agent.execution_store.list_executions(newest_first=True)[0]
+        assert execution.retained_output_id == output_id
+        assert execution.retained_output_chars == len(logical_result)
+        assert execution.result is not None
+        assert json.loads(execution.result) == structured
 
     asyncio.run(scenario())
 
