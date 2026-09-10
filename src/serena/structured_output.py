@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, cast
+from typing import cast
 
 
 class StructuredOutputCompactor:
@@ -20,37 +20,13 @@ class StructuredOutputCompactor:
             return ""
 
         # normalize first so fitting and serialization operate on one deterministic value
-        normalized = self._normalize(self._decode_structured_string(value))
+        normalized = self._normalize(value)
         serialized = self._dumps(normalized, pretty=True)
         if len(serialized) <= max_chars:
             return serialized
 
         compacted = self.compact(normalized, max_chars, pretty=True)
         return self._dumps(compacted, pretty=True)
-
-    def render_retained_json_preview(self, result: str, output_id: str, max_chars: int) -> str | None:
-        """Returns a bounded valid-JSON retained-output envelope when ``result`` is structured JSON."""
-        if max_chars <= 0:
-            return None
-        structured = self._decode_structured_string(result)
-        if not isinstance(structured, dict | list):
-            return None
-
-        metadata: dict[str, Any] = {
-            "truncated": True,
-            "total_chars": len(result),
-            "output_id": output_id,
-        }
-        empty_envelope = metadata | {"result": None}
-        fixed_chars = self._serialized_length(empty_envelope, pretty=False) - len("null")
-        available = max_chars - fixed_chars
-        if available <= 0:
-            return None
-
-        # fit the structured value directly; legacy callers only need to wrap the fitted value
-        compacted = self.compact(structured, available)
-        response = self._dumps(metadata | {"result": compacted})
-        return response if len(response) <= max_chars else None
 
     def compact(self, value: object, max_chars: int, *, pretty: bool = False) -> object:
         """Returns the richest deterministic JSON-safe value fitting ``max_chars``."""
@@ -515,19 +491,6 @@ class StructuredOutputCompactor:
             if self._serialized_length(candidate, pretty=pretty) <= max_chars:
                 return candidate
         return 0
-
-    @staticmethod
-    def _decode_structured_string(value: object) -> object:
-        if not isinstance(value, str):
-            return value
-        text = value.strip()
-        if not text or text[0] not in "[{":
-            return value
-        try:
-            decoded = json.loads(text)
-        except json.JSONDecodeError:
-            return value
-        return decoded if isinstance(decoded, dict | list) else value
 
     def _serialized_length(self, value: object, *, pretty: bool) -> int:
         return len(self._dumps(value, pretty=pretty))

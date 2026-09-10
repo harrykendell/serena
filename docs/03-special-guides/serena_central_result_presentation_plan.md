@@ -1,10 +1,8 @@
 # Serena Central Result Presentation Plan
 
-Status: C00-C08 COMPLETE (2026-09-10); C09 NEXT
+Status: C00-C09 COMPLETE (2026-09-10)
 
 Scope: successful Serena tool results, retained-output paging, MCP transport, `ExecutionStore`, activity/dashboard inspection, and the removal of tool-local presentation truncation.
-
-Current working tree note: there is uncommitted experimental structured-compaction work in `src/serena/structured_output.py`, `execution_store.py`, `tools_base.py`, `symbol_tools.py`, and associated tests. It is useful evidence for the problem but is not the target architecture. Do not build further special cases on top of it; replace or salvage it deliberately during C01-C04.
 
 ## 1. Goal
 
@@ -468,6 +466,14 @@ Completion condition: tests make it impossible to reintroduce separate model and
 - Restart Serena only after the final checkpoint is clean and model/dashboard equivalence has been verified against the running dashboard.
 
 Completion condition: one result-presentation path is authoritative in both code and observable behaviour.
+
+#### C09 completion captured 2026-09-10
+
+- Removed the obsolete tool-local presentation stack: `_limit_length()`, `_effective_max_answer_chars()`, `shortened_result_factories`, `prefer_structured_preview`, retained JSON preview/reconstruction helpers, and the unused agent/store tail-render compatibility APIs.
+- Converted `start_job` and `cancel_job` to native structured results, simplified durable-job metadata extraction to the native logical-result contract, and removed client-side JSON re-parsing that could reinterpret persisted result strings.
+- Audited all public tools and the end-to-end `ToolResultPresenter` → MCP → `ExecutionStore` → activity/custom-dashboard path. The configured ordinary-result budget is now consumed only by the central presenter; remaining bounds are semantic paging/query controls, input limits, auxiliary argument/error storage, or local UI collapsing that preserves canonical content.
+- Verified retained-output exact paging and restart rehydration, native media handling, jobs, shell/search/symbol result behaviour, and model/dashboard canonical-result equivalence through the complete behavioural suite.
+- Validation completed with `uv run poe format`, `uv run poe type-check`, `uv run poe test` (`798 passed, 265 deselected`), `git diff --check`, and a Node syntax check of the generated activity-widget JavaScript.
 
 ## 7. Migration ledger
 

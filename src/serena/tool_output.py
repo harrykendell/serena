@@ -33,11 +33,6 @@ class ToolOutputPage:
         """Whether this page contains the complete finalized retained result."""
         return not self.is_open and self.offset == 0 and self.next_offset is None
 
-    @property
-    def truncated(self) -> bool:
-        """Whether retained content exists outside this page."""
-        return self.offset > 0 or self.next_offset is not None
-
 
 @dataclass(frozen=True)
 class ToolOutputDescriptor:
@@ -177,41 +172,6 @@ class ToolOutputStore:
             record.is_open = False
             RetainedTextCompression.compress_file(record.path)
 
-    def retain_with_tail(
-        self,
-        tool_name: str,
-        content: str,
-        max_answer_chars: int,
-        execution_id: str | None = None,
-    ) -> str:
-        """Retains a result and renders an identified tail that fits the answer limit."""
-        output_id = self.retain(tool_name, content, execution_id=execution_id)
-        return self.render_tail(output_id, max_answer_chars)
-
-    def render_tail(
-        self,
-        output_id: str,
-        max_answer_chars: int,
-        *,
-        details: str | None = None,
-    ) -> str:
-        """Renders a compact identified tail for an already retained result."""
-        descriptor = self.describe(output_id)
-        details_text = f"\n{details}" if details else ""
-        tail_length = min(descriptor.total_chars, max(0, max_answer_chars - len(details_text) - 160))
-
-        while True:
-            tail_start = descriptor.total_chars - tail_length
-            header = (
-                f"truncated=true; total_chars={descriptor.total_chars}; output_id={output_id}\n"
-                f"shown_range={tail_start}:{descriptor.total_chars}{details_text}\n"
-            )
-            page = self.read(output_id, tail_start, tail_length) if tail_length else None
-            response = f"{header}{page.content if page is not None else ''}"
-            if len(response) <= max_answer_chars or tail_length == 0:
-                return response[:max_answer_chars]
-            tail_length = max(0, tail_length - (len(response) - max_answer_chars))
-
     def describe(self, output_id: str) -> ToolOutputDescriptor:
         """Return lightweight metadata for one retained result."""
         with self._lock:
@@ -270,20 +230,6 @@ class ToolOutputStore:
                 next_offset=next_offset,
                 is_open=record.is_open,
             )
-
-    def read_tail(self, output_id: str, max_chars: int) -> ToolOutputPage:
-        """Read the newest bounded tail from one retained result."""
-        if max_chars <= 0:
-            raise ValueError("max_chars must be positive")
-        descriptor = self.describe(output_id)
-        return self.read(output_id, max(0, descriptor.total_chars - max_chars), max_chars)
-
-    def read_execution_tail(self, execution_id: str, max_chars: int) -> ToolOutputPage | None:
-        """Read the newest bounded tail for one exact task execution."""
-        descriptor = self.describe_execution(execution_id)
-        if descriptor is None:
-            return None
-        return self.read_tail(descriptor.output_id, max_chars)
 
     def close(self) -> None:
         """Closes the process-local index while preserving session-owned output files."""

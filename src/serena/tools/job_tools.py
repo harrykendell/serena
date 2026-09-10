@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 from typing import Literal
 
@@ -65,10 +64,6 @@ class _JobTool(Tool):
             payload["process_count"] = runtime.process_count
         return payload
 
-    @staticmethod
-    def _json(payload: dict[str, object]) -> str:
-        return json.dumps(payload, ensure_ascii=False)
-
 
 class StartJobTool(_JobTool, ToolMarkerCanEdit):
     """Starts one of up to six durable non-interactive commands and returns immediately with a job ID."""
@@ -80,7 +75,7 @@ class StartJobTool(_JobTool, ToolMarkerCanEdit):
         cwd: str | None = None,
         timeout_seconds: int | None = None,
         session_id: str = "global",
-    ) -> str:
+    ) -> dict[str, object]:
         """Start a long-running command without blocking later Serena calls.
 
         Use this instead of ``execute_shell_command`` for tests, builds, simulations, optimisations, or other commands that may
@@ -93,7 +88,7 @@ class StartJobTool(_JobTool, ToolMarkerCanEdit):
         :param cwd: project-relative working directory; defaults to the active project root and may not escape it
         :param timeout_seconds: optional positive wall-clock runtime limit; omit for no runtime limit
         :param session_id: client session that owns the dashboard panel for this job
-        :return: compact JSON containing the job ID, state, and concurrency usage
+        :return: native job ID, state, and concurrency usage
         """
         record, running_jobs = self._job_manager.start_job(
             command=command,
@@ -104,14 +99,12 @@ class StartJobTool(_JobTool, ToolMarkerCanEdit):
             timeout_seconds=timeout_seconds,
             session_id=session_id,
         )
-        return self._json(
-            {
-                "job_id": record.job_id,
-                "status": record.status.value,
-                "running_jobs": running_jobs,
-                "max_concurrent_jobs": self._job_manager.max_concurrent_jobs,
-            }
-        )
+        return {
+            "job_id": record.job_id,
+            "status": record.status.value,
+            "running_jobs": running_jobs,
+            "max_concurrent_jobs": self._job_manager.max_concurrent_jobs,
+        }
 
 
 class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
@@ -222,14 +215,14 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
 class CancelJobTool(_JobTool, ToolMarkerCanEdit, ToolMarkerDoesNotRequireActiveProject):
     """Cancels one Serena job and its complete process tree."""
 
-    def apply(self, job_id: str) -> str:
+    def apply(self, job_id: str) -> dict[str, object]:
         """Cancel a running job by its Serena job ID.
 
         Cancellation is restricted to jobs created by Serena; arbitrary PIDs or systemd units cannot be targeted. Cancelling a job
         that has already finished is safe and leaves its terminal result unchanged.
 
         :param job_id: opaque job ID returned by ``start_job``
-        :return: JSON containing the resulting terminal or already-terminal state
+        :return: native resulting terminal or already-terminal state
         """
         record = self._job_manager.cancel_job(job_id)
         payload: dict[str, object] = {"job_id": record.job_id, "status": record.status.value}
@@ -238,4 +231,4 @@ class CancelJobTool(_JobTool, ToolMarkerCanEdit, ToolMarkerDoesNotRequireActiveP
         status_detail = self._status_detail(record)
         if status_detail is not None:
             payload["status_message"] = status_detail
-        return self._json(payload)
+        return payload

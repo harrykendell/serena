@@ -28,7 +28,6 @@ from serena.execution import (
     ExecutionAccess,
     ProjectExecutionCoordinator,
     bind_execution_id,
-    get_current_execution_id,
     reset_execution_id,
 )
 from serena.execution_store import ExecutionStore
@@ -38,7 +37,7 @@ from serena.memories.memory_manager import MemoryManager
 from serena.project import Project
 from serena.prompt_factory import SerenaPromptFactory
 from serena.runtime import AvailableTools, ProjectPromptStatus, ProjectRuntime, SessionRegistry
-from serena.tool_output import ToolOutputDescriptor, ToolOutputPage, ToolOutputStore, ToolOutputWriter
+from serena.tool_output import ToolOutputDescriptor, ToolOutputPage, ToolOutputStore
 from serena.tools import (
     OnboardingTool,
     OpenDashboardTool,
@@ -200,19 +199,6 @@ class SerenaAgent:
             else:
                 return "Unfortunately, logs are not available. We recommend enabling the web dashboard/logging in general."
 
-    def retain_tool_output(self, tool_name: str, content: str) -> str:
-        """Retains one complete tool result and returns its stable identifier."""
-        return self._tool_output_store.retain(tool_name, content, execution_id=get_current_execution_id())
-
-    def retain_tool_output_with_tail(self, tool_name: str, content: str, max_answer_chars: int) -> str:
-        """Retains an oversized tool result and returns a bounded identified tail."""
-        return self._tool_output_store.retain_with_tail(
-            tool_name,
-            content,
-            max_answer_chars,
-            execution_id=get_current_execution_id(),
-        )
-
     def read_tool_output(self, output_id: str, offset: int, max_chars: int) -> ToolOutputPage:
         """Read one page from a previously retained oversized tool result."""
         return self._tool_output_store.read(output_id, offset, max_chars)
@@ -231,24 +217,6 @@ class SerenaAgent:
     def job_manager(self) -> JobManager:
         """Returns the process-wide persistent Serena job manager."""
         return self._job_manager
-
-    def open_tool_output(self, tool_name: str, execution_id: str | None = None) -> ToolOutputWriter:
-        """Open an append-only retained output stream for one tool execution."""
-        return self._tool_output_store.open(tool_name, execution_id)
-
-    def render_tool_output_tail(
-        self,
-        output_id: str,
-        max_answer_chars: int,
-        *,
-        details: str | None = None,
-    ) -> str:
-        """Renders a compact identified tail from an already retained tool output."""
-        return self._tool_output_store.render_tail(output_id, max_answer_chars, details=details)
-
-    def read_tool_execution_tail(self, execution_id: str, max_chars: int) -> ToolOutputPage | None:
-        """Read the newest retained output tail for one exact tool execution."""
-        return self._tool_output_store.read_execution_tail(execution_id, max_chars)
 
     def describe_tool_execution_output(self, execution_id: str) -> ToolOutputDescriptor | None:
         """Return retained-output metadata for one exact tool execution, if available."""

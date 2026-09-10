@@ -834,47 +834,12 @@ class ActivityTracker:
 
     @staticmethod
     def _extract_job_identity(result: object | None) -> tuple[str | None, str | None]:
-        """Extracts a durable-job identifier and label from supported result shapes."""
-        payload: object = result
-        if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except json.JSONDecodeError:
-                return None, None
-        elif isinstance(payload, tuple) and len(payload) == 2 and isinstance(payload[1], dict):
-            payload = payload[1]
-        elif not isinstance(payload, dict):
-            structured = getattr(payload, "structuredContent", None)
-            if isinstance(structured, dict):
-                payload = structured
-            else:
-                content = getattr(payload, "content", None)
-                if isinstance(content, list):
-                    for block in content:
-                        text = getattr(block, "text", None)
-                        if not isinstance(text, str):
-                            continue
-                        try:
-                            candidate = json.loads(text)
-                        except json.JSONDecodeError:
-                            continue
-                        if isinstance(candidate, dict):
-                            payload = candidate
-                            break
-        if not isinstance(payload, dict):
+        """Extracts a durable-job identifier and label from a native result mapping."""
+        if not isinstance(result, dict):
             return None, None
-        payload_dict = cast(dict[str, Any], payload)
-        if "job_id" not in payload_dict:
-            nested = payload_dict.get("result")
-            if isinstance(nested, str):
-                try:
-                    nested = json.loads(nested)
-                except json.JSONDecodeError:
-                    nested = None
-            if isinstance(nested, dict):
-                payload_dict = cast(dict[str, Any], nested)
-        job_id = payload_dict.get("job_id")
-        label = payload_dict.get("label")
+        payload = cast(dict[str, Any], result)
+        job_id = payload.get("job_id")
+        label = payload.get("label")
         return (
             job_id if isinstance(job_id, str) and job_id else None,
             label if isinstance(label, str) and label else None,
@@ -1421,17 +1386,6 @@ def activity_widget_html() -> str:
   const richCodeKeys = new Set(["body", "code", "command", "needle", "output", "regex", "repl", "script", "source", "stderr", "stdout", "substring_pattern"]);
   const richPathKeys = new Set(["cwd", "path", "project", "relative_path", "remote", "branch", "file_mask", "paths_include_glob"]);
 
-  function parsedJsonValue(value) {
-    if (typeof value !== "string") return { parsed: false, value };
-    const text = value.trim();
-    if (!text || !["{", "["].includes(text[0])) return { parsed: false, value };
-    try {
-      return { parsed: true, value: JSON.parse(text) };
-    } catch (_) {
-      return { parsed: false, value };
-    }
-  }
-
   function looksLikeDiff(text) {
     return /^diff --git /m.test(text) || (/^@@ .* @@/m.test(text) && (/^\+/m.test(text) || /^-/m.test(text)));
   }
@@ -1594,9 +1548,7 @@ def activity_widget_html() -> str:
       appendStructuredValue(container, structuredValue);
       return;
     }
-    const parsed = parsedJsonValue(rawValue);
-    if (parsed.parsed) appendStructuredValue(container, parsed.value);
-    else appendScalarValue(container, rawValue ?? "");
+    appendScalarValue(container, rawValue ?? "");
   }
 
   function updateRetainedResultNotice(container, structuredValue) {

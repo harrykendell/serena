@@ -18,7 +18,6 @@ from serena.memories.memory_manager import MemoryManager
 from serena.project import Project
 from serena.prompt_factory import SerenaPromptFactory
 from serena.session import get_mcp_session_id
-from serena.structured_output import StructuredOutputCompactor
 from serena.util.class_decorators import singleton
 from serena.util.ls_diagnostics import DiagnosticsDiff, EditedFilePath, PublishedDiagnosticsSnapshot
 from solidlsp.ls_exceptions import LanguageServerOperationError, SolidLSPException
@@ -100,7 +99,7 @@ class ToolMarkerSymbolicEdit(ToolMarkerCanEdit):
 class ApplyMethodProtocol(Protocol):
     """Callable protocol for the apply method of a tool."""
 
-    def __call__(self, *args: Any, **kwargs: Any) -> str:
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
         pass
 
 
@@ -244,61 +243,6 @@ class Tool(Component):
                 raise AttributeError(f"apply method not defined in {cls}. Did you forget to implement it?")
 
         return func_metadata(apply_fn, skip_names=["self", "cls", cls.SESSION_ID_PARAM_NAME], structured_output=structured_output)
-
-    def _effective_max_answer_chars(self, max_answer_chars: int) -> int:
-        """Resolve one response budget while preserving explicit character overrides."""
-        effective_max_answer_chars = (
-            max_answer_chars if max_answer_chars != -1 else self.agent.serena_config.default_max_tool_answer_tokens * 4
-        )
-        if effective_max_answer_chars <= 0:
-            raise UserFacingError(f"Resolved maximum answer length must be positive, got: {effective_max_answer_chars}")
-        return effective_max_answer_chars
-
-    def _limit_length(
-        self,
-        result: str,
-        max_answer_chars: int,
-        shortened_result_factories: list[Callable[[], str]] | None = None,
-        *,
-        prefer_structured_preview: bool = False,
-    ) -> str:
-        """Limits a tool result while retaining the complete value for exact paging.
-
-        :param result: the full result string
-        :param max_answer_chars: maximum allowed characters. -1 means use the configured default.
-        :param shortened_result_factories: optional closures producing progressively shorter summaries;
-            the richest summary that fits is appended to the retained-output metadata.
-        :param prefer_structured_preview: whether valid JSON object/list results should prefer a
-            structure-preserving preview before tool-specific summaries.
-        :return: the original result when it fits, otherwise a bounded retained-output response
-        """
-        effective_max_answer_chars = self._effective_max_answer_chars(max_answer_chars)
-        if (n_chars := len(result)) <= effective_max_answer_chars:
-            return result
-
-        # retain the exact value before deriving any bounded model-facing representation
-        output_id = self.agent.retain_tool_output(self.get_name(), result)
-        retained_msg = f"truncated=true; total_chars={n_chars}; output_id={output_id}"
-        compactor = StructuredOutputCompactor()
-
-        # preserve machine-readable structure first when verbose leaves are the useful part of the result
-        if prefer_structured_preview:
-            structured_preview = compactor.render_retained_json_preview(result, output_id, effective_max_answer_chars)
-            if structured_preview is not None:
-                return structured_preview
-
-        # retain domain-specific degradation for tools that know how to summarize their own output
-        if shortened_result_factories is not None:
-            for make_shorter in shortened_result_factories:
-                candidate = f"{retained_msg}\n{make_shorter()}"
-                if len(candidate) <= effective_max_answer_chars:
-                    return candidate
-
-        # generic structured results remain valid JSON instead of degrading to an arbitrary raw tail
-        structured_preview = compactor.render_retained_json_preview(result, output_id, effective_max_answer_chars)
-        if structured_preview is not None:
-            return structured_preview
-        return self.agent.render_tool_output_tail(output_id, effective_max_answer_chars)
 
     def is_active(self) -> bool:
         return self.agent.tool_is_active(self.get_name())

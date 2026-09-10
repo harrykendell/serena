@@ -1,4 +1,3 @@
-import json
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -389,7 +388,7 @@ def test_job_tools_return_compact_recovery_and_telemetry_payloads(tmp_path: Path
     status_tool._job_manager = manager
     cancel_tool._job_manager = manager
 
-    started = json.loads(start_tool.apply("echo hello", label="demo test", timeout_seconds=60, session_id="chat-a"))
+    started = start_tool.apply("echo hello", label="demo test", timeout_seconds=60, session_id="chat-a")
     job_id = started["job_id"]
     assert manager.get_job(job_id).record.session_id == "chat-a"
     backend.output[job_id].append("hello")
@@ -397,7 +396,7 @@ def test_job_tools_return_compact_recovery_and_telemetry_payloads(tmp_path: Path
     backend.output[job_id].append("later")
     delta = status_tool.apply(job_id, cursor=status["next_cursor"])
     listed = status_tool.apply()
-    cancelled = json.loads(cancel_tool.apply(job_id))
+    cancelled = cancel_tool.apply(job_id)
 
     assert started == {
         "job_id": job_id,

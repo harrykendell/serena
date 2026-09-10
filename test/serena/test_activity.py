@@ -74,16 +74,16 @@ class _StartJobResultTool(Tool):
     def get_name_from_cls(cls) -> str:
         return "start_job"
 
-    def apply(self, command: str, label: str) -> str:
-        """Return one serialized start-job payload.
+    def apply(self, command: str, label: str) -> dict[str, str]:
+        """Return one native start-job payload.
 
         :param command: ignored command text
         :param label: job label returned in the payload
-        :return: serialized start-job result
+        :return: native start-job result
         """
-        return f'{{"job_id":"wrapped-job","label":"{label}"}}'
+        return {"job_id": "wrapped-job", "label": label}
 
-    def apply_ex(self, **kwargs) -> str:
+    def apply_ex(self, **kwargs) -> dict[str, str]:
         return self.apply(command=kwargs["command"], label=kwargs["label"])
 
 
@@ -675,19 +675,16 @@ def test_mcp_start_job_metadata_is_extracted_before_central_presentation(monkeyp
     tracker = ActivityTracker(source)
     run = tracker.start_run("global", "serena")
     tool = _StartJobResultTool()
-    logical_result = json.dumps(
-        {
-            "prefix": "x" * 10_000,
-            "job_id": "wrapped-job",
-            "label": "wrapped label",
-            "suffix": "y" * 10_000,
-        },
-        separators=(",", ":"),
-    )
+    logical_result = {
+        "prefix": "x" * 10_000,
+        "job_id": "wrapped-job",
+        "label": "wrapped label",
+        "suffix": "y" * 10_000,
+    }
     monkeypatch.setattr(tool, "apply", lambda command, label: logical_result)
     mcp_tool = SerenaMCPFactory.make_mcp_tool(tool, activity_tracker=tracker)
 
-    result = asyncio.run(mcp_tool.run({"command": "sleep 1", "label": "wrapped label"}, convert_result=True))
+    asyncio.run(mcp_tool.run({"command": "sleep 1", "label": "wrapped label"}, convert_result=True))
 
     snapshot = tracker.get_run("global", run["run_id"])
     assert [(job["job_id"], job["current_turn"]) for job in snapshot["jobs"]] == [("wrapped-job", True)]
@@ -695,7 +692,6 @@ def test_mcp_start_job_metadata_is_extracted_before_central_presentation(monkeyp
     assert execution.durable_job_id == "wrapped-job"
     assert execution.durable_job_label == "wrapped label"
     assert execution.retained_output_id is not None
-    assert "wrapped-job" not in str(result)
 
 
 def test_activity_resource_uses_mcp_app_contract() -> None:
