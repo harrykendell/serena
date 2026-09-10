@@ -1,5 +1,6 @@
 """Behaviour tests for incremental shell command output."""
 
+import json
 import os
 import re
 import shlex
@@ -81,6 +82,23 @@ def test_execute_shell_command_uses_user_shell_environment(monkeypatch, tmp_path
     assert result.return_code == 0
     assert result.stdout == "resolved-from-user-path\n"
     assert result.stderr == ""
+
+
+def test_shell_tool_returns_compact_decision_relevant_payload(tmp_path) -> None:
+    store = ToolOutputStore()
+    agent = MagicMock()
+    agent.get_active_project_or_raise.return_value = SimpleNamespace(project_root=str(tmp_path))
+    agent.serena_config.default_max_tool_answer_tokens = 1_000
+    agent.serena_config.tool_timeout = 30
+    agent.open_tool_output.side_effect = store.open
+    agent.tool_is_active.return_value = True
+    tool = ExecuteShellCommandTool(agent)
+
+    try:
+        response = json.loads(tool.apply("printf out; printf err >&2; exit 7", capture_stderr=True))
+        assert response == {"return_code": 7, "stdout": "out", "stderr": "err"}
+    finally:
+        store.close()
 
 
 def test_shell_tool_oversize_response_reuses_live_transcript_id(tmp_path) -> None:

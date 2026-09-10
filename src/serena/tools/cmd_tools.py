@@ -32,7 +32,7 @@ class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit):
         :param capture_stderr: whether to capture and return stderr output
         :param max_answer_chars: if the output is longer than this number of characters,
             a retained output tail is returned when supported. -1 uses the configured default.
-        :return: a JSON object containing the command's stdout and optionally stderr output
+        :return: compact JSON containing the return code plus non-empty stdout/stderr output
         """
         if cwd is None:
             _cwd = self.get_project_root()
@@ -59,12 +59,17 @@ class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit):
             raise UserFacingError(str(error)) from None
         except OSError as error:
             raise UserFacingError(f"Could not execute shell command: {error.strerror or error}") from None
-        result_json = result.model_dump_json()
+        payload: dict[str, object] = {"return_code": result.return_code}
+        if result.stdout:
+            payload["stdout"] = result.stdout
+        if result.stderr:
+            payload["stderr"] = result.stderr
+        result_json = self._to_json(payload)
         if len(result_json) <= effective_max_answer_chars:
             return result_json
 
         if self.agent.tool_is_active("read_tool_output"):
-            details = f"return_code={result.return_code}; cwd={result.cwd}"
+            details = f"return_code={result.return_code}"
             return self.agent.render_tool_output_tail(
                 output_writer.output_id,
                 effective_max_answer_chars,

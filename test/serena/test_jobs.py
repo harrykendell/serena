@@ -376,7 +376,7 @@ def test_start_job_rejects_working_directory_outside_project(tmp_path: Path) -> 
         manager.start_job("echo nope", str(project), label="invalid cwd", cwd=str(outside))
 
 
-def test_job_tools_return_chat_friendly_telemetry_and_persistence(tmp_path: Path) -> None:
+def test_job_tools_return_compact_recovery_and_telemetry_payloads(tmp_path: Path) -> None:
     backend = FakeJobBackend()
     manager = _manager(tmp_path, backend)
     project = MagicMock(project_root=str(tmp_path), project_name="demo")
@@ -390,34 +390,34 @@ def test_job_tools_return_chat_friendly_telemetry_and_persistence(tmp_path: Path
     cancel_tool._job_manager = manager
 
     started = json.loads(start_tool.apply("echo hello", label="demo test", timeout_seconds=60))
-    backend.output[started["job_id"]].append("hello")
-    status = json.loads(status_tool.apply(started["job_id"]))
-    backend.output[started["job_id"]].append("later")
-    delta = json.loads(status_tool.apply(started["job_id"], cursor=status["next_cursor"]))
+    job_id = started["job_id"]
+    backend.output[job_id].append("hello")
+    status = json.loads(status_tool.apply(job_id))
+    backend.output[job_id].append("later")
+    delta = json.loads(status_tool.apply(job_id, cursor=status["next_cursor"]))
     listed = json.loads(status_tool.apply())
-    cancelled = json.loads(cancel_tool.apply(started["job_id"]))
+    cancelled = json.loads(cancel_tool.apply(job_id))
 
-    assert started["max_concurrent_jobs"] == 12
-    assert started["running_jobs"] == 1
-    assert started["timeout_seconds"] == 60
-    assert started["persistence"]["survives_serena_restart"] is True
-    assert started["persistence"]["survives_logout"] is False
-    assert "Continue other useful work" in started["next_step"]
+    assert started == {
+        "job_id": job_id,
+        "status": "running",
+        "running_jobs": 1,
+        "max_concurrent_jobs": 12,
+    }
     assert status["output"] == "hello"
     assert status["next_cursor"] == "1"
+    assert status["timeout_seconds"] == 60
     assert status["runtime"]["memory_bytes"] == 1024
     assert status["runtime"]["process_count"] == 3
-    assert 'wait_for="completed"' in status["next_step"]
     assert delta["output"] == "later"
     assert delta["status"] == "running"
     assert "runtime" in delta
     assert "label" not in delta
-    assert "project_root" not in delta
+    assert "project" not in delta
     assert "cwd" not in delta
-    assert "persistence" not in delta
     assert listed["jobs"][0]["label"] == "demo test"
     assert listed["jobs"][0]["runtime"]["cpu_seconds"] == 2.25
-    assert cancelled["status"] == "cancelled"
+    assert cancelled == {"job_id": job_id, "status": "cancelled"}
 
 
 def test_job_status_duration_wait_ignores_new_output_until_deadline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

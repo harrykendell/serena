@@ -811,7 +811,7 @@ def test_shell_nonzero_exit_remains_successful_mcp_result(
     async def scenario() -> None:
         result = await mcp_tool.run({"command": "exit 7"}, context=_mcp_context("session-a"))
         payload = json.loads(result)
-        assert payload["return_code"] == 7
+        assert payload == {"return_code": 7}
 
         record = agent.execution_store.list_session_executions("session-a")[-1]
         assert record.status == "completed"

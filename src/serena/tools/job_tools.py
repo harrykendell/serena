@@ -7,13 +7,7 @@ import time
 from typing import Literal
 
 from serena.errors import UserFacingError
-from serena.jobs import (
-    JobPersistenceInfo,
-    JobRecord,
-    JobRuntimeInfo,
-    JobSnapshot,
-    JobStatus,
-)
+from serena.jobs import JobRecord, JobRuntimeInfo, JobSnapshot, JobStatus
 from serena.tools.tools_base import Tool, ToolMarkerCanEdit, ToolMarkerDoesNotRequireActiveProject
 
 
@@ -26,45 +20,50 @@ class _JobTool(Tool):
 
     @staticmethod
     def _record_payload(record: JobRecord) -> dict[str, object]:
-        return {
+        """Returns compact recoverable identity and state for one job."""
+        payload: dict[str, object] = {
             "job_id": record.job_id,
             "label": record.label,
             "project": record.project_name,
-            "project_root": record.project_root,
-            "cwd": record.cwd,
             "status": record.status.value,
             "created_at": record.created_at,
-            "finished_at": record.finished_at,
-            "return_code": record.return_code,
-            "timeout_seconds": record.timeout_seconds,
-            "status_message": record.status_message,
         }
+        if record.finished_at is not None:
+            payload["finished_at"] = record.finished_at
+        if record.return_code is not None:
+            payload["return_code"] = record.return_code
+        if record.timeout_seconds is not None and not record.status.is_terminal:
+            payload["timeout_seconds"] = record.timeout_seconds
+        if record.cwd != record.project_root:
+            payload["cwd"] = record.cwd
+
+        status_detail = _JobTool._status_detail(record)
+        if status_detail is not None:
+            payload["status_message"] = status_detail
+        return payload
+
+    @staticmethod
+    def _status_detail(record: JobRecord) -> str | None:
+        """Returns non-redundant terminal detail when state alone is insufficient."""
+        if record.status is JobStatus.TIMED_OUT:
+            return record.status_message
+        if record.status is JobStatus.FAILED and record.return_code is None:
+            return record.status_message
+        return None
 
     @staticmethod
     def _runtime_payload(runtime: JobRuntimeInfo) -> dict[str, object]:
-        return {
-            "elapsed_seconds": round(runtime.elapsed_seconds, 3),
-            "seconds_since_last_output": (
-                round(runtime.seconds_since_last_output, 3) if runtime.seconds_since_last_output is not None else None
-            ),
-            "memory_bytes": runtime.memory_bytes,
-            "cpu_seconds": round(runtime.cpu_seconds, 3) if runtime.cpu_seconds is not None else None,
-            "process_count": runtime.process_count,
-        }
-
-    @staticmethod
-    def _persistence_payload(persistence: JobPersistenceInfo) -> dict[str, object]:
-        if persistence.survives_logout:
-            summary = "Survives Serena restarts and user logout while the host remains up; does not survive a host reboot."
-        else:
-            summary = "Survives Serena restarts; user logout may stop the job because systemd user lingering is disabled; does not survive a host reboot."
-        return {
-            "survives_serena_restart": persistence.survives_serena_restart,
-            "survives_logout": persistence.survives_logout,
-            "survives_reboot": persistence.survives_reboot,
-            "linger_enabled": persistence.linger_enabled,
-            "summary": summary,
-        }
+        """Returns only available runtime telemetry."""
+        payload: dict[str, object] = {"elapsed_seconds": round(runtime.elapsed_seconds, 3)}
+        if runtime.seconds_since_last_output is not None:
+            payload["seconds_since_last_output"] = round(runtime.seconds_since_last_output, 3)
+        if runtime.memory_bytes is not None:
+            payload["memory_bytes"] = runtime.memory_bytes
+        if runtime.cpu_seconds is not None:
+            payload["cpu_seconds"] = round(runtime.cpu_seconds, 3)
+        if runtime.process_count is not None:
+            payload["process_count"] = runtime.process_count
+        return payload
 
     @staticmethod
     def _json(payload: dict[str, object]) -> str:
@@ -86,7 +85,7 @@ class StartJobTool(_JobTool, ToolMarkerCanEdit):
         :param label: concise human-readable purpose, required for cross-chat recovery
         :param cwd: project-relative working directory; defaults to the active project root and may not escape it
         :param timeout_seconds: optional positive wall-clock runtime limit; omit for no runtime limit
-        :return: JSON containing the job ID, state, concurrency usage, persistence guarantees, and suggested next action
+        :return: compact JSON containing the job ID, state, and concurrency usage
         """
         record, running_jobs = self._job_manager.start_job(
             command=command,
@@ -96,19 +95,14 @@ class StartJobTool(_JobTool, ToolMarkerCanEdit):
             cwd=cwd,
             timeout_seconds=timeout_seconds,
         )
-        payload = self._record_payload(record)
-        payload.update(
+        return self._json(
             {
+                "job_id": record.job_id,
+                "status": record.status.value,
                 "running_jobs": running_jobs,
                 "max_concurrent_jobs": self._job_manager.max_concurrent_jobs,
-                "persistence": self._persistence_payload(self._job_manager.persistence_info()),
-                "next_step": (
-                    'Continue other useful work. If none remains, call job_status with this job_id and wait_for="completed" '
-                    "to wait efficiently for completion; preserve next_cursor between polls when inspecting incremental output."
-                ),
             }
         )
-        return self._json(payload)
 
 
 class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
@@ -126,7 +120,8 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
 
         With a ``job_id``, the first call defaults to the latest bounded output tail. Set ``output="start"`` to read from the
         beginning instead. Pass ``next_cursor`` back on later calls to receive only new output; those cursor-based calls return a
-        compact delta payload rather than repeating immutable job and persistence metadata. A stale journal cursor is recovered
+        compact delta payload rather than repeating immutable job metadata. Paging-condition fields such as ``has_more_output``,
+        ``earlier_output_omitted``, and ``cursor_reset`` are emitted only when true. A stale journal cursor is recovered
         automatically by returning the latest tail with ``cursor_reset=true``. ``wait_for`` accepts either a numeric duration from
         0 through 60 seconds or ``"completed"``. A duration waits until that time has elapsed or the job reaches a terminal state;
         ``"completed"`` waits until the job reaches a terminal state. Newly available output does not end either kind of wait.
@@ -138,7 +133,7 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
         :param output: initial output position when no cursor is supplied: ``latest`` (default) or ``start``
         :param wait_for: optional wait duration in seconds, or ``"completed"`` to wait until the job finishes
         :param max_answer_chars: maximum returned characters; ``-1`` uses the configured retained-output budget
-        :return: JSON describing current state, telemetry, bounded output, and the appropriate next action
+        :return: compact JSON describing current state, telemetry, and bounded output
         """
         deadline: float | None = None
         if wait_for is not None and wait_for != "completed":
@@ -156,27 +151,15 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
             jobs: list[dict[str, object]] = []
             for snapshot in snapshots:
                 record = snapshot.record
-                item: dict[str, object] = {
-                    "job_id": record.job_id,
-                    "label": record.label,
-                    "project": record.project_name,
-                    "status": record.status.value,
-                    "created_at": record.created_at,
-                    "finished_at": record.finished_at,
-                    "return_code": record.return_code,
-                    "status_message": record.status_message,
-                    "runtime": self._runtime_payload(snapshot.runtime),
-                }
-                if record.timeout_seconds is not None:
-                    item["timeout_seconds"] = record.timeout_seconds
+                item = self._record_payload(record)
+                if not record.status.is_terminal:
+                    item["runtime"] = self._runtime_payload(snapshot.runtime)
                 jobs.append(item)
             result = self._json(
                 {
                     "jobs": jobs,
                     "running_jobs": running_jobs,
                     "max_concurrent_jobs": self._job_manager.max_concurrent_jobs,
-                    "persistence": self._persistence_payload(self._job_manager.persistence_info()),
-                    "next_step": "Call job_status with a job_id to retrieve bounded output.",
                 }
             )
             return self._limit_length(result, max_answer_chars)
@@ -208,42 +191,28 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
                 "job_id": record.job_id,
                 "status": record.status.value,
             }
-            if record.status_message is not None:
-                payload["status_message"] = record.status_message
-            if record.status.is_terminal:
-                payload.update(
-                    {
-                        "finished_at": record.finished_at,
-                        "return_code": record.return_code,
-                    }
-                )
+            if record.finished_at is not None:
+                payload["finished_at"] = record.finished_at
+            if record.return_code is not None:
+                payload["return_code"] = record.return_code
+            status_detail = self._status_detail(record)
+            if status_detail is not None:
+                payload["status_message"] = status_detail
         else:
             payload = self._record_payload(record)
-            payload["persistence"] = self._persistence_payload(self._job_manager.persistence_info())
 
-        payload.update(
-            {
-                "runtime": self._runtime_payload(snapshot.runtime),
-                "output": output.output,
-                "next_cursor": output.next_cursor,
-                "has_more_output": output.has_more_output,
-                "output_truncated": output.output_truncated,
-                "earlier_output_omitted": output.earlier_output_omitted,
-                "cursor_reset": output.cursor_reset,
-            }
-        )
-
+        payload["runtime"] = self._runtime_payload(snapshot.runtime)
+        payload["output"] = output.output
+        if output.next_cursor is not None:
+            payload["next_cursor"] = output.next_cursor
+        if output.has_more_output:
+            payload["has_more_output"] = True
+        if output.output_truncated:
+            payload["output_truncated"] = True
+        if output.earlier_output_omitted:
+            payload["earlier_output_omitted"] = True
         if output.cursor_reset:
-            payload["next_step"] = "Cursor reset to the latest output tail; continue from next_cursor."
-        elif output.has_more_output:
-            payload["next_step"] = "Buffered output remains; call job_status again with next_cursor."
-        elif record.status is JobStatus.RUNNING:
-            prefix = "Earlier output was omitted. " if output.earlier_output_omitted else ""
-            payload["next_step"] = prefix + 'Running; use next_cursor with wait_for="completed" if no other work remains.'
-        elif output.earlier_output_omitted:
-            payload["next_step"] = 'Finished; earlier output omitted. Use output="start" without a cursor to inspect it.'
-        else:
-            payload["next_step"] = "Finished; no further polling needed."
+            payload["cursor_reset"] = True
         return payload
 
 
@@ -260,6 +229,10 @@ class CancelJobTool(_JobTool, ToolMarkerCanEdit, ToolMarkerDoesNotRequireActiveP
         :return: JSON containing the resulting terminal or already-terminal state
         """
         record = self._job_manager.cancel_job(job_id)
-        payload = self._record_payload(record)
-        payload["next_step"] = "No further polling is needed." if record.status.is_terminal else "Check job_status for current state."
+        payload: dict[str, object] = {"job_id": record.job_id, "status": record.status.value}
+        if record.return_code is not None:
+            payload["return_code"] = record.return_code
+        status_detail = self._status_detail(record)
+        if status_detail is not None:
+            payload["status_message"] = status_detail
         return self._json(payload)
