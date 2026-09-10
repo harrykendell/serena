@@ -17,7 +17,7 @@ from serena.execution_store import ACTIVITY_HISTORY_LIMIT, ExecutionRecord, Exec
 from serena.jobs import JobManager, JobRecord, JobSnapshot, JobStatus
 from serena.session import get_mcp_session_id  # noqa: F401 - compatibility re-export
 
-ACTIVITY_RESOURCE_URI = "ui://serena/activity-v26.html"
+ACTIVITY_RESOURCE_URI = "ui://serena/activity-v27.html"
 _ACTIVITY_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
 _MAX_RUNS = 128
 
@@ -892,7 +892,7 @@ def activity_widget_html() -> str:
         <span id="activity-header-submitted" class="header-submitted"></span>
         <span id="activity-header-elapsed" class="summary"></span>
       </span>
-      <span id="activity-header-status" class="header-status">Idle</span>
+      <span id="activity-header-duration" class="header-duration"></span>
     </span>
     <span id="activity-chevron" class="chevron" aria-hidden="true">⌄</span>
   </button>
@@ -941,18 +941,16 @@ def activity_widget_html() -> str:
   .header-detail { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .header-meta { justify-self: end; min-width: 0; }
   .header-times { display: grid; gap: 1px; justify-items: end; }
-  .header-submitted, .summary, .header-status { white-space: nowrap; font-size: 11px; font-variant-numeric: tabular-nums; }
+  .header-submitted, .summary, .header-duration { white-space: nowrap; font-size: 11px; font-variant-numeric: tabular-nums; }
   .header-submitted { opacity: .52; }
   .summary { opacity: .66; }
-  .header-status { opacity: .58; }
-  .header-status.running { color: #00491e; opacity: 1; font-weight: 650; }
-  .header-status.failed { color: #dc2626; opacity: 1; font-weight: 650; }
-  .activity.collapsed .header-overview, .activity.collapsed .header-status { display: none; }
+  .header-duration { opacity: .58; }
+  .activity.collapsed .header-overview, .activity.collapsed .header-duration { display: none; }
   .activity:not(.collapsed) .header-tool, .activity:not(.collapsed) .header-times { display: none; }
   .activity.collapsed.empty-state .header-tool, .activity.collapsed.empty-state .header-times,
   .activity.collapsed.summary-collapsed .header-tool, .activity.collapsed.summary-collapsed .header-times { display: none; }
   .activity.collapsed.empty-state .header-overview, .activity.collapsed.summary-collapsed .header-overview { display: grid; }
-  .activity.collapsed.empty-state .header-status, .activity.collapsed.summary-collapsed .header-status { display: inline; }
+  .activity.collapsed.empty-state .header-duration, .activity.collapsed.summary-collapsed .header-duration { display: inline; }
   .chevron, .other-jobs-chevron { width: 14px; text-align: center; transition: transform .14s ease; opacity: .58; }
   .activity.collapsed .chevron, .other-jobs[aria-expanded="false"] .other-jobs-chevron { transform: rotate(-90deg); }
   .body { max-height: var(--activity-body-height, 202px); overflow: hidden; border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent); }
@@ -1033,7 +1031,7 @@ def activity_widget_html() -> str:
   .other-jobs:hover { opacity: .78; }
   .empty { padding: 5px 0 2px; opacity: .58; }
   @keyframes pulse { 50% { opacity: .28; } }
-  @media (prefers-color-scheme: dark) { .logo { color: #70c990; } .header-status.running, .call.running .status, .job-entry.running .status { color: #70c990; } }
+  @media (prefers-color-scheme: dark) { .logo { color: #70c990; } .call.running .status, .job-entry.running .status { color: #70c990; } }
   @media (prefers-reduced-motion: reduce) { .call.running .status { animation: none; } .chevron, .other-jobs-chevron, .row-chevron { transition: none; } }
   @media (max-width: 520px) {
     body { font-size: 12px; }
@@ -1063,7 +1061,7 @@ def activity_widget_html() -> str:
   const headerStats = document.getElementById("activity-header-stats");
   const headerSubmitted = document.getElementById("activity-header-submitted");
   const headerElapsed = document.getElementById("activity-header-elapsed");
-  const headerStatus = document.getElementById("activity-header-status");
+  const headerDuration = document.getElementById("activity-header-duration");
   const calls = document.getElementById("activity-calls");
   const empty = document.getElementById("activity-empty");
   const logo = document.getElementById("activity-logo");
@@ -1201,16 +1199,34 @@ def activity_widget_html() -> str:
     if (state?.run_id) render(state);
   });
 
+  function formatDuration(seconds) {
+    const boundedSeconds = Math.max(0, seconds);
+    if (boundedSeconds < 10) return `${boundedSeconds.toFixed(1)}s`;
+
+    const roundedSeconds = Math.round(boundedSeconds);
+    if (roundedSeconds < 120) return `${roundedSeconds}s`;
+    if (roundedSeconds < 3600) {
+      const minutes = Math.floor(roundedSeconds / 60);
+      return `${minutes}m ${String(roundedSeconds % 60).padStart(2, "0")}s`;
+    }
+
+    const roundedMinutes = Math.round(boundedSeconds / 60);
+    const hours = Math.floor(roundedMinutes / 60);
+    return `${hours}h ${String(roundedMinutes % 60).padStart(2, "0")}m`;
+  }
+
   function elapsed(entry, nowSeconds) {
     const liveLagSeconds = entry.kind === "job" ? 1.5 : 0.5;
     const end = entry.finished_at ?? Math.max(entry.started_at, nowSeconds - liveLagSeconds);
-    const seconds = Math.max(0, end - entry.started_at);
-    if (seconds < 10) return `${seconds.toFixed(1)}s`;
-    if (seconds < 120) return `${Math.round(seconds)}s`;
-    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${String(Math.round(seconds % 60)).padStart(2, "0")}s`;
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+    return formatDuration(end - entry.started_at);
+  }
+
+  function submissionSpan(calls) {
+    const submitted = (calls || [])
+      .map(call => Number(call.submitted_at ?? call.started_at))
+      .filter(Number.isFinite);
+    if (submitted.length === 0) return "";
+    return formatDuration(Math.max(...submitted) - Math.min(...submitted));
   }
 
   function submittedClock(timestamp) {
@@ -1994,15 +2010,8 @@ def activity_widget_html() -> str:
     headerStats.textContent = `${countLabel(toolCount, "tool")} · ${countLabel(jobCount, "job")} · ${projectName}`;
     headerStats.title = headerStats.textContent;
 
-    const runningCount = (next.calls || []).filter(call => call.status === "running").length
-      + (next.jobs || []).filter(job => job.status === "running").length;
-    const issueCount = (next.calls || []).filter(call => call.status === "failed" || call.status === "timed_out").length
-      + (next.jobs || []).filter(job => job.status === "failed" || job.status === "timed_out").length;
-    headerStatus.textContent = runningCount > 0
-      ? `${runningCount} running`
-      : issueCount > 0 ? `${issueCount} failed` : toolCount + jobCount > 0 ? "Complete" : "Idle";
-    headerStatus.classList.toggle("running", runningCount > 0);
-    headerStatus.classList.toggle("failed", runningCount === 0 && issueCount > 0);
+    headerDuration.textContent = submissionSpan(next.calls);
+    headerDuration.title = headerDuration.textContent ? "Time between first and latest submitted tool" : "";
 
     if (backgroundJobs.length === 0) otherJobsExpanded = false;
     otherJobsButton.hidden = backgroundJobs.length === 0;
