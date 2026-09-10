@@ -12,7 +12,7 @@ from solidlsp.dependency_provider import LanguageServerDependencyProvider, Langu
 from solidlsp.language_servers.common import UE_IGNORED_DIRNAMES
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
-from solidlsp.ls_exceptions import SolidLSPException
+from solidlsp.ls_exceptions import LanguageServerUnavailableError
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
 
@@ -117,7 +117,7 @@ class ClangdLanguageServer(SolidLanguageServer):
         """
         if not is_unreal_engine_project(self.repository_root_path):
             return
-        raise SolidLSPException(
+        raise LanguageServerUnavailableError(
             f"No usable compile_commands.json at {self.repository_root_path}, but this looks like an "
             "Unreal Engine project (.uproject present). clangd needs a non-empty compilation database "
             "to resolve engine headers and macros.\n\n"
@@ -250,7 +250,7 @@ class ClangdLanguageServer(SolidLanguageServer):
             if dep is None:
                 clangd_executable_path = shutil.which("clangd")
                 if not clangd_executable_path:
-                    raise FileNotFoundError(
+                    raise LanguageServerUnavailableError(
                         "Clangd is not installed on this Linux host.\n"
                         "Install it with the system package manager, for example `sudo apt-get install clangd`."
                     )
@@ -261,7 +261,7 @@ class ClangdLanguageServer(SolidLanguageServer):
                     log.info(f"Clangd executable not found at {clangd_executable_path}. Downloading from {dep.url}")
                     deps.install(clangd_ls_dir)
                 if not os.path.exists(clangd_executable_path):
-                    raise FileNotFoundError(f"Clangd executable not found at {clangd_executable_path} after installation")
+                    raise LanguageServerUnavailableError(f"Clangd executable not found at {clangd_executable_path} after installation")
                 os.chmod(clangd_executable_path, 0o755)
             return clangd_executable_path
 

@@ -5,6 +5,8 @@ from contextvars import ContextVar, Token
 from enum import Enum
 from typing import TypeVar
 
+from serena.errors import UserFacingError
+
 _CURRENT_EXECUTION_ID: ContextVar[str | None] = ContextVar("serena_execution_id", default=None)
 
 
@@ -131,12 +133,14 @@ class RuntimeReadiness:
         return True
 
     def wait_until_ready(self) -> None:
-        """Blocks until initialisation is complete and re-raises a stable failure if it failed."""
+        """Blocks until initialisation is complete and re-raises its stable failure."""
         with self._condition:
             while self._state in (self.State.PENDING, self.State.INITIALIZING):
                 self._condition.wait()
             error = self._error
 
+        if isinstance(error, UserFacingError):
+            raise error from None
         if error is not None:
             raise RuntimeError(f"Project runtime initialisation failed: {error}") from error
 

@@ -20,7 +20,7 @@ from serena.prompt_factory import SerenaPromptFactory
 from serena.session import get_mcp_session_id
 from serena.util.class_decorators import singleton
 from serena.util.ls_diagnostics import DiagnosticsDiff, EditedFilePath, PublishedDiagnosticsSnapshot
-from solidlsp.ls_exceptions import SolidLSPException
+from solidlsp.ls_exceptions import LanguageServerOperationError, SolidLSPException
 
 if TYPE_CHECKING:
     from serena.agent import SerenaAgent
@@ -250,7 +250,7 @@ class Tool(Component):
             max_answer_chars if max_answer_chars != -1 else self.agent.serena_config.default_max_tool_answer_tokens * 4
         )
         if effective_max_answer_chars <= 0:
-            raise ValueError(f"Resolved maximum answer length must be positive, got: {effective_max_answer_chars}")
+            raise UserFacingError(f"Resolved maximum answer length must be positive, got: {effective_max_answer_chars}")
         return effective_max_answer_chars
 
     def _limit_length(
@@ -307,6 +307,8 @@ class Tool(Component):
             return apply_fn(**apply_kwargs)
         except SolidLSPException as error:
             if not error.is_language_server_terminated():
+                if isinstance(error, LanguageServerOperationError):
+                    raise UserFacingError(error.user_message()) from None
                 raise
 
             # recover the affected language server when its identity is available

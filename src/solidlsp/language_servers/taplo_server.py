@@ -19,6 +19,7 @@ from overrides import override
 from solidlsp.dependency_provider import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
+from solidlsp.ls_exceptions import LanguageServerUnavailableError
 from solidlsp.ls_utils import FileUtils
 from solidlsp.settings import SolidLSPSettings
 
@@ -55,7 +56,7 @@ def _taplo_sha(version: str, archive_filename: str) -> str | None:
 def _get_taplo_download_url(version: str = DEFAULT_TAPLO_VERSION) -> tuple[str, str]:
     """Return the Taplo release URL for the supported Linux host."""
     if platform.system() != "Linux":
-        raise RuntimeError("The standalone runtime supports Taplo on Linux only")
+        raise LanguageServerUnavailableError("The standalone runtime supports Taplo on Linux only")
 
     arch_map = {
         "x86_64": "x86_64",
@@ -68,7 +69,7 @@ def _get_taplo_download_url(version: str = DEFAULT_TAPLO_VERSION) -> tuple[str, 
     try:
         arch = arch_map[machine]
     except KeyError as exc:
-        raise RuntimeError(f"Unsupported Linux architecture for Taplo: {machine}") from exc
+        raise LanguageServerUnavailableError(f"Unsupported Linux architecture for Taplo: {machine}") from exc
 
     filename = f"taplo-linux-{arch}.gz"
     return f"https://github.com/tamasfe/taplo/releases/download/{version}/{filename}", "taplo"
@@ -139,7 +140,7 @@ class TaploServer(SolidLanguageServer):
             self._download_taplo(taplo_dir, taplo_executable, taplo_version)
 
             if not os.path.exists(taplo_executable):
-                raise FileNotFoundError(
+                raise LanguageServerUnavailableError(
                     f"Taplo executable not found at {taplo_executable}. "
                     "Installation may have failed. Try installing manually: cargo install taplo-cli --locked"
                 )
@@ -177,7 +178,7 @@ class TaploServer(SolidLanguageServer):
 
             except Exception as e:
                 log.error(f"Failed to download Taplo: {e}")
-                raise RuntimeError(
+                raise LanguageServerUnavailableError(
                     f"Failed to download Taplo from {download_url}. Try installing manually: cargo install taplo-cli --locked"
                 ) from e
 

@@ -12,6 +12,7 @@ from solidlsp.dependency_provider import LanguageServerDependencyProvider, Langu
 from solidlsp.language_servers.common import RuntimeDependency, RuntimeDependencyCollection, build_npm_install_command
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
+from solidlsp.ls_exceptions import LanguageServerUnavailableError
 from solidlsp.settings import SolidLSPSettings
 
 log = logging.getLogger(__name__)
@@ -99,7 +100,7 @@ class YamlLanguageServer(SolidLanguageServer):
                 log.info("YAML language server dependencies installed successfully")
 
             if not os.path.exists(yaml_executable_path):
-                raise FileNotFoundError(
+                raise LanguageServerUnavailableError(
                     f"yaml-language-server executable not found at {yaml_executable_path}, something went wrong with the installation."
                 )
 

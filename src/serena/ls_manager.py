@@ -193,8 +193,11 @@ class LanguageServerManager:
             self._last_used_at[ls_id] = time.monotonic()
 
     def _create_and_start_language_server(self, ls_id: LanguageServerId) -> SolidLanguageServer:
-        language_server = self._language_server_factory.create_language_server(ls_id)
-        language_server.start()
+        try:
+            language_server = self._language_server_factory.create_language_server(ls_id)
+            language_server.start()
+        except OSError as error:
+            raise UserFacingError(f"Failed to start the language server for language {ls_id.value}: {error.strerror or error}") from None
         if not language_server.is_running():
             raise UserFacingError(f"Failed to start the language server for language {ls_id.value}.")
         self._language_servers[ls_id] = language_server

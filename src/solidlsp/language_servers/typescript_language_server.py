@@ -16,7 +16,7 @@ from solidlsp import ls_types
 from solidlsp.dependency_provider import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
-from solidlsp.ls_exceptions import SolidLSPException
+from solidlsp.ls_exceptions import LanguageServerOperationError, LanguageServerUnavailableError
 from solidlsp.lsp_protocol_handler.lsp_types import MessageType
 from solidlsp.settings import SolidLSPSettings
 
@@ -52,7 +52,7 @@ def prefer_non_node_modules_definition(definitions: list[ls_types.Location]) -> 
     return definitions[0]
 
 
-class TypeScriptServerCrashedError(SolidLSPException):
+class TypeScriptServerCrashedError(LanguageServerOperationError):
     """Raised when tsserver reported its own abnormal exit via window/logMessage.
 
     typescript-language-server sends a $/progress "end" event for the in-flight
@@ -297,7 +297,7 @@ class TypeScriptLanguageServer(SolidLanguageServer):
                 log.info("TypeScript language server dependencies installed successfully")
 
             if not os.path.exists(tsserver_executable_path):
-                raise FileNotFoundError(
+                raise LanguageServerUnavailableError(
                     f"typescript-language-server executable not found at {tsserver_executable_path}, something went wrong with the installation."
                 )
             return tsserver_executable_path

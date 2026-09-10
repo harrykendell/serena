@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import pathspec
 from sensai.util.logging import LogTime
-from sensai.util.string import TextBuilder, ToStringMixin
+from sensai.util.string import ToStringMixin
 
 from serena.config.serena_config import (
     ProjectConfig,
@@ -189,7 +189,7 @@ class Project(ToStringMixin):
             if self.__ignore_spec is not None:
                 log.info("Ignore spec is now available for project; proceeding")
         if self.__ignore_spec is None:
-            raise ValueError("The ignore spec could not be computed; please check the Serena log for errors.")
+            raise UserFacingError("Project ignore rules are unavailable; check the Serena log for the underlying error.")
         return self.__ignore_spec
 
     @property
@@ -203,7 +203,7 @@ class Project(ToStringMixin):
             if self.__ignored_patterns is not None:
                 log.info("Ignored patterns are now available for project; proceeding")
         if self.__ignored_patterns is None:
-            raise ValueError("The ignored patterns could not be computed; please check the Serena log for errors.")
+            raise UserFacingError("Project ignore rules are unavailable; check the Serena log for the underlying error.")
         return self.__ignored_patterns
 
     def _is_ignored_relative_path(self, relative_path: str | Path, ignore_non_source_files: bool = True) -> bool:
@@ -511,14 +511,14 @@ class Project(ToStringMixin):
                 ls_timeout = None
             else:
                 if tool_timeout < 10:
-                    raise ValueError(f"Tool timeout must be at least 10 seconds, but is {tool_timeout} seconds")
+                    raise UserFacingError(f"Tool timeout must be at least 10 seconds, but is {tool_timeout} seconds")
                 ls_timeout = tool_timeout - 5
 
             idle_timeout = self.serena_config.language_server_idle_timeout
             if idle_timeout < 0:
-                raise ValueError(f"Language server idle timeout cannot be negative, but is {idle_timeout} seconds")
+                raise UserFacingError(f"Language server idle timeout cannot be negative, but is {idle_timeout} seconds")
             if idle_timeout > 0 and tool_timeout is not None and tool_timeout > 0 and idle_timeout <= tool_timeout:
-                raise ValueError(
+                raise UserFacingError(
                     "Language server idle timeout must exceed the tool timeout so a server cannot be reaped during a tool call "
                     f"({idle_timeout=} <= {tool_timeout=})"
                 )
@@ -579,16 +579,15 @@ class Project(ToStringMixin):
             return "ready"
 
     def get_language_server_manager_or_raise(self) -> LanguageServerManager:
+        """Returns the language-server manager or raises an actionable availability error."""
         if self.language_server_manager is None:
-            msg = TextBuilder("The language server manager is not initialized, indicating a problem during project initialisation.")
+            detail = "project initialisation did not create a language-server manager"
             if self._language_server_manager_init_error is not None:
-                msg.with_text(str(self._language_server_manager_init_error))
+                detail = str(self._language_server_manager_init_error)
+            message = f"Language server manager is unavailable: {detail}."
             if self._agent is not None:
-                msg.with_text("For details, please check the logs. " + self._agent.get_log_inspection_instructions())
-            msg.with_text(
-                "IMPORTANT: Stop, do not attempt workarounds. Inform the user and wait for further instructions before you continue!"
-            )
-            raise Exception(msg.build())
+                message += " " + self._agent.get_log_inspection_instructions()
+            raise UserFacingError(message)
         return self.language_server_manager
 
     def add_language_server(self, ls_id: LanguageServerId) -> None:

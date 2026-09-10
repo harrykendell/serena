@@ -12,6 +12,7 @@ from solidlsp.dependency_provider import LanguageServerDependencyProvider, Langu
 from solidlsp.language_servers.common import RuntimeDependency, RuntimeDependencyCollection, build_npm_install_command
 from solidlsp.ls import DocumentSymbols, LSPFileBuffer, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
+from solidlsp.ls_exceptions import LanguageServerUnavailableError
 from solidlsp.ls_utils import FileUtils, PlatformId, PlatformUtils
 from solidlsp.settings import SolidLSPSettings
 
@@ -117,7 +118,7 @@ class BashLanguageServer(SolidLanguageServer):
             self._install_shellcheck_if_missing(bash_ls_dir)
 
             if not os.path.exists(bash_executable_path):
-                raise FileNotFoundError(
+                raise LanguageServerUnavailableError(
                     f"bash-language-server executable not found at {bash_executable_path}, something went wrong with the installation."
                 )
 
@@ -138,7 +139,9 @@ class BashLanguageServer(SolidLanguageServer):
 
             release = _SHELLCHECK_DEPENDENCIES.get(PlatformUtils.get_platform_id())
             if release is None:
-                raise RuntimeError(f"ShellCheck has no upstream binary release for platform {PlatformUtils.get_platform_id().value}")
+                raise LanguageServerUnavailableError(
+                    f"ShellCheck has no upstream binary release for platform {PlatformUtils.get_platform_id().value}"
+                )
 
             archive_type = "xztar"
             log.info(f"Downloading ShellCheck v{_SHELLCHECK_VERSION} for {PlatformUtils.get_platform_id().value}")
@@ -151,7 +154,9 @@ class BashLanguageServer(SolidLanguageServer):
             )
 
             if not os.path.exists(binary_path):
-                raise FileNotFoundError(f"ShellCheck binary not found at {binary_path} after extraction; archive layout may have changed.")
+                raise LanguageServerUnavailableError(
+                    f"ShellCheck binary not found at {binary_path} after extraction; archive layout may have changed."
+                )
 
             current = os.stat(binary_path).st_mode
             os.chmod(binary_path, current | 0o111)

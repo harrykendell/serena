@@ -25,7 +25,7 @@ from solidlsp import ls_types
 from solidlsp.dependency_provider import LanguageServerDependencyProvider
 from solidlsp.initialize_params import DefaultInitializeParamsBuilder, InitializeParamsBuilder
 from solidlsp.ls_config import FilenameMatcher, LanguageServerConfig, LanguageServerId
-from solidlsp.ls_exceptions import InvalidTextLocationError, SolidLSPException
+from solidlsp.ls_exceptions import InvalidTextLocationError, LanguageServerOperationError, SolidLSPException
 from solidlsp.ls_process import DEFAULT_LS_REQUEST_TIMEOUT, LanguageServerInterface, StdioLanguageServer
 from solidlsp.ls_types import UnifiedSymbolInformation
 from solidlsp.ls_utils import FileUtils, PathUtils, TextUtils
@@ -1016,10 +1016,7 @@ class SolidLanguageServer(ABC):
 
         def check_within_workspace_or_raise(self):
             if not self.is_in_workspace_folder:
-                raise ValueError(
-                    f"Path {self.resolve_abs_path} is outside of configured workspaces. "
-                    f"Configured workspaces: {self.ls._abs_workspace_folders_all}."
-                )
+                raise LanguageServerOperationError(f"Path {self.resolve_abs_path} is outside of configured language-server workspaces.")
 
     def _resolve_file_uri(self, relative_file_path: str) -> str:
         """Construct a canonical file URI from a relative path.
@@ -2108,9 +2105,9 @@ class SolidLanguageServer(ABC):
         if within_relative_path:
             within_abs_path = os.path.join(self.repository_root_path, within_relative_path)
             if not os.path.exists(within_abs_path):
-                raise FileNotFoundError(f"File or directory not found: {within_abs_path}")
+                raise LanguageServerOperationError(f"File or directory not found: {within_abs_path}")
             if self.is_ignored_path(within_relative_path):
-                raise ValueError(f"Explicitly requested symbols in '{within_relative_path}' while the path is ignored")
+                raise LanguageServerOperationError(f"Explicitly requested symbols in '{within_relative_path}' while the path is ignored")
             if os.path.isfile(within_abs_path):
                 root_nodes = self.request_document_symbols(within_relative_path).root_symbols
                 return root_nodes
@@ -2196,11 +2193,11 @@ class SolidLanguageServer(ABC):
         """
         abs_path = (Path(self.repository_root_path) / within_relative_path).resolve()
         if not abs_path.exists():
-            raise FileNotFoundError(f"File or directory not found: {abs_path}")
+            raise LanguageServerOperationError(f"File or directory not found: {abs_path}")
 
         if abs_path.is_file():
             if self.is_ignored_path(within_relative_path):
-                raise ValueError(f"The explicitly passed file {within_relative_path} is ignored, not returning overview.")
+                raise LanguageServerOperationError(f"The explicitly passed file {within_relative_path} is ignored, not returning overview.")
             symbols_overview = self.request_document_overview(within_relative_path)
             return {within_relative_path: symbols_overview}
         else:

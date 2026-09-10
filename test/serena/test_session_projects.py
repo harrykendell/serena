@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -33,8 +34,9 @@ from serena.tools import (
     ReplaceContentTool,
     WriteMemoryTool,
 )
+from serena.util.yaml import load_yaml, save_yaml
 from solidlsp.ls_config import LanguageServerId
-from solidlsp.ls_exceptions import SolidLSPException
+from solidlsp.ls_exceptions import LanguageServerOperationError, SolidLSPException
 from solidlsp.ls_process import LanguageServerTerminatedException
 
 
@@ -94,6 +96,45 @@ def test_unknown_project_activation_is_user_facing(
 
     with pytest.raises(UserFacingError, match="not found"):
         tool.apply(project="missing-project", session_id="session-a")
+
+
+def test_unavailable_registered_project_activation_is_user_facing(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
+) -> None:
+    agent, roots = multi_project_agent
+    shutil.rmtree(roots["project_a"])
+    tool = agent.get_tool(ActivateProjectTool)
+
+    with pytest.raises(UserFacingError, match="is unavailable: directory does not exist"):
+        tool.apply(project="project_a", session_id="session-a")
+
+
+def test_ambiguous_project_activation_is_user_facing(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
+) -> None:
+    agent, _ = multi_project_agent
+    agent.serena_config.projects[1].project_config.project_name = "project_a"
+    tool = agent.get_tool(ActivateProjectTool)
+
+    with pytest.raises(UserFacingError, match="Multiple projects found with name 'project_a'"):
+        tool.apply(project="project_a", session_id="session-a")
+
+
+def test_invalid_project_configuration_is_user_facing_during_activation(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
+) -> None:
+    agent, roots = multi_project_agent
+    invalid_root = roots["project_a"].parent / "invalid_project"
+    invalid_root.mkdir()
+    ProjectConfig.autogenerate(invalid_root, agent.serena_config)
+    config_path = Path(agent.serena_config.get_project_yml_location(invalid_root))
+    config_data = load_yaml(str(config_path))
+    config_data["language_servers"] = ["not-a-language-server"]
+    save_yaml(str(config_path), config_data)
+    tool = agent.get_tool(ActivateProjectTool)
+
+    with pytest.raises(UserFacingError, match="Invalid project configuration"):
+        tool.apply(project=str(invalid_root), session_id="session-a")
 
 
 def test_project_tool_execution_access_contract() -> None:
@@ -213,6 +254,62 @@ def test_lsp_termination_replays_read_at_most_once(
 
     assert apply_calls == 2
     assert restarted_languages == [LanguageServerId.PYTHON]
+
+
+def test_lsp_operation_failure_is_concise_user_facing_mcp_error(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "session-a", "project_a")
+    tool = agent.get_tool(FindSymbolTool)
+
+    def rejected_read(**kwargs: Any) -> str:
+        del kwargs
+        raise LanguageServerOperationError(
+            "Error processing request textDocument/documentSymbol with params:\n{'large': 'request payload'}",
+            cause=ValueError("Language server rejected the request"),
+        )
+
+    monkeypatch.setattr(tool, "apply", rejected_read)
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(tool)
+
+    async def scenario() -> None:
+        with pytest.raises(ToolError) as exc_info:
+            await mcp_tool.run({"name_path_pattern": "Example"}, context=_mcp_context("session-a"))
+
+        message = str(exc_info.value)
+        assert message == "Language server rejected the request"
+        assert "request payload" not in message
+        record = agent.execution_store.list_session_executions("session-a")[-1]
+        assert record.error == message
+
+    asyncio.run(scenario())
+
+
+def test_unclassified_lsp_failure_remains_internal_at_mcp_boundary(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "session-a", "project_a")
+    tool = agent.get_tool(FindSymbolTool)
+
+    def broken_read(**kwargs: Any) -> str:
+        del kwargs
+        raise SolidLSPException("internal language-server invariant failed")
+
+    monkeypatch.setattr(tool, "apply", broken_read)
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(tool)
+
+    async def scenario() -> None:
+        with pytest.raises(ToolError) as exc_info:
+            await mcp_tool.run({"name_path_pattern": "Example"}, context=_mcp_context("session-a"))
+
+        message = str(exc_info.value)
+        assert message == "SolidLSPException: internal language-server invariant failed"
+        record = agent.execution_store.list_session_executions("session-a")[-1]
+        assert record.error == message
+
+    asyncio.run(scenario())
 
 
 def test_startup_project_sessions_share_serialization(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -413,6 +510,36 @@ def test_runtime_initialization_failure_is_shared_by_bound_sessions(
     assert all("runtime initialization failed" in str(error) for error in errors)
 
 
+def test_runtime_user_facing_initialization_failure_remains_concise_at_mcp_boundary(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, roots = multi_project_agent
+    (roots["project_a"] / "value.txt").write_text("alpha")
+    init_failed = threading.Event()
+
+    def failing_init(project: Project) -> None:
+        assert project.project_name == "project_a"
+        init_failed.set()
+        raise UserFacingError("Language server manager is unavailable: invalid tool timeout configuration.")
+
+    monkeypatch.setattr(agent, "_init_project_language_servers", failing_init)
+    _activate(agent, "session-a", "project_a")
+    assert init_failed.wait(timeout=5)
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(ReadFileTool))
+
+    async def scenario() -> None:
+        with pytest.raises(ToolError) as exc_info:
+            await mcp_tool.run({"relative_path": "value.txt"}, context=_mcp_context("session-a"))
+
+        message = str(exc_info.value)
+        assert message == "Language server manager is unavailable: invalid tool timeout configuration."
+        assert "RuntimeError" not in message
+        record = agent.execution_store.list_session_executions("session-a")[-1]
+        assert record.error == message
+
+    asyncio.run(scenario())
+
+
 def test_sessions_bind_projects_independently(multi_project_agent: tuple[SerenaAgent, dict[str, Path]]) -> None:
     agent, _ = multi_project_agent
 
@@ -499,6 +626,29 @@ def test_read_file_missing_path_is_concise_mcp_failure(
         assert message == "File not found: missing.txt"
         record = agent.execution_store.list_session_executions("session-a")[-1]
         assert record.status == "failed"
+        assert record.error == message
+
+    asyncio.run(scenario())
+
+
+def test_invalid_response_budget_is_concise_mcp_failure(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]],
+) -> None:
+    agent, roots = multi_project_agent
+    (roots["project_a"] / "value.txt").write_text("alpha")
+    _activate(agent, "session-a", "project_a")
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(ReadFileTool))
+
+    async def scenario() -> None:
+        with pytest.raises(ToolError) as exc_info:
+            await mcp_tool.run(
+                {"relative_path": "value.txt", "max_answer_chars": 0},
+                context=_mcp_context("session-a"),
+            )
+
+        message = str(exc_info.value)
+        assert message == "Resolved maximum answer length must be positive, got: 0"
+        record = agent.execution_store.list_session_executions("session-a")[-1]
         assert record.error == message
 
     asyncio.run(scenario())

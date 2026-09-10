@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 import charset_normalizer
 import requests
 
-from solidlsp.ls_exceptions import InvalidTextLocationError, SolidLSPException
+from solidlsp.ls_exceptions import InvalidTextLocationError, LanguageServerOperationError, LanguageServerUnavailableError, SolidLSPException
 from solidlsp.ls_types import UnifiedSymbolInformation
 
 log = logging.getLogger(__name__)
@@ -392,7 +392,7 @@ class FileUtils:
         """
         if not os.path.exists(file_path):
             log.error(f"Failed to read '{file_path}': File does not exist.")
-            raise FileNotFoundError(f"File read '{file_path}' failed: File does not exist.")
+            raise LanguageServerOperationError(f"File does not exist: {file_path}")
         try:
             try:
                 with open(file_path, encoding=encoding) as inp_file:
@@ -442,7 +442,7 @@ class FileUtils:
             response = requests.get(url, stream=True, timeout=60)
             if response.status_code != 200:
                 log.error(f"Error downloading file '{url}': {response.status_code} {response.text}")
-                raise SolidLSPException("Error downloading file.")
+                raise LanguageServerUnavailableError("Error downloading file.")
 
             FileUtils._validate_download_host(response.url, allowed_hosts)
 
@@ -456,7 +456,7 @@ class FileUtils:
             os.replace(temp_file_path, target_path)
         except Exception as exc:
             log.error(f"Error downloading file '{url}': {exc}")
-            raise SolidLSPException("Error downloading file.") from None
+            raise LanguageServerUnavailableError("Error downloading file.") from None
         finally:
             if response is not None:
                 response.close()
@@ -519,9 +519,11 @@ class FileUtils:
             else:
                 log.error(f"Unknown archive type '{archive_type}' for extraction")
                 raise SolidLSPException(f"Unknown archive type '{archive_type}'")
+        except SolidLSPException:
+            raise
         except Exception as exc:
             log.error(f"Error extracting archive obtained from '{url}': {exc}")
-            raise SolidLSPException("Error extracting archive.") from exc
+            raise LanguageServerUnavailableError("Error extracting archive.") from exc
         finally:
             # cleaning up any temporary files outside the temporary directory
             for tmp_file in external_tmp_files:
@@ -553,7 +555,9 @@ class FileUtils:
 
         actual_sha256 = FileUtils.calculate_sha256(file_path)
         if actual_sha256.lower() != expected_sha256.lower():
-            raise SolidLSPException(f"Checksum verification failed for '{file_path}': expected {expected_sha256}, got {actual_sha256}")
+            raise LanguageServerUnavailableError(
+                f"Checksum verification failed for '{file_path}': expected {expected_sha256}, got {actual_sha256}"
+            )
 
     @staticmethod
     def _validate_download_host(url: str, allowed_hosts: Sequence[str] | None) -> None:
@@ -566,7 +570,7 @@ class FileUtils:
         hostname = urlparse(url).hostname
         normalized_allowed_hosts = {host.lower() for host in allowed_hosts}
         if hostname is None or hostname.lower() not in normalized_allowed_hosts:
-            raise SolidLSPException(
+            raise LanguageServerUnavailableError(
                 f"Refusing to download from host '{hostname or '<unknown>'}'; allowed hosts: {sorted(normalized_allowed_hosts)}"
             )
 
@@ -577,12 +581,12 @@ class FileUtils:
         """
         normalized_parts = Path(member_name).parts
         if any(part == ".." for part in normalized_parts):
-            raise SolidLSPException(f"Unsafe archive member '{member_name}': path traversal is not allowed")
+            raise LanguageServerUnavailableError(f"Unsafe archive member '{member_name}': path traversal is not allowed")
 
         absolute_target_path = os.path.abspath(target_path)
         absolute_member_path = os.path.abspath(os.path.join(target_path, member_name))
         if not (absolute_member_path.startswith(absolute_target_path + os.sep) or absolute_member_path == absolute_target_path):
-            raise SolidLSPException(f"Unsafe archive member '{member_name}': path escapes extraction directory")
+            raise LanguageServerUnavailableError(f"Unsafe archive member '{member_name}': path escapes extraction directory")
 
         return absolute_member_path
 
@@ -649,7 +653,7 @@ class PlatformUtils:
         machine = platform.machine()
         bitness = platform.architecture()[0]
         if system != "Linux":
-            raise SolidLSPException(f"Unsupported platform: {system=}; the standalone runtime supports Linux only")
+            raise LanguageServerUnavailableError(f"Unsupported platform: {system=}; the standalone runtime supports Linux only")
 
         machine_map = {
             "x86_64": "x64",
@@ -659,7 +663,7 @@ class PlatformUtils:
             "arm64": "arm64",
         }
         if machine not in machine_map:
-            raise SolidLSPException(f"Unknown Linux architecture: {machine=}, {bitness=}")
+            raise LanguageServerUnavailableError(f"Unknown Linux architecture: {machine=}, {bitness=}")
 
         platform_id = f"linux-{machine_map[machine]}"
         if bitness == "64bit":

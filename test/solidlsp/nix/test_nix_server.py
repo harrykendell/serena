@@ -10,6 +10,7 @@ import pytest
 
 from solidlsp.language_servers.nixd_ls import NixLanguageServer
 from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
+from solidlsp.ls_exceptions import LanguageServerUnavailableError
 from solidlsp.settings import SolidLSPSettings
 
 
@@ -91,7 +92,7 @@ def test_config_path_loads_bare_nixd_settings_object(tmp_path: Path) -> None:
 def test_config_path_must_be_non_empty_and_absolute(config_path: str) -> None:
     settings = SolidLSPSettings.CustomLSSettings({"config_path": config_path})
 
-    with pytest.raises(ValueError, match="config_path must be"):
+    with pytest.raises(LanguageServerUnavailableError, match="config_path must be"):
         NixLanguageServer._load_nixd_settings(settings)
 
 
@@ -99,7 +100,7 @@ def test_missing_config_path_reports_file(tmp_path: Path) -> None:
     config_path = tmp_path / "missing.json"
     settings = SolidLSPSettings.CustomLSSettings({"config_path": str(config_path)})
 
-    with pytest.raises(RuntimeError, match=re.escape(f"Failed to read nixd configuration file '{config_path}'")):
+    with pytest.raises(LanguageServerUnavailableError, match=re.escape(f"Failed to read nixd configuration file '{config_path}'")):
         NixLanguageServer._load_nixd_settings(settings)
 
 
@@ -108,7 +109,7 @@ def test_malformed_config_reports_json_location(tmp_path: Path) -> None:
     config_path.write_text('{"formatting":', encoding="utf-8")
     settings = SolidLSPSettings.CustomLSSettings({"config_path": str(config_path)})
 
-    with pytest.raises(ValueError, match=r"Invalid JSON.*line 1, column 15"):
+    with pytest.raises(LanguageServerUnavailableError, match=r"Invalid JSON.*line 1, column 15"):
         NixLanguageServer._load_nixd_settings(settings)
 
 
@@ -118,7 +119,7 @@ def test_config_document_must_be_an_object(tmp_path: Path, document: object) -> 
     config_path.write_text(json.dumps(document), encoding="utf-8")
     settings = SolidLSPSettings.CustomLSSettings({"config_path": str(config_path)})
 
-    with pytest.raises(ValueError, match="expected a JSON object"):
+    with pytest.raises(LanguageServerUnavailableError, match="expected a JSON object"):
         NixLanguageServer._load_nixd_settings(settings)
 
 

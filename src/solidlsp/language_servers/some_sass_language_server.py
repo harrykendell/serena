@@ -34,6 +34,7 @@ from solidlsp.dependency_provider import LanguageServerDependencyProvider, Langu
 from solidlsp.language_servers.common import RuntimeDependency, RuntimeDependencyCollection, build_npm_install_command
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
+from solidlsp.ls_exceptions import LanguageServerUnavailableError
 from solidlsp.settings import SolidLSPSettings
 
 log = logging.getLogger(__name__)
@@ -144,7 +145,7 @@ class SomeSassLanguageServer(SolidLanguageServer):
                 deps.install(install_dir)
 
             if not os.path.exists(executable_path):
-                raise FileNotFoundError(
+                raise LanguageServerUnavailableError(
                     f"{LS_BIN_NAME} executable not found at {executable_path}; "
                     f"npm install of some-sass-language-server@{package_version} did not produce the expected binary."
                 )

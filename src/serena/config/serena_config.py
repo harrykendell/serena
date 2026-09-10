@@ -29,6 +29,7 @@ from serena.constants import (
     SERENA_CONFIG_TEMPLATE_FILE,
     SERENA_MANAGED_DIR_NAME,
 )
+from serena.errors import UserFacingError
 from serena.util.yaml import YamlCommentNormalisation, load_yaml, normalise_yaml_comments, save_yaml, transfer_yaml_comments
 from solidlsp.ls_config import LanguageServerId
 
@@ -680,7 +681,7 @@ class SerenaConfig(SharedConfig):
         if len(project_candidates) == 1:
             return project_candidates[0]
         elif len(project_candidates) > 1:
-            raise ValueError(
+            raise UserFacingError(
                 f"Multiple projects found with name '{project_root_or_name}'. Please reference it by location instead. "
                 f"Locations: {[p.project_root for p in project_candidates]}"
             )
@@ -719,15 +720,34 @@ class SerenaConfig(SharedConfig):
 
         project_root = Path(project_root).resolve()
         if not project_root.exists() or not project_root.is_dir():
-            raise FileNotFoundError(f"Error: Project directory does not exist: {project_root}")
+            raise UserFacingError(f"Project directory does not exist: {project_root}")
 
         for already_registered_project in self.projects:
             if str(already_registered_project.project_root) == str(project_root):
-                raise FileExistsError(
+                raise UserFacingError(
                     f"Project with path {project_root} was already added with name '{already_registered_project.project_name}'."
                 )
 
-        project_config = ProjectConfig.load(project_root, serena_config=self, autogenerate=True)
+        project_config_path = Path(self.get_project_yml_location(project_root))
+        project_config_existed = project_config_path.is_file()
+        try:
+            project_config = ProjectConfig.load(project_root, serena_config=self, autogenerate=True)
+        except FileNotFoundError:
+            if not project_root.exists():
+                raise UserFacingError(f"Project directory does not exist: {project_root}") from None
+            raise
+        except PermissionError as error:
+            inaccessible_path = Path(error.filename).resolve() if error.filename else project_config_path
+            try:
+                inaccessible_path.relative_to(project_root)
+            except ValueError:
+                raise
+            raise UserFacingError(f"Project configuration is not accessible: {inaccessible_path}") from None
+        except ValueError as error:
+            if project_config_existed:
+                raise UserFacingError(f"Invalid project configuration for {project_root}: {error}") from None
+            raise
+
         new_project = Project(
             project_root=str(project_root),
             project_config=project_config,

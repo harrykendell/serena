@@ -41,6 +41,7 @@ from typing import Any
 from solidlsp.dependency_provider import LanguageServerDependencyProvider
 from solidlsp.ls import LSPFileBuffer, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
+from solidlsp.ls_exceptions import LanguageServerUnavailableError
 from solidlsp.ls_utils import FileUtils
 from solidlsp.lsp_protocol_handler.lsp_types import DocumentSymbol, SymbolInformation
 from solidlsp.settings import SolidLSPSettings
@@ -232,7 +233,7 @@ class MatlabLanguageServer(SolidLanguageServer):
             if os.path.exists(alt_script):
                 return alt_script
 
-            raise RuntimeError(f"MATLAB language server script not found in extension at {extension_path}")
+            raise LanguageServerUnavailableError(f"MATLAB language server script not found in extension at {extension_path}")
 
         @staticmethod
         def _find_matlab_installation() -> str:
@@ -248,7 +249,7 @@ class MatlabLanguageServer(SolidLanguageServer):
                         log.info(f"Found MATLAB installation: {match}")
                         return match
 
-            raise RuntimeError(
+            raise LanguageServerUnavailableError(
                 f"MATLAB installation not found. Set {MATLAB_PATH_ENV_VAR} to the MATLAB installation directory, "
                 "for example /usr/local/MATLAB/R2026a."
             )
@@ -265,7 +266,7 @@ class MatlabLanguageServer(SolidLanguageServer):
 
             # Verify MATLAB path exists
             if not os.path.isdir(matlab_path):
-                raise RuntimeError(f"MATLAB installation directory does not exist: {matlab_path}")
+                raise LanguageServerUnavailableError(f"MATLAB installation directory does not exist: {matlab_path}")
 
             log.info(f"Using MATLAB installation: {matlab_path}")
 
@@ -276,7 +277,7 @@ class MatlabLanguageServer(SolidLanguageServer):
             # Verify node is installed
             node_path = shutil.which("node")
             if node_path is None:
-                raise RuntimeError("Node.js is not installed or isn't in PATH. Please install Node.js and try again.")
+                raise LanguageServerUnavailableError("Node.js is not installed or isn't in PATH. Please install Node.js and try again.")
 
             # Find existing extension or download if needed
             extension_path = self._find_matlab_extension()
@@ -285,7 +286,7 @@ class MatlabLanguageServer(SolidLanguageServer):
                 extension_path = self._download_and_install_matlab_extension()
 
             if extension_path is None:
-                raise RuntimeError(
+                raise LanguageServerUnavailableError(
                     "Failed to locate or download MATLAB Language Server. Please either:\n"
                     "1. Set MATLAB_EXTENSION_PATH environment variable to the MATLAB extension directory\n"
                     "2. Install the MATLAB extension in VS Code (MathWorks.language-matlab)\n"
@@ -296,7 +297,7 @@ class MatlabLanguageServer(SolidLanguageServer):
             server_script = self._get_executable_path(extension_path)
 
             if not os.path.exists(server_script):
-                raise RuntimeError(f"MATLAB Language Server script not found at: {server_script}")
+                raise LanguageServerUnavailableError(f"MATLAB Language Server script not found at: {server_script}")
 
             # Build the command to run the language server
             # The MATLAB language server is run via Node.js with the --stdio flag

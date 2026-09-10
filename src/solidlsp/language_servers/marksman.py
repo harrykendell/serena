@@ -12,6 +12,7 @@ from overrides import override
 from solidlsp.dependency_provider import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath
 from solidlsp.ls import DocumentSymbols, LSPFileBuffer, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
+from solidlsp.ls_exceptions import LanguageServerUnavailableError
 from solidlsp.ls_types import SymbolKind, UnifiedSymbolInformation
 from solidlsp.settings import SolidLSPSettings
 
@@ -98,7 +99,7 @@ class Marksman(SolidLanguageServer):
                 )
                 deps.install(marksman_ls_dir)
             if not os.path.exists(marksman_executable_path):
-                raise FileNotFoundError(f"Download failed? Could not find marksman executable at {marksman_executable_path}")
+                raise LanguageServerUnavailableError(f"Download failed? Could not find marksman executable at {marksman_executable_path}")
             os.chmod(marksman_executable_path, 0o755)
             return marksman_executable_path
 

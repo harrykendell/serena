@@ -6,50 +6,50 @@ from solidlsp.ls_config import LanguageServerId
 
 
 class SolidLSPException(Exception):
-    def __init__(self, message: str, cause: Exception | None = None) -> None:
-        """
-        Initializes the exception with the given message.
+    """Represents a language-server operation failure with optional structured cause."""
 
-        :param message: the message describing the exception
-        :param cause: the original exception that caused this exception, if any.
-            For exceptions raised during request handling, this is typically
-                * an LSPError for errors returned by the LSP server
-                * LanguageServerTerminatedException for errors due to the language server having terminated.
-        """
+    def __init__(self, message: str, cause: Exception | None = None) -> None:
+        """Initializes the exception with a diagnostic message and optional original cause."""
         self.cause = cause
         super().__init__(message)
 
     def is_language_server_terminated(self) -> bool:
-        """
-        :return: True if the exception is caused by the language server having terminated as indicated
-            by the causing exception being an instance of LanguageServerTerminatedException.
-        """
+        """Returns whether the failure was caused by language-server termination."""
         from .ls_process import LanguageServerTerminatedException
 
         return isinstance(self.cause, LanguageServerTerminatedException)
 
     def get_affected_language(self) -> LanguageServerId | None:
-        """
-        :return: the affected language for the case where the exception is caused by the language server having terminated
-        """
+        """Returns the affected language when the server terminated, otherwise ``None``."""
         from .ls_process import LanguageServerTerminatedException
 
         if isinstance(self.cause, LanguageServerTerminatedException):
             return self.cause.ls_id
         return None
 
+    def user_message(self) -> str:
+        """Returns the concise operational message suitable for a tool caller."""
+        if self.cause is not None and not self.is_language_server_terminated():
+            cause_message = str(self.cause).strip()
+            if cause_message:
+                return cause_message
+        return super().__str__().strip()
+
     def __str__(self) -> str:
-        """
-        Returns a string representation of the exception.
-        """
-        s = super().__str__()
+        """Returns the diagnostic representation including its cause when present."""
+        message = super().__str__()
         if self.cause:
-            if "\n" in s:
-                s += "\n"
-            else:
-                s += " "
-            s += f"(caused by {self.cause})"
-        return s
+            separator = "\n" if "\n" in message else " "
+            message += f"{separator}(caused by {self.cause})"
+        return message
+
+
+class LanguageServerOperationError(SolidLSPException):
+    """Indicates an expected language-server operation failure safe to report to a tool caller."""
+
+
+class LanguageServerUnavailableError(LanguageServerOperationError):
+    """Indicates that a language server cannot start because its runtime is unavailable."""
 
 
 class InvalidTextLocationError(SolidLSPException):

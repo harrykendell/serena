@@ -19,6 +19,7 @@ from solidlsp import ls_types
 from solidlsp.dependency_provider import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath
 from solidlsp.ls import DocumentSymbols, LSPFileBuffer, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
+from solidlsp.ls_exceptions import LanguageServerUnavailableError
 from solidlsp.settings import SolidLSPSettings
 from solidlsp.util.subprocess_util import subprocess_run
 
@@ -99,7 +100,7 @@ class NixLanguageServer(SolidLanguageServer):
             """Return a working nixd path, installing nixd when necessary."""
             if not shutil.which("nix"):
                 log.error("Nix is not installed. nixd requires Nix to function properly.")
-                raise RuntimeError("Nix is required for nixd. Please install Nix from https://nixos.org/download.html")
+                raise LanguageServerUnavailableError("Nix is required for nixd. Please install Nix from https://nixos.org/download.html")
 
             nixd_path = self._get_nixd_path()
             if not nixd_path:
@@ -107,7 +108,7 @@ class NixLanguageServer(SolidLanguageServer):
                 nixd_path = self._install_nixd_with_nix()
 
             if not nixd_path:
-                raise RuntimeError(
+                raise LanguageServerUnavailableError(
                     "nixd (Nix Language Server) is not installed.\n"
                     "Please install nixd using one of the following methods:\n"
                     "  - Using Nix flakes: nix profile install github:nix-community/nixd\n"
@@ -119,9 +120,9 @@ class NixLanguageServer(SolidLanguageServer):
             try:
                 result = subprocess_run([nixd_path, "--version"], capture_output=True, text=True, check=False, timeout=5)
                 if result.returncode != 0:
-                    raise RuntimeError(f"nixd failed to run: {result.stderr}")
+                    raise LanguageServerUnavailableError(f"nixd failed to run: {result.stderr}")
             except Exception as exc:
-                raise RuntimeError(f"Failed to verify nixd installation: {exc}") from exc
+                raise LanguageServerUnavailableError(f"Failed to verify nixd installation: {exc}") from exc
 
             return nixd_path
 
@@ -225,31 +226,30 @@ class NixLanguageServer(SolidLanguageServer):
 
         :param custom_settings: Nix-specific language-server settings.
         :return: The value of the nixd configuration section.
-        :raises ValueError: If ``config_path`` or its JSON document has an invalid shape.
-        :raises RuntimeError: If the configuration file cannot be read.
+        :raises LanguageServerUnavailableError: If the configured nixd settings cannot be loaded.
         """
         config_path_value = custom_settings.get("config_path")
         if config_path_value is None:
             return cls._create_default_nixd_settings()
         if not isinstance(config_path_value, str) or not config_path_value.strip():
-            raise ValueError("ls_specific_settings.nix.config_path must be a non-empty absolute path")
+            raise LanguageServerUnavailableError("ls_specific_settings.nix.config_path must be a non-empty absolute path")
 
         config_path = Path(config_path_value).expanduser()
         if not config_path.is_absolute():
-            raise ValueError(f"ls_specific_settings.nix.config_path must be absolute: {config_path_value!r}")
+            raise LanguageServerUnavailableError(f"ls_specific_settings.nix.config_path must be absolute: {config_path_value!r}")
 
         try:
             with config_path.open(encoding="utf-8") as config_file:
                 settings = json.load(config_file)
         except json.JSONDecodeError as exc:
-            raise ValueError(
+            raise LanguageServerUnavailableError(
                 f"Invalid JSON in nixd configuration file '{config_path}': {exc.msg} (line {exc.lineno}, column {exc.colno})"
             ) from exc
         except OSError as exc:
-            raise RuntimeError(f"Failed to read nixd configuration file '{config_path}': {exc}") from exc
+            raise LanguageServerUnavailableError(f"Failed to read nixd configuration file '{config_path}': {exc}") from exc
 
         if not isinstance(settings, dict):
-            raise ValueError(
+            raise LanguageServerUnavailableError(
                 f"Invalid nixd configuration file '{config_path}': expected a JSON object containing the value of the 'nixd' section"
             )
         return settings

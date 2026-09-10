@@ -5,6 +5,7 @@ import pytest
 
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
+from solidlsp.ls_exceptions import LanguageServerOperationError
 from solidlsp.ls_utils import SymbolUtils
 from test.conftest import PYTHON_LANGUAGE_BACKENDS, start_ls_context
 
@@ -74,5 +75,5 @@ class TestLanguageServerCommonFunctionality:
             check(ls, present=symbols_in_subfolder_scripts, absent=symbols_in_subfolder_test_repo)
 
             # test that explicit requests for symbols in other workspace folders are rejected
-            with pytest.raises(ValueError, match="outside"):
+            with pytest.raises(LanguageServerOperationError, match="outside"):
                 ls.request_full_symbol_tree(within_relative_path="./test_repo")

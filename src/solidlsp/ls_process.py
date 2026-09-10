@@ -12,7 +12,7 @@ from typing import IO, Any, AnyStr
 from sensai.util.string import ToStringMixin
 
 from solidlsp.ls_config import LanguageServerId
-from solidlsp.ls_exceptions import SolidLSPException
+from solidlsp.ls_exceptions import LanguageServerOperationError, LanguageServerUnavailableError
 from solidlsp.ls_request import LanguageServerRequest
 from solidlsp.lsp_protocol_handler.lsp_requests import LspNotification
 from solidlsp.lsp_protocol_handler.lsp_types import ErrorCodes, LSPErrorCodes
@@ -101,10 +101,10 @@ class Request(ToStringMixin):
     def get_result(self, timeout: float | None = None) -> Result:
         try:
             return self._result_queue.get(timeout=timeout)
-        except Empty as e:
+        except Empty as error:
             if timeout is not None:
-                raise TimeoutError(f"Request timed out ({timeout=})") from e
-            raise e
+                raise LanguageServerOperationError(f"Language server request timed out after {timeout:g} seconds") from error
+            raise error
 
 
 class LanguageServerInterface(ABC):
@@ -381,7 +381,9 @@ class LanguageServerInterface(ABC):
                     log.debug("Returning result:\n%s", result.payload)
                     return result.payload
 
-        raise SolidLSPException(f"Error processing request {method} with params:\n{params}", cause=result.error) from result.error
+        raise LanguageServerOperationError(
+            f"Error processing request {method} with params:\n{params}", cause=result.error
+        ) from result.error
 
     @abstractmethod
     def _send_payload(self, payload: StringDict) -> None:
@@ -528,7 +530,9 @@ class StdioLanguageServer(LanguageServerInterface):
             # Process has already terminated
             stderr_data = process.stderr.read() if process.stderr else b""
             error_message = stderr_data.decode("utf-8", errors="replace")
-            raise RuntimeError(f"Process terminated immediately with code {process.returncode}. Error: {error_message}")
+            raise LanguageServerUnavailableError(
+                f"Language server process terminated immediately with code {process.returncode}: {error_message.strip()}"
+            )
 
         # start threads to read stdout and stderr of the process
         threading.Thread(

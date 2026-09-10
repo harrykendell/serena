@@ -332,7 +332,7 @@ class SerenaAgent:
         """
         project = self.get_active_project()
         if project is None:
-            raise ValueError("No active project. Please activate a project first.")
+            raise UserFacingError("No active project. Please activate a project first.")
         return project
 
     @staticmethod
@@ -691,6 +691,10 @@ class SerenaAgent:
         """
         project_instance: Project | None = self.serena_config.get_project(project_root_or_name)
         if project_instance is not None:
+            if not os.path.isdir(project_instance.project_root):
+                raise UserFacingError(
+                    f"Project '{project_instance.project_name}' is unavailable: directory does not exist: {project_instance.project_root}"
+                )
             log.info("Found registered project '%s' at path %s", project_instance.project_name, project_instance.project_root)
         elif os.path.isdir(project_root_or_name):
             project_instance = self.serena_config.add_project_from_path(project_root_or_name)

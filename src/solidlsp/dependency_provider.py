@@ -4,6 +4,7 @@ import shutil
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
+from solidlsp.ls_exceptions import LanguageServerUnavailableError
 from solidlsp.settings import SolidLSPSettings
 
 log = logging.getLogger(__name__)
@@ -168,7 +169,7 @@ class LanguageServerDependencyProviderSinglePath(LanguageServerDependencyProvide
             if cmd[0] == core_path:
                 return base_command + cmd[1:]
             else:
-                raise ValueError("Language server base launch command with arguments unsupported")
+                raise LanguageServerUnavailableError("Language server base launch command with arguments unsupported")
 
 
 class LanguageServerDependencyProviderUvx(LanguageServerDependencyProviderBaseCommand):
@@ -231,7 +232,7 @@ class LanguageServerDependencyProviderUvx(LanguageServerDependencyProviderBaseCo
         if uv_path is not None:
             return [uv_path, "tool", "run", *base_args]  # `uv tool run` is the same as `uvx`
 
-        raise RuntimeError("Could not find 'uvx' or 'uv' in PATH. Install uv (https://docs.astral.sh/uv/).")
+        raise LanguageServerUnavailableError("Could not find 'uvx' or 'uv' in PATH. Install uv (https://docs.astral.sh/uv/).")
 
     def _create_default_base_command(self):
         version = self._custom_settings.get(self._version_setting_key, self._default_version)
