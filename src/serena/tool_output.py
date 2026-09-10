@@ -1,13 +1,13 @@
 """Disk-backed retained and live output for Serena tool executions."""
 
-from collections import OrderedDict
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from threading import RLock
 from uuid import uuid4
 
 from serena.errors import UserFacingError
+from serena.execution_store import ExecutionStore
 
 
 @dataclass(frozen=True)
@@ -88,18 +88,52 @@ class ToolOutputWriter:
 
 
 class ToolOutputStore:
-    """Process-local, disk-backed retention for recent and live tool results."""
+    """Persistent disk-backed retention for pageable Serena tool results.
 
-    def __init__(self, max_records: int = 16):
-        if max_records <= 0:
-            raise ValueError("max_records must be positive")
+    Output lifetime is owned by the canonical execution/session store. Files survive Serena restarts,
+    and crash-orphaned blobs are removed when Serena's canonical execution store starts.
+    """
 
-        self._max_records = max_records
-        self._directory = TemporaryDirectory(prefix="serena-tool-output-")
-        self._records: OrderedDict[str, _ToolOutputRecord] = OrderedDict()
+    def __init__(self, root: Path | None = None, execution_store: ExecutionStore | None = None):
+        self._execution_store = execution_store
+        if root is None:
+            configured_home = os.getenv("SERENA_HOME", "").strip()
+            serena_home = Path(configured_home).expanduser() if configured_home else Path.home() / ".serena"
+            root = serena_home / "tool_outputs"
+        self._directory = root
+        self._directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(self._directory, 0o700)
+        self._records: dict[str, _ToolOutputRecord] = {}
         self._output_by_execution: dict[str, str] = {}
         self._lock = RLock()
         self._closed = False
+        self._rehydrate()
+
+    def _rehydrate(self) -> None:
+        """Restores metadata for outputs referenced by retained executions."""
+        if self._execution_store is None:
+            return
+        for execution in self._execution_store.list_executions(newest_first=False):
+            output_id = execution.retained_output_id
+            if output_id is None:
+                continue
+            path = self._directory / f"{output_id}.txt"
+            if not path.is_file():
+                continue
+            total_chars = execution.retained_output_chars
+            if total_chars is None:
+                try:
+                    total_chars = len(path.read_text(encoding="utf-8"))
+                except OSError:
+                    continue
+            self._records[output_id] = _ToolOutputRecord(
+                tool_name=execution.tool_name,
+                path=path,
+                execution_id=execution.execution_id,
+                total_chars=total_chars,
+                is_open=False,
+            )
+            self._output_by_execution[execution.execution_id] = output_id
 
     def open(self, tool_name: str, execution_id: str | None = None) -> ToolOutputWriter:
         """Open one retained result and return its stable append-only writer."""
@@ -107,14 +141,12 @@ class ToolOutputStore:
             if self._closed:
                 raise RuntimeError("Tool output store is closed")
 
-            # publish a stable identifier before any process output is produced
             output_id = uuid4().hex
-            path = Path(self._directory.name) / f"{output_id}.txt"
-            path.touch()
+            path = self._directory / f"{output_id}.txt"
+            path.touch(mode=0o600, exist_ok=False)
             self._records[output_id] = _ToolOutputRecord(tool_name=tool_name, path=path, execution_id=execution_id)
             if execution_id is not None:
                 self._output_by_execution[execution_id] = output_id
-            self._prune()
             return ToolOutputWriter(self, output_id)
 
     def retain(self, tool_name: str, content: str, execution_id: str | None = None) -> str:
@@ -246,14 +278,13 @@ class ToolOutputStore:
         return self.read_tail(descriptor.output_id, max_chars)
 
     def close(self) -> None:
-        """Remove all retained output files."""
+        """Closes the process-local index while preserving session-owned output files."""
         with self._lock:
             if self._closed:
                 return
             self._closed = True
             self._records.clear()
             self._output_by_execution.clear()
-            self._directory.cleanup()
 
     def _record(self, output_id: str) -> _ToolOutputRecord:
         """Returns one retained-output record for internal store operations."""
@@ -261,10 +292,3 @@ class ToolOutputStore:
         if record is None:
             raise ValueError(f"Tool output '{output_id}' is not available")
         return record
-
-    def _prune(self) -> None:
-        while len(self._records) > self._max_records:
-            expired_id, expired = self._records.popitem(last=False)
-            if expired.execution_id is not None and self._output_by_execution.get(expired.execution_id) == expired_id:
-                del self._output_by_execution[expired.execution_id]
-            expired.path.unlink(missing_ok=True)

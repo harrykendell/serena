@@ -11,10 +11,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from serena.retention import DEFAULT_SESSION_RETENTION, JobRetentionState, SessionRetentionPolicy
+
 _FILE_RESOURCE_RE = re.compile(r"serena-file://export/([0-9a-f]{48})")
 _JOB_ID_RE = re.compile(r'"job_id"\s*:\s*"([0-9a-f]{32})"')
 _STATE_VERSION = 2
-ACTIVITY_HISTORY_LIMIT = 2048
 
 
 @dataclass
@@ -77,24 +78,24 @@ class ExecutionStore:
         self,
         root: Path | None = None,
         *,
-        max_sessions: int = 128,
-        max_executions: int = ACTIVITY_HISTORY_LIMIT,
-        max_activity_runs: int = ACTIVITY_HISTORY_LIMIT,
+        retention: SessionRetentionPolicy = DEFAULT_SESSION_RETENTION,
     ) -> None:
+        use_default_root = root is None
         self._root = root or self._default_root()
         self._state_path = self._root / "state.json"
-        self._max_sessions = max_sessions
-        self._max_executions = max_executions
-        self._max_activity_runs = max_activity_runs
+        self._retention = retention
         self._lock = threading.RLock()
         self._sessions: dict[str, SessionRecord] = {}
         self._executions: dict[str, ExecutionRecord] = {}
         self._activity_runs: dict[str, ActivityPanelRun] = {}
         self._current_run_by_session: dict[str, str] = {}
-        self._retained_job_ids: set[str] | None = None
         self._running_job_sessions: dict[str, str] = {}
         self._load()
         self._interrupt_stale_state()
+        if self._prune():
+            self._save()
+        if use_default_root:
+            self._cleanup_unreferenced_artifacts()
 
     @staticmethod
     def _serena_home() -> Path:
@@ -134,6 +135,7 @@ class ExecutionStore:
         """Creates one running execution record before dispatch leaves the MCP event loop."""
         now = started_at or time.time()
         with self._lock:
+            self._prune()
             session = self._ensure_session(session_id, now)
             if project_name:
                 session.project_name = project_name
@@ -274,6 +276,8 @@ class ExecutionStore:
     def list_sessions(self) -> list[SessionRecord]:
         """Returns retained sessions from newest to oldest update time."""
         with self._lock:
+            if self._prune():
+                self._save()
             sessions = sorted(self._sessions.values(), key=lambda item: item.updated_at, reverse=True)
             return [SessionRecord(**asdict(session)) for session in sessions]
 
@@ -289,6 +293,7 @@ class ExecutionStore:
         """Starts a panel run and carries any currently running executions from its predecessor."""
         now = time.time()
         with self._lock:
+            self._prune()
             previous_id = self._current_run_by_session.get(session_id)
             continuing: list[str] = []
             if previous_id is not None and (previous := self._activity_runs.get(previous_id)) is not None:
@@ -308,7 +313,6 @@ class ExecutionStore:
             self._activity_runs[run.run_id] = run
             self._current_run_by_session[session_id] = run.run_id
             self._ensure_session(session_id, now)
-            self._prune()
             self._save()
             return ActivityPanelRun(**asdict(run))
 
@@ -373,27 +377,38 @@ class ExecutionStore:
             runs = sorted(self._activity_runs.values(), key=lambda item: item.started_at)
             return [ActivityPanelRun(**asdict(run)) for run in runs]
 
-    def sync_job_retention(
-        self,
-        retained_job_ids: set[str],
-        running_job_sessions: dict[str, str | None],
-    ) -> None:
-        """Synchronizes durable-job retention used to protect complete dashboard panels."""
+    def sync_job_retention(self, jobs: list[JobRetentionState]) -> set[str]:
+        """Synchronize durable-job state with unified session retention.
+
+        Terminal job completion extends the owning session's retention window. Running jobs protect
+        their owning sessions from eviction. The returned job identifiers are those still owned by
+        retained sessions.
+        """
         with self._lock:
-            self._retained_job_ids = set(retained_job_ids)
             self._running_job_sessions = {}
-            for job_id, session_id in running_job_sessions.items():
-                resolved_session = session_id
-                if resolved_session is None:
-                    resolved_session = next(
-                        (record.session_id for record in self._executions.values() if record.durable_job_id == job_id),
+            for job in jobs:
+                session_id = job.session_id
+                if session_id is None:
+                    session_id = next(
+                        (record.session_id for record in self._executions.values() if record.durable_job_id == job.job_id),
                         None,
                     )
-                if resolved_session is not None:
-                    self._running_job_sessions[job_id] = resolved_session
+                if session_id is None:
+                    continue
+                if job.is_running:
+                    self._running_job_sessions[job.job_id] = session_id
+                if job.finished_at is not None and (session := self._sessions.get(session_id)) is not None:
+                    session.updated_at = max(session.updated_at, job.finished_at)
 
-            if self._prune():
+            changed = self._prune()
+            if changed:
                 self._save()
+
+            return {
+                record.durable_job_id
+                for record in self._executions.values()
+                if record.durable_job_id is not None and record.session_id in self._sessions
+            }
 
     def retained_file_tokens(self) -> set[str]:
         """Returns snapshot tokens referenced by retained execution media/results."""
@@ -427,6 +442,29 @@ class ExecutionStore:
                     tokens.update(_FILE_RESOURCE_RE.findall(str(media.get("uri") or "")))
                 tokens.update(_FILE_RESOURCE_RE.findall(str(execution.get("result") or "")))
         return tokens
+
+    def retained_output_ids(self) -> set[str]:
+        """Returns pageable-output identifiers referenced by retained executions."""
+        with self._lock:
+            return {record.retained_output_id for record in self._executions.values() if record.retained_output_id is not None}
+
+    @classmethod
+    def retained_output_ids_from_disk(cls) -> set[str]:
+        """Returns pageable-output identifiers referenced by canonical persisted state."""
+        path = cls._default_root() / "state.json"
+        try:
+            with path.open("r", encoding="utf-8") as stream:
+                payload = json.load(stream)
+        except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError, ValueError):
+            return set()
+        executions = payload.get("executions", {}) if isinstance(payload, dict) else {}
+        if not isinstance(executions, dict):
+            return set()
+        return {
+            str(execution.get("retained_output_id"))
+            for execution in executions.values()
+            if isinstance(execution, dict) and execution.get("retained_output_id")
+        }
 
     def _ensure_session(self, session_id: str, timestamp: float) -> SessionRecord:
         session = self._sessions.get(session_id)
@@ -535,7 +573,19 @@ class ExecutionStore:
                 pass
 
     def _drop_session(self, session_id: str) -> bool:
-        """Drops one dashboard session together with every retained execution and activity run it owns."""
+        """Drops one retained session and its now-unowned artifact blobs atomically."""
+        owned_snapshot_tokens: set[str] = set()
+        owned_output_ids: set[str] = set()
+        for record in self._executions.values():
+            if record.session_id != session_id:
+                continue
+            if record.media is not None:
+                owned_snapshot_tokens.update(_FILE_RESOURCE_RE.findall(record.media.get("uri", "")))
+            if record.result:
+                owned_snapshot_tokens.update(_FILE_RESOURCE_RE.findall(record.result))
+            if record.retained_output_id is not None:
+                owned_output_ids.add(record.retained_output_id)
+
         changed = self._sessions.pop(session_id, None) is not None
         for execution_id in [execution_id for execution_id, record in self._executions.items() if record.session_id == session_id]:
             self._executions.pop(execution_id, None)
@@ -544,6 +594,15 @@ class ExecutionStore:
             self._activity_runs.pop(run_id, None)
             changed = True
         self._current_run_by_session.pop(session_id, None)
+
+        # remove immutable blobs only when no retained session still references them
+        retained_snapshot_tokens = self.retained_file_tokens()
+        retained_output_ids = self.retained_output_ids()
+        serena_home = self._serena_home()
+        for token in owned_snapshot_tokens - retained_snapshot_tokens:
+            (serena_home / "chat_file_snapshots" / token).unlink(missing_ok=True)
+        for output_id in owned_output_ids - retained_output_ids:
+            (serena_home / "tool_outputs" / f"{output_id}.txt").unlink(missing_ok=True)
         return changed
 
     def _protected_session_ids(self) -> set[str]:
@@ -558,18 +617,59 @@ class ExecutionStore:
         runs = [run for run in self._activity_runs.values() if run.session_id == session_id]
         return any(execution_id not in records for run in runs for execution_id in run.execution_ids)
 
-    def _session_has_missing_job(self, session_id: str) -> bool:
-        """Returns whether a session references durable-job metadata that has already expired."""
-        if self._retained_job_ids is None:
-            return False
-        return any(
-            record.durable_job_id is not None and record.durable_job_id not in self._retained_job_ids
-            for record in self._executions.values()
-            if record.session_id == session_id
-        )
+    def _cleanup_unreferenced_artifacts(self) -> None:
+        """Deletes crash-orphaned artifact blobs not referenced by retained sessions."""
+        serena_home = self._serena_home()
+        snapshot_root = serena_home / "chat_file_snapshots"
+        output_root = serena_home / "tool_outputs"
+        retained_snapshots = self.retained_file_tokens()
+        retained_outputs = self.retained_output_ids()
+
+        if snapshot_root.is_dir():
+            for path in snapshot_root.iterdir():
+                if path.name.startswith(".") or not path.is_file():
+                    continue
+                if path.name not in retained_snapshots:
+                    path.unlink(missing_ok=True)
+        if output_root.is_dir():
+            for path in output_root.glob("*.txt"):
+                if path.stem not in retained_outputs:
+                    path.unlink(missing_ok=True)
+
+    def _session_artifact_bytes(self, session_id: str) -> int:
+        """Returns retained snapshot and pageable-output bytes owned by one session."""
+        serena_home = self._serena_home()
+        snapshot_root = serena_home / "chat_file_snapshots"
+        output_root = serena_home / "tool_outputs"
+        total = 0
+
+        # count immutable snapshots referenced by this session
+        snapshot_tokens: set[str] = set()
+        output_ids: set[str] = set()
+        for record in self._executions.values():
+            if record.session_id != session_id:
+                continue
+            if record.media is not None:
+                snapshot_tokens.update(_FILE_RESOURCE_RE.findall(record.media.get("uri", "")))
+            if record.result:
+                snapshot_tokens.update(_FILE_RESOURCE_RE.findall(record.result))
+            if record.retained_output_id is not None:
+                output_ids.add(record.retained_output_id)
+
+        for token in snapshot_tokens:
+            try:
+                total += (snapshot_root / token).stat().st_size
+            except FileNotFoundError:
+                pass
+        for output_id in output_ids:
+            try:
+                total += (output_root / f"{output_id}.txt").stat().st_size
+            except FileNotFoundError:
+                pass
+        return total
 
     def _prune(self) -> bool:
-        """Prunes retained activity only by complete dashboard-session ownership units."""
+        """Prunes retained work only by complete inactive session ownership units."""
         changed = False
 
         # discard orphaned state that cannot be represented as a complete dashboard session
@@ -586,34 +686,30 @@ class ExecutionStore:
                 self._current_run_by_session.pop(session_id, None)
                 changed = True
 
-        # remove inconsistent or expired panels as a whole instead of showing partial history
+        # remove incomplete historical panels atomically rather than exposing partial state
         protected = self._protected_session_ids()
         for session_id in list(self._sessions):
             if session_id in protected:
                 continue
-            if self._session_has_dangling_execution_reference(session_id) or self._session_has_missing_job(session_id):
+            if self._session_has_dangling_execution_reference(session_id):
                 changed = self._drop_session(session_id) or changed
 
-        # enforce all retention budgets by evicting the oldest complete inactive sessions
-        while (
-            len(self._executions) > self._max_executions
-            or len(self._sessions) > self._max_sessions
-            or len(self._activity_runs) > self._max_activity_runs
-        ):
-            if not self._sessions:
-                break
-            newest_session_id = max(
-                self._sessions.values(),
-                key=lambda session: (session.updated_at, session.created_at, session.session_id),
-            ).session_id
-            candidates = [
-                session
-                for session in self._sessions.values()
-                if session.session_id not in protected and session.session_id != newest_session_id
-            ]
+        # expire inactive sessions seven days after their most recent activity
+        now = time.time()
+        for session in sorted(self._sessions.values(), key=lambda item: item.updated_at):
+            if session.session_id in protected:
+                continue
+            if self._retention.is_expired(session.updated_at, now):
+                changed = self._drop_session(session.session_id) or changed
+
+        # emergency capacity guard: evict the oldest inactive sessions whole
+        retained_bytes = sum(self._session_artifact_bytes(session_id) for session_id in self._sessions)
+        while retained_bytes > self._retention.max_artifact_bytes:
+            candidates = [session for session in self._sessions.values() if session.session_id not in protected]
             if not candidates:
                 break
             oldest = min(candidates, key=lambda session: (session.updated_at, session.created_at, session.session_id))
+            retained_bytes -= self._session_artifact_bytes(oldest.session_id)
             changed = self._drop_session(oldest.session_id) or changed
 
         return changed

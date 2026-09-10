@@ -108,8 +108,8 @@ class SerenaAgent:
         self._project_activation_callback = project_activation_callback
         self._project_activation_error = project_activation_error
         self._dashboard_manager: DashboardManager | None = None
-        self._tool_output_store = ToolOutputStore()
         self._execution_store = ExecutionStore()
+        self._tool_output_store = ToolOutputStore(execution_store=self._execution_store)
         self._job_manager = JobManager(retention_observer=self._execution_store)
         self._no_project_prompt_status = ProjectPromptStatus()
         self.version = serena_version()

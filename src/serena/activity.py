@@ -13,7 +13,7 @@ from typing import Any, Literal, Protocol, cast
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, ResourceLink
 
-from serena.execution_store import ACTIVITY_HISTORY_LIMIT, ExecutionRecord, ExecutionStore
+from serena.execution_store import ExecutionRecord, ExecutionStore
 from serena.jobs import JobManager, JobRecord, JobSnapshot, JobStatus
 
 ACTIVITY_RESOURCE_URI = "ui://serena/activity-v28.html"
@@ -585,7 +585,7 @@ class ActivityTracker:
 
         calls = [
             self._call_payload(record)
-            for execution_id in run.execution_ids[-ACTIVITY_HISTORY_LIMIT:]
+            for execution_id in run.execution_ids
             if (record := self._execution_store.get_execution(execution_id)) is not None
         ]
         payload: dict[str, Any] = {

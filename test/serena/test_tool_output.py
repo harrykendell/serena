@@ -2,13 +2,12 @@
 
 import json
 import re
+from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
 from serena.agent import SerenaAgent
-from serena.errors import UserFacingError
 from serena.execution import bind_execution_id, reset_execution_id
+from serena.execution_store import ExecutionStore
 from serena.tool_output import ToolOutputStore
 from serena.tools.memory_tools import ReadMemoryTool
 from serena.tools.output_tools import ReadToolOutputTool
@@ -109,7 +108,7 @@ def test_read_memory_uses_retained_output_when_content_exceeds_budget() -> None:
 
 
 def test_paging_uses_stable_output_id_after_later_tool_output() -> None:
-    store = ToolOutputStore(max_records=4)
+    store = ToolOutputStore()
     agent = _agent_with_store(store)
     overflow_tool = OverflowProbeTool(agent)
     read_tool = ReadToolOutputTool(agent)
@@ -132,24 +131,32 @@ def test_paging_uses_stable_output_id_after_later_tool_output() -> None:
         store.close()
 
 
-def test_expired_output_id_fails_instead_of_returning_a_different_result() -> None:
-    store = ToolOutputStore(max_records=1)
-    agent = _agent_with_store(store)
-    overflow_tool = OverflowProbeTool(agent)
-    read_tool = ReadToolOutputTool(agent)
+def test_retained_output_survives_store_restart(tmp_path: Path) -> None:
+    execution_store = ExecutionStore(tmp_path / "execution-store")
+    execution_store.start_execution(
+        execution_id="execution-a",
+        session_id="chat-a",
+        project_name="project-a",
+        tool_name="overflow_probe",
+        arguments="{}",
+    )
+    store = ToolOutputStore(tmp_path / "tool-outputs", execution_store=execution_store)
+    output_id = store.retain("overflow_probe", "persistent-output", execution_id="execution-a")
+    execution_store.finish_execution("execution-a", succeeded=True, result="persistent-output")
+    execution_store.set_retained_output("execution-a", output_id, len("persistent-output"))
+    store.close()
 
+    restored = ToolOutputStore(tmp_path / "tool-outputs", execution_store=execution_store)
     try:
-        expired_id = _output_id(overflow_tool.apply("old-" + "x" * 1_000, max_answer_chars=350))
-        _output_id(overflow_tool.apply("new-" + "y" * 1_000, max_answer_chars=350))
-
-        with pytest.raises(UserFacingError, match="unavailable or expired"):
-            read_tool.apply(output_id=expired_id)
+        page = restored.read(output_id, 0, 100)
+        assert page.content == "persistent-output"
+        assert page.complete
     finally:
-        store.close()
+        restored.close()
 
 
 def test_live_output_can_be_read_by_exact_execution_before_completion() -> None:
-    store = ToolOutputStore(max_records=4)
+    store = ToolOutputStore()
     execution_id = "execution-17"
 
     try:
@@ -183,7 +190,7 @@ def test_live_output_can_be_read_by_exact_execution_before_completion() -> None:
 
 
 def test_agent_retained_outputs_correlate_with_current_execution() -> None:
-    store = ToolOutputStore(max_records=4)
+    store = ToolOutputStore()
     agent = MagicMock(spec=SerenaAgent)
     agent._tool_output_store = store
 

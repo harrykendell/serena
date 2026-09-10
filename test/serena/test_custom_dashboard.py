@@ -267,9 +267,9 @@ def test_retained_serena_panel_serves_rendered_media_instead_of_result_repr(tmp_
     snapshot_root.chmod(0o700)
     token = "a" * 48
     image_bytes = b"\x89PNG\r\n\x1a\nretained-preview"
-    (snapshot_root / token).write_bytes(image_bytes)
 
     agent = _DashboardAgent()
+    (snapshot_root / token).write_bytes(image_bytes)
     agent.execution_store.start_execution(
         execution_id="render-execution",
         session_id="session-a",

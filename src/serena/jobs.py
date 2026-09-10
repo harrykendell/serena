@@ -11,7 +11,7 @@ import sys
 import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -23,10 +23,10 @@ from filelock import FileLock
 from mcp_runtime.shell_environment import user_shell_environment
 from serena.config.serena_config import SerenaPaths
 from serena.errors import UserFacingError
+from serena.retention import JobRetentionState
 
 DEFAULT_MAX_CONCURRENT_JOBS = 12
 DEFAULT_OUTPUT_CHAR_LIMIT = 12_000
-DEFAULT_JOB_RETENTION = timedelta(days=7)
 _MAX_CURSOR_LENGTH = 4096
 _JOB_UNIT_PREFIX = "serena-job-"
 _ANSI_ESCAPE_RE = re.compile(r"(?:\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\\\))")
@@ -69,14 +69,10 @@ class JobStatus(str, Enum):
 
 
 class JobRetentionObserver(Protocol):
-    """Receives the durable-job state needed to keep dashboard panels consistent."""
+    """Receives durable-job state used by unified session retention."""
 
-    def sync_job_retention(
-        self,
-        retained_job_ids: set[str],
-        running_job_sessions: dict[str, str | None],
-    ) -> None:
-        """Synchronize retained jobs and running-job ownership with panel retention."""
+    def sync_job_retention(self, jobs: list[JobRetentionState]) -> set[str]:
+        """Synchronize durable jobs and return identifiers still owned by retained sessions."""
         ...
 
 
@@ -837,17 +833,10 @@ class JobStore:
                 continue
         return records
 
-    def prune_terminal_jobs(self, retention: timedelta) -> None:
-        """Delete metadata for terminal jobs older than ``retention``."""
-        cutoff = datetime.now(UTC) - retention
+    def prune_unretained_terminal_jobs(self, retained_job_ids: set[str]) -> None:
+        """Delete terminal job metadata no longer owned by a retained session."""
         for record in self.list_records():
-            if not record.status.is_terminal or record.finished_at is None:
-                continue
-            try:
-                finished_at = datetime.fromisoformat(record.finished_at)
-            except ValueError:
-                continue
-            if finished_at >= cutoff:
+            if not record.status.is_terminal or record.job_id in retained_job_ids:
                 continue
             path = self.state_file(record.job_id)
             path.unlink(missing_ok=True)
@@ -893,7 +882,6 @@ class JobManager:
         backend: JobBackend | None = None,
         max_concurrent_jobs: int = DEFAULT_MAX_CONCURRENT_JOBS,
         output_char_limit: int = DEFAULT_OUTPUT_CHAR_LIMIT,
-        retention: timedelta = DEFAULT_JOB_RETENTION,
         retention_observer: JobRetentionObserver | None = None,
     ):
         if max_concurrent_jobs <= 0:
@@ -904,22 +892,27 @@ class JobManager:
         self._backend = backend or SystemdJobBackend()
         self._max_concurrent_jobs = max_concurrent_jobs
         self._output_char_limit = output_char_limit
-        self._retention = retention
         self._retention_observer = retention_observer
 
-        self._store.prune_terminal_jobs(self._retention)
         self._store.cleanup_orphan_command_files()
         self._sync_retention_observer(self._store.list_records())
 
     def _sync_retention_observer(self, records: list[JobRecord] | None = None) -> None:
-        """Publishes retained-job identity and running ownership for panel retention."""
+        """Synchronize durable jobs with session retention and prune unowned terminal metadata."""
         if self._retention_observer is None:
             return
         current_records = records if records is not None else self._store.list_records()
-        self._retention_observer.sync_job_retention(
-            retained_job_ids={record.job_id for record in current_records},
-            running_job_sessions={record.job_id: record.session_id for record in current_records if record.status is JobStatus.RUNNING},
-        )
+        jobs = [
+            JobRetentionState(
+                job_id=record.job_id,
+                session_id=record.session_id,
+                is_running=record.status is JobStatus.RUNNING,
+                finished_at=(datetime.fromisoformat(record.finished_at).timestamp() if record.finished_at else None),
+            )
+            for record in current_records
+        ]
+        retained_job_ids = self._retention_observer.sync_job_retention(jobs)
+        self._store.prune_unretained_terminal_jobs(retained_job_ids)
 
     @property
     def max_concurrent_jobs(self) -> int:
@@ -957,7 +950,6 @@ class JobManager:
 
         # serialise starts across ChatGPT chats and Serena processes so the six-job limit is strict
         with self._store.start_lock():
-            self._store.prune_terminal_jobs(self._retention)
             self._store.cleanup_orphan_command_files()
             records = [self._reconcile_record(record) for record in self._store.list_records()]
             running = [record for record in records if record.status is JobStatus.RUNNING]
@@ -1032,7 +1024,6 @@ class JobManager:
         if limit <= 0:
             raise ValueError("limit must be positive")
 
-        self._store.prune_terminal_jobs(self._retention)
         self._store.cleanup_orphan_command_files()
         records = [self._reconcile_record(record) for record in self._store.list_records()]
         self._sync_retention_observer(records)

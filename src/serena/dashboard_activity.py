@@ -8,12 +8,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from serena.activity import ActivityDetailFormatter
-from serena.execution_store import ACTIVITY_HISTORY_LIMIT, ExecutionRecord, ExecutionStore, SessionRecord
+from serena.execution_store import ExecutionRecord, ExecutionStore, SessionRecord
 
 _FILE_RESOURCE_RE = re.compile(r"serena-file://export/([0-9a-f]{48})")
 _PANEL_ID_RE = re.compile(r"[0-9a-f]{16}")
 _JOB_ID_RE = re.compile(r"['\"]job_id['\"]\s*:\s*['\"]([^'\"]+)['\"]")
-_MAX_SESSIONS = 128
 
 
 @dataclass(frozen=True)
@@ -138,7 +137,7 @@ class DashboardActivityArchive:
 
     def _session_payload(self, session: SessionRecord) -> dict[str, Any]:
         executions = self._store.list_session_executions(session.session_id)
-        calls = [self._call_payload(record) for record in executions[-ACTIVITY_HISTORY_LIMIT:]]
+        calls = [self._call_payload(record) for record in executions]
         file_tokens: set[str] = set()
         for record in executions:
             if record.media is not None:

@@ -14,7 +14,6 @@ from mcp.types import ResourceLink
 from pydantic import AnyUrl
 
 from serena.errors import UserFacingError
-from serena.execution_store import ExecutionStore
 
 FILE_EXPORT_MAX_SIZE = 100 * 1024 * 1024
 
@@ -32,13 +31,11 @@ class FileSnapshotStore:
 
     Snapshots are kept in Serena's persistent user-data directory rather than the
     system temporary directory. This lets a chat reopen an exported file after an
-    MCP restart or temporary-directory cleanup. Storage remains bounded by evicting
-    least-recently-used snapshots only when new snapshots are created.
+    MCP restart or temporary-directory cleanup. Their lifetime is owned by the
+    retained ChatGPT session that references them.
     """
 
     _TOKEN_BYTES = 24
-    _MAX_TOTAL_SIZE = 2 * 1024 * 1024 * 1024
-    _MAX_SNAPSHOTS = 2048
     _LOCK: ClassVar[threading.Lock] = threading.Lock()
 
     @classmethod
@@ -53,36 +50,6 @@ class FileSnapshotStore:
         if stat.S_IMODE(root.stat().st_mode) != 0o700:
             root.chmod(0o700)
         return root
-
-    @classmethod
-    def _prune(cls, root: Path, incoming_size: int) -> None:
-        """Evicts unreferenced LRU snapshots until a new snapshot fits within bounds."""
-        pinned = ExecutionStore.retained_file_tokens_from_disk()
-        snapshots: list[tuple[Path, os.stat_result]] = []
-        total_size = 0
-        for path in root.iterdir():
-            if path.name.startswith("."):
-                continue
-            try:
-                file_stat = path.stat()
-            except FileNotFoundError:
-                continue
-            if not stat.S_ISREG(file_stat.st_mode):
-                continue
-            total_size += file_stat.st_size
-            if path.name not in pinned:
-                snapshots.append((path, file_stat))
-
-        snapshots.sort(key=lambda item: item[1].st_mtime)
-        total_count = sum(1 for path in root.iterdir() if path.is_file() and not path.name.startswith("."))
-        while snapshots and (total_count >= cls._MAX_SNAPSHOTS or total_size + incoming_size > cls._MAX_TOTAL_SIZE):
-            path, file_stat = snapshots.pop(0)
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                continue
-            total_count -= 1
-            total_size -= file_stat.st_size
 
     @classmethod
     def _validate_token(cls, token: str) -> None:
@@ -127,7 +94,6 @@ class FileSnapshotStore:
 
         with cls._LOCK:
             root = cls._root()
-            cls._prune(root, size)
             snapshot_path = root / token
             temporary_path = root / f".{token}.tmp"
 
