@@ -866,7 +866,7 @@ Provide a narrow one-time importer for the current execution JSON/zstd state and
 
 1. create a new database only when no SQLite state exists;
 2. import and validate all canonical records in one transaction;
-3. verify session/execution/run/job counts, run membership, unique durable-job ownership and retained resource references;
+3. verify session/execution/run/job counts, run membership and retained resource references; validate unique durable-job ownership only in `JobStore`, because execution history may legitimately contain cross-session `job_status`/observation references to a job owned by another session;
 4. atomically mark/rename the legacy state only after the transaction commits;
 5. never dual-write or merge SQLite and legacy JSON during normal operation.
 

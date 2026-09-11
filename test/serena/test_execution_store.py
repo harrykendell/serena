@@ -326,3 +326,61 @@ def test_execution_store_migrates_v2_arguments_and_drops_run_job_mirrors(tmp_pat
     restored = ExecutionStore(root)
     assert restored.get_execution("execution-a").arguments == {"relative_path": "notes.txt"}
     assert restored.get_activity_run("run-a").execution_ids == ["execution-a"]
+
+
+def test_execution_store_migrates_cross_session_job_observations(tmp_path: Path) -> None:
+    """Migrates repeated durable-job observations without treating them as ownership conflicts."""
+    root = tmp_path / "execution-store"
+    root.mkdir()
+    state_path = root / "state.json"
+    now = time.time()
+    job_id = "309b8b487adf46ae8e6b382b740db517"
+    sessions = {
+        session_id: {
+            "session_id": session_id,
+            "panel_id": ExecutionStore.panel_id_for_session(session_id),
+            "created_at": now,
+            "updated_at": now + 1.0,
+            "display_name": session_id,
+            "project_name": "serena",
+        }
+        for session_id in ("owner-session", "observer-session")
+    }
+    executions = {
+        "execution-start": {
+            "execution_id": "execution-start",
+            "session_id": "owner-session",
+            "project_name": "serena",
+            "tool_name": "start_job",
+            "arguments": {},
+            "started_at": now,
+            "status": "completed",
+            "finished_at": now + 0.1,
+            "durable_job_id": job_id,
+            "durable_job_label": "Synthetic job",
+        },
+        "execution-status": {
+            "execution_id": "execution-status",
+            "session_id": "observer-session",
+            "project_name": "serena",
+            "tool_name": "job_status",
+            "arguments": {"job_id": job_id},
+            "started_at": now + 0.2,
+            "status": "completed",
+            "finished_at": now + 0.3,
+            "durable_job_id": job_id,
+            "durable_job_label": "Synthetic job",
+        },
+    }
+    state_path.write_text(
+        json.dumps({"version": 3, "sessions": sessions, "executions": executions, "activity_runs": {}}),
+        encoding="utf-8",
+    )
+
+    store = ExecutionStore(root)
+
+    assert [record.execution_id for record in store.list_session_executions("owner-session")] == ["execution-start"]
+    assert [record.execution_id for record in store.list_session_executions("observer-session")] == ["execution-status"]
+    assert store.panel_id_for_job(job_id) == ExecutionStore.panel_id_for_session("owner-session")
+    assert not state_path.exists()
+    assert (root / "state.json.migrated").is_file()

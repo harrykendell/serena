@@ -14,7 +14,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
-from serena.retention import DEFAULT_SESSION_RETENTION, JobRetentionState, SessionRetentionPolicy
+from serena.retention import (
+    DEFAULT_SESSION_RETENTION,
+    JobRetentionState,
+    SessionRetentionPolicy,
+)
 from serena.storage_compression import RetainedTextCompression
 from serena.structured_output import StructuredOutputCompactor
 
@@ -179,7 +183,11 @@ class ExecutionStore:
         return uuid.uuid5(uuid.NAMESPACE_URL, f"serena-dashboard:{session_id}").hex[:16]
 
     def panel_id_for_job(self, job_id: str) -> str | None:
-        """Returns the retained dashboard panel owning ``job_id``."""
+        """Returns the retained dashboard panel that originally started ``job_id``.
+
+        Execution rows may observe the same durable job from multiple sessions. The ``start_job``
+        execution is the ownership-bearing fallback when canonical ``JobStore`` metadata is absent.
+        """
         with self._lock:
             row = self._connection.execute(
                 """
@@ -187,7 +195,9 @@ class ExecutionStore:
                 FROM executions
                 JOIN sessions ON sessions.session_id = executions.session_id
                 WHERE executions.durable_job_id = ?
-                ORDER BY executions.started_at DESC, executions.execution_id DESC
+                ORDER BY CASE WHEN executions.tool_name = 'start_job' THEN 0 ELSE 1 END,
+                         executions.started_at ASC,
+                         executions.execution_id ASC
                 LIMIT 1
                 """,
                 (job_id,),
@@ -789,7 +799,14 @@ class ExecutionStore:
         path = cls._default_root() / cls._LEGACY_FILENAME
         try:
             payload = json.loads(RetainedTextCompression.read_text(path))
-        except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        except (
+            FileNotFoundError,
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ):
             return set()
         executions = payload.get("executions", {}) if isinstance(payload, dict) else {}
         if not isinstance(executions, dict):
@@ -968,7 +985,13 @@ class ExecutionStore:
         """Loads and validates the one supported JSON/zstd cutover input."""
         try:
             payload = json.loads(RetainedTextCompression.read_text(self._legacy_state_path))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as error:
+        except (
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ) as error:
             raise RuntimeError(f"Could not read legacy Serena execution state: {error}") from error
         if not isinstance(payload, dict):
             raise RuntimeError("Legacy Serena execution state must be a JSON object")
@@ -1025,7 +1048,15 @@ class ExecutionStore:
                 normalized = {
                     key: value
                     for key, value in item.items()
-                    if key in {"run_id", "session_id", "project_name", "started_at", "superseded", "execution_ids"}
+                    if key
+                    in {
+                        "run_id",
+                        "session_id",
+                        "project_name",
+                        "started_at",
+                        "superseded",
+                        "execution_ids",
+                    }
                 }
                 try:
                     run = ActivityPanelRun(**normalized)
@@ -1033,15 +1064,6 @@ class ExecutionStore:
                     continue
                 if run.session_id in sessions:
                     runs[str(run_id)] = run
-
-        # reject conflicting durable-job ownership before any imported row can commit
-        job_owners: dict[str, str] = {}
-        for record in executions.values():
-            if record.durable_job_id is None:
-                continue
-            previous = job_owners.setdefault(record.durable_job_id, record.session_id)
-            if previous != record.session_id:
-                raise RuntimeError(f"Legacy durable job {record.durable_job_id!r} belongs to multiple sessions")
 
         expected_memberships: set[tuple[str, str]] = set()
         expected_resources: set[tuple[str, str, str]] = set()
@@ -1096,7 +1118,13 @@ class ExecutionStore:
                     INSERT INTO activity_runs (run_id, session_id, project_name, started_at, superseded)
                     VALUES (?, ?, ?, ?, ?)
                     """,
-                    (run.run_id, run.session_id, run.project_name, run.started_at, int(run.superseded)),
+                    (
+                        run.run_id,
+                        run.session_id,
+                        run.project_name,
+                        run.started_at,
+                        int(run.superseded),
+                    ),
                 )
                 position = 0
                 for execution_id in run.execution_ids:
@@ -1143,18 +1171,6 @@ class ExecutionStore:
             actual_count = int(row["count"]) if row is not None else -1
             if actual_count != expected_count:
                 raise RuntimeError(f"Legacy Serena migration validation failed for {table}: expected {expected_count}, got {actual_count}")
-        conflict = self._connection.execute(
-            """
-            SELECT durable_job_id
-            FROM executions
-            WHERE durable_job_id IS NOT NULL
-            GROUP BY durable_job_id
-            HAVING COUNT(DISTINCT session_id) > 1
-            LIMIT 1
-            """
-        ).fetchone()
-        if conflict is not None:
-            raise RuntimeError(f"Legacy durable job {conflict['durable_job_id']!r} belongs to multiple sessions")
 
     def _mark_legacy_migrated(self) -> None:
         """Renames the legacy state only after the SQLite import transaction has committed."""
@@ -1368,7 +1384,14 @@ class ExecutionStore:
         path = cls._default_root() / cls._LEGACY_FILENAME
         try:
             payload = json.loads(RetainedTextCompression.read_text(path))
-        except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        except (
+            FileNotFoundError,
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ):
             return set()
         tokens: set[str] = set()
         executions = payload.get("executions", {}) if isinstance(payload, dict) else {}
