@@ -1,18 +1,22 @@
 import asyncio
 import json
 import time
+import uuid
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, RequestParams, ResourceLink
 from pydantic import AnyUrl
 
-from serena.activity import ACTIVITY_RESOURCE_URI, ActivityTracker, register_activity_resource
+from serena.activity import ACTIVITY_RESOURCE_URI, ActivityRunManager, register_activity_resource
+from serena.activity_view import ActivityCallDetail, ActivityJobDetail, ActivitySnapshot, ActivityView
+from serena.execution_metadata import ExecutionResultMetadata, extract_execution_result_metadata
 from serena.execution_store import ExecutionStore
 from serena.git_metrics import GitLineMetrics
 from serena.jobs import JobOutputChunk, JobRecord, JobRuntimeInfo, JobSnapshot, JobStatus
@@ -91,12 +95,22 @@ class _FakeJobSource:
     def __init__(self, records: list[JobRecord] | None = None) -> None:
         self.records = records or []
         self.outputs: dict[str, str] = {}
+        self.max_concurrent_jobs = 12
 
-    def list_jobs(self, limit: int = 20) -> list[JobRecord]:
-        return self.records[:limit]
+    def list_running_jobs(self) -> list[JobRecord]:
+        return [record for record in self.records if record.status is JobStatus.RUNNING]
+
+    def get_job_record(self, job_id: str) -> JobRecord:
+        try:
+            return next(record for record in self.records if record.job_id == job_id)
+        except StopIteration:
+            raise KeyError(job_id) from None
+
+    def get_job_records(self, job_ids: set[str]) -> list[JobRecord]:
+        return [record for record in self.records if record.job_id in job_ids]
 
     def get_job(self, job_id: str) -> JobSnapshot:
-        record = next(record for record in self.records if record.job_id == job_id)
+        record = self.get_job_record(job_id)
         return JobSnapshot(
             record=record,
             runtime=JobRuntimeInfo(
@@ -112,6 +126,178 @@ class _FakeJobSource:
                 has_more_output=False,
             ),
         )
+
+
+class _ActivityHarness:
+    """Test helper that drives the production store/run/view split through UI-shaped results."""
+
+    def __init__(
+        self,
+        job_source: _FakeJobSource,
+        execution_store: ExecutionStore | None = None,
+        git_metrics_source: object | None = None,
+    ) -> None:
+        self._temporary_store_dir: TemporaryDirectory[str] | None = None
+        if execution_store is None:
+            self._temporary_store_dir = TemporaryDirectory(prefix="serena-activity-store-test-")
+            execution_store = ExecutionStore(Path(self._temporary_store_dir.name))
+        self.execution_store = execution_store
+        self.run_manager = ActivityRunManager(execution_store)
+        self.view = ActivityView(execution_store, job_source, git_metrics_source)
+
+    @staticmethod
+    def extract_result_metadata(result: object | None) -> ExecutionResultMetadata:
+        return extract_execution_result_metadata(result)
+
+    def start_run(self, session_id: str, project_name: str) -> dict[str, Any]:
+        run = self.run_manager.start_run(session_id, project_name)
+        return self._snapshot_payload(self.view.for_run(session_id, run.run_id, refresh_git_metrics=True))
+
+    def update_project(self, session_id: str, project_name: str) -> None:
+        self.run_manager.update_project(session_id, project_name)
+
+    def start_tool(
+        self,
+        session_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        project_name: str = "",
+        execution_id: str | None = None,
+    ) -> str:
+        execution_id = execution_id or uuid.uuid4().hex
+        run = self.execution_store.get_current_activity_run(session_id)
+        effective_project = project_name or (run.project_name if run is not None else "")
+        self.execution_store.start_execution(
+            execution_id=execution_id,
+            session_id=session_id,
+            project_name=effective_project,
+            tool_name=tool_name,
+            arguments=arguments,
+        )
+        self.run_manager.associate_execution(session_id, execution_id, project_name=effective_project)
+        return execution_id
+
+    def finish_tool(
+        self,
+        call_id: str | None,
+        succeeded: bool,
+        result_serialization: str | None = None,
+        error: str | None = None,
+        project_name: str | None = None,
+        result_metadata: ExecutionResultMetadata | None = None,
+        retained_output_id: str | None = None,
+        retained_output_chars: int | None = None,
+    ) -> None:
+        if call_id is None:
+            return
+        metadata = result_metadata or ExecutionResultMetadata(media=None, durable_job_id=None, durable_job_label=None)
+        media = metadata.media if succeeded else None
+        self.execution_store.finish_execution(
+            call_id,
+            succeeded=succeeded,
+            result=result_serialization if succeeded and media is None else None,
+            error=error,
+            project_name=project_name,
+            retained_output_id=retained_output_id if succeeded else None,
+            retained_output_chars=retained_output_chars if succeeded else None,
+            media=media.storage_dict() if media is not None else None,
+            durable_job_id=metadata.durable_job_id if succeeded else None,
+            durable_job_label=metadata.durable_job_label if succeeded else None,
+        )
+
+    def get_run(self, session_id: str, run_id: str, *, refresh_git_metrics: bool = False) -> dict[str, Any]:
+        return self._snapshot_payload(self.view.for_run(session_id, run_id, refresh_git_metrics=refresh_git_metrics))
+
+    def get_call_detail(self, session_id: str, run_id: str, call_id: str) -> dict[str, Any]:
+        return self._call_detail_payload(self.view.call_detail(session_id, run_id, call_id))
+
+    def get_call_media(self, session_id: str, run_id: str, call_id: str):
+        return self.view.call_media(session_id, run_id, call_id)
+
+    def get_job_detail(self, session_id: str, run_id: str, job_id: str) -> dict[str, Any]:
+        return self._job_detail_payload(self.view.job_detail(session_id, run_id, job_id))
+
+    @staticmethod
+    def _snapshot_payload(snapshot: ActivitySnapshot) -> dict[str, Any]:
+        calls: list[dict[str, Any]] = []
+        for call in snapshot.calls:
+            payload: dict[str, Any] = {
+                "call_id": call.call_id,
+                "tool_name": call.tool_name,
+                "detail": call.detail,
+                "project_name": call.project_name,
+                "started_at": call.started_at,
+                "finished_at": call.finished_at,
+                "status": call.status,
+            }
+            if call.scope:
+                payload["scope"] = call.scope
+            if call.job_id is not None:
+                payload["job_id"] = call.job_id
+            if call.job_label is not None:
+                payload["job_label"] = call.job_label
+            calls.append(payload)
+        jobs = [
+            {
+                "job_id": job.job_id,
+                "label": job.label,
+                "project": job.project,
+                "status": job.status,
+                "started_at": job.started_at,
+                "finished_at": job.finished_at,
+                "current_turn": job.current_turn,
+            }
+            for job in snapshot.jobs
+        ]
+        return {
+            "run_id": snapshot.run_id or snapshot.panel_id,
+            "project_name": snapshot.project_name,
+            "session_title": snapshot.session_title,
+            "git_additions": snapshot.git_metrics.additions,
+            "git_deletions": snapshot.git_metrics.deletions,
+            "git_ahead_commits": snapshot.git_metrics.ahead_commits,
+            "started_at": snapshot.started_at,
+            "superseded": snapshot.superseded,
+            "calls": calls,
+            "jobs": jobs,
+        }
+
+    @staticmethod
+    def _call_detail_payload(detail: ActivityCallDetail) -> dict[str, Any]:
+        return {
+            "call_id": detail.call_id,
+            "tool_name": detail.tool_name,
+            "status": detail.status,
+            "arguments": json.dumps(detail.arguments, separators=(",", ":")),
+            "structured_arguments": detail.arguments,
+            "result": detail.result,
+            "structured_result": detail.structured_result,
+            "error": detail.error,
+            "media": detail.media.public_dict() if detail.media is not None else None,
+        }
+
+    @staticmethod
+    def _job_detail_payload(detail: ActivityJobDetail) -> dict[str, Any]:
+        return {
+            "job_id": detail.job_id,
+            "label": detail.label,
+            "project": detail.project,
+            "cwd": detail.cwd,
+            "status": detail.status,
+            "status_message": detail.status_message,
+            "return_code": detail.return_code,
+            "timeout_seconds": detail.timeout_seconds,
+            "elapsed_seconds": detail.elapsed_seconds,
+            "seconds_since_last_output": detail.seconds_since_last_output,
+            "memory_bytes": detail.memory_bytes,
+            "cpu_seconds": detail.cpu_seconds,
+            "process_count": detail.process_count,
+            "output": detail.output,
+            "output_truncated": detail.output_truncated,
+            "earlier_output_omitted": detail.earlier_output_omitted,
+            "has_earlier_output": detail.has_earlier_output,
+            "cursor_reset": detail.cursor_reset,
+        }
 
 
 class _FixedGitMetricsSource:
@@ -160,7 +346,7 @@ def _job_record(job_id: str, label: str, status: JobStatus = JobStatus.RUNNING, 
 
 
 def test_activity_tracker_records_tool_lifecycle() -> None:
-    tracker = ActivityTracker(_FakeJobSource(), git_metrics_source=_FixedGitMetricsSource())
+    tracker = _ActivityHarness(_FakeJobSource(), git_metrics_source=_FixedGitMetricsSource())
     run = tracker.start_run("conversation-a", "serena")
 
     call_id = tracker.start_tool(
@@ -191,7 +377,7 @@ def test_activity_tracker_records_tool_lifecycle() -> None:
 
 def test_activity_run_refreshes_git_metrics_only_when_requested() -> None:
     source = _RefreshingGitMetricsSource()
-    tracker = ActivityTracker(_FakeJobSource(), git_metrics_source=source)
+    tracker = _ActivityHarness(_FakeJobSource(), git_metrics_source=source)
 
     run = tracker.start_run("conversation-a", "serena")
     assert source.refresh_calls == 1
@@ -215,12 +401,12 @@ def test_activity_run_refreshes_git_metrics_only_when_requested() -> None:
 def test_activity_tracker_rehydrates_historical_turn_after_restart(tmp_path: Path) -> None:
     source = _FakeJobSource([_job_record("job-a", "retained job", JobStatus.COMPLETED)])
     store_root = tmp_path / "execution-store"
-    tracker = ActivityTracker(source, execution_store=ExecutionStore(store_root))
+    tracker = _ActivityHarness(source, execution_store=ExecutionStore(store_root))
     run = tracker.start_run("conversation-a", "serena")
     call_id = tracker.start_tool(
         "conversation-a",
         "search_for_pattern",
-        {"substring_pattern": "ActivityTracker", "relative_path": "src/serena"},
+        {"substring_pattern": "_ActivityHarness", "relative_path": "src/serena"},
     )
     tracker.finish_tool(call_id, succeeded=True, result_serialization='{"matches":3}')
     job_call_id = tracker.start_tool("conversation-a", "start_job", {"label": "retained job"})
@@ -229,12 +415,12 @@ def test_activity_tracker_rehydrates_historical_turn_after_restart(tmp_path: Pat
         job_call_id,
         succeeded=True,
         result_serialization=json.dumps(job_result, separators=(",", ":")),
-        result_metadata=ActivityTracker.extract_result_metadata(job_result),
+        result_metadata=_ActivityHarness.extract_result_metadata(job_result),
     )
     tracker.get_run("conversation-a", run["run_id"])
     interrupted_id = tracker.start_tool("conversation-a", "execute_shell_command", {"command": "sleep 30"})
 
-    restored = ActivityTracker(_FakeJobSource(), execution_store=ExecutionStore(store_root))
+    restored = _ActivityHarness(source, execution_store=ExecutionStore(store_root))
     snapshot = restored.get_run("conversation-a", run["run_id"])
     detail = restored.get_call_detail("conversation-a", run["run_id"], call_id)
 
@@ -244,19 +430,19 @@ def test_activity_tracker_rehydrates_historical_turn_after_restart(tmp_path: Pat
     assert snapshot["calls"][-1]["status"] == "failed"
     assert snapshot["calls"][-1]["finished_at"] is not None
     assert [(job["job_id"], job["current_turn"]) for job in snapshot["jobs"]] == [("job-a", True)]
-    assert json.loads(detail["arguments"]) == {"substring_pattern": "ActivityTracker", "relative_path": "src/serena"}
+    assert json.loads(detail["arguments"]) == {"substring_pattern": "_ActivityHarness", "relative_path": "src/serena"}
     assert json.loads(detail["result"]) == {"matches": 3}
 
 
 def test_activity_tracker_uses_semantic_tool_detail_lines() -> None:
-    tracker = ActivityTracker(_FakeJobSource())
+    tracker = _ActivityHarness(_FakeJobSource())
     run = tracker.start_run("conversation-a", "serena")
 
     calls = [
         tracker.start_tool(
             "conversation-a",
             "search_for_pattern",
-            {"substring_pattern": "ActivityTracker.*detail", "relative_path": "src/serena"},
+            {"substring_pattern": "_ActivityHarness.*detail", "relative_path": "src/serena"},
         ),
         tracker.start_tool(
             "conversation-a",
@@ -266,7 +452,7 @@ def test_activity_tracker_uses_semantic_tool_detail_lines() -> None:
         tracker.start_tool(
             "conversation-a",
             "rename_symbol",
-            {"name_path": "ActivityTracker", "relative_path": "src/serena/activity.py", "new_name": "ActivityStore"},
+            {"name_path": "_ActivityHarness", "relative_path": "src/serena/activity.py", "new_name": "ActivityStore"},
         ),
         tracker.start_tool(
             "conversation-a",
@@ -293,9 +479,9 @@ def test_activity_tracker_uses_semantic_tool_detail_lines() -> None:
     snapshot = tracker.get_run("conversation-a", run["run_id"])
     assert calls == [call["call_id"] for call in snapshot["calls"]]
     assert [(call["detail"], call.get("scope", "")) for call in snapshot["calls"]] == [
-        ("ActivityTracker.*detail", "src/serena"),
+        ("_ActivityHarness.*detail", "src/serena"),
         ("*.py", "src/serena"),
-        ("ActivityTracker → ActivityStore", "src/serena/activity.py"),
+        ("_ActivityHarness → ActivityStore", "src/serena/activity.py"),
         ("old value", "src/serena/activity.py"),
         ("Run activity tests", "test"),
         ("switch · mcp-media", ""),
@@ -304,7 +490,7 @@ def test_activity_tracker_uses_semantic_tool_detail_lines() -> None:
 
 
 def test_job_status_detail_prefers_known_job_label() -> None:
-    tracker = ActivityTracker(_FakeJobSource())
+    tracker = _ActivityHarness(_FakeJobSource())
     run = tracker.start_run("conversation-a", "serena")
 
     start_call_id = tracker.start_tool("conversation-a", "start_job", {"label": "Optimise chapter"})
@@ -313,7 +499,7 @@ def test_job_status_detail_prefers_known_job_label() -> None:
         start_call_id,
         succeeded=True,
         result_serialization=json.dumps(result, separators=(",", ":")),
-        result_metadata=ActivityTracker.extract_result_metadata(result),
+        result_metadata=_ActivityHarness.extract_result_metadata(result),
     )
 
     status_call_id = tracker.start_tool(
@@ -328,7 +514,7 @@ def test_job_status_detail_prefers_known_job_label() -> None:
 
 
 def test_job_status_detail_uses_returned_label_when_not_known_at_start() -> None:
-    tracker = ActivityTracker(_FakeJobSource())
+    tracker = _ActivityHarness(_FakeJobSource())
     run = tracker.start_run("conversation-a", "serena")
 
     status_call_id = tracker.start_tool("conversation-a", "job_status", {"job_id": "job-a"})
@@ -337,7 +523,7 @@ def test_job_status_detail_uses_returned_label_when_not_known_at_start() -> None
         status_call_id,
         succeeded=True,
         result_serialization=json.dumps(result, separators=(",", ":")),
-        result_metadata=ActivityTracker.extract_result_metadata(result),
+        result_metadata=_ActivityHarness.extract_result_metadata(result),
     )
 
     snapshot = tracker.get_run("conversation-a", run["run_id"])
@@ -346,7 +532,7 @@ def test_job_status_detail_uses_returned_label_when_not_known_at_start() -> None
 
 
 def test_activity_tracker_detail_lines_skip_empty_values_and_remain_bounded() -> None:
-    tracker = ActivityTracker(_FakeJobSource())
+    tracker = _ActivityHarness(_FakeJobSource())
     run = tracker.start_run("conversation-a", "serena")
 
     tracker.start_tool(
@@ -357,18 +543,18 @@ def test_activity_tracker_detail_lines_skip_empty_values_and_remain_bounded() ->
     tracker.start_tool(
         "conversation-a",
         "find_symbol",
-        {"name_path_pattern": "ActivityTracker", "relative_path": ""},
+        {"name_path_pattern": "_ActivityHarness", "relative_path": ""},
     )
 
     snapshot = tracker.get_run("conversation-a", run["run_id"])
     assert snapshot["calls"][0]["detail"] == "x" * 177 + "..."
     assert snapshot["calls"][0].get("scope", "") == ""
-    assert snapshot["calls"][1]["detail"] == "ActivityTracker"
+    assert snapshot["calls"][1]["detail"] == "_ActivityHarness"
     assert snapshot["calls"][1].get("scope", "") == ""
 
 
 def test_activity_tracker_exposes_tool_detail_on_demand() -> None:
-    tracker = ActivityTracker(_FakeJobSource())
+    tracker = _ActivityHarness(_FakeJobSource())
     run = tracker.start_run("conversation-a", "serena")
     call_id = tracker.start_tool(
         "conversation-a",
@@ -407,7 +593,7 @@ def test_activity_tracker_exposes_tool_detail_on_demand() -> None:
 
 
 def test_activity_tracker_exposes_typed_shell_result_for_rich_rendering() -> None:
-    tracker = ActivityTracker(_FakeJobSource())
+    tracker = _ActivityHarness(_FakeJobSource())
     run = tracker.start_run("conversation-a", "serena")
     call_id = tracker.start_tool("conversation-a", "execute_shell_command", {"command": "printf hello"})
     canonical_result = '{"return_code":0,"stdout":"hello"}'
@@ -420,7 +606,7 @@ def test_activity_tracker_exposes_typed_shell_result_for_rich_rendering() -> Non
 
 
 def test_activity_tracker_preserves_json_looking_string_result_for_rich_rendering() -> None:
-    tracker = ActivityTracker(_FakeJobSource())
+    tracker = _ActivityHarness(_FakeJobSource())
     run = tracker.start_run("conversation-a", "serena")
     call_id = tracker.start_tool("conversation-a", "read_file", {"relative_path": "payload.txt"})
     logical_result = '{"message": "this is text, not a structured result"}'
@@ -434,7 +620,7 @@ def test_activity_tracker_preserves_json_looking_string_result_for_rich_renderin
 
 
 def test_activity_tracker_preserves_canonical_result_serialization_byte_for_byte() -> None:
-    tracker = ActivityTracker(_FakeJobSource())
+    tracker = _ActivityHarness(_FakeJobSource())
     run = tracker.start_run("conversation-a", "serena")
     call_id = tracker.start_tool(
         "conversation-a",
@@ -465,7 +651,7 @@ def test_activity_tracker_preserves_canonical_result_serialization_byte_for_byte
 
 
 def test_activity_tracker_exposes_media_without_serialized_payload_text() -> None:
-    tracker = ActivityTracker(_FakeJobSource())
+    tracker = _ActivityHarness(_FakeJobSource())
     run = tracker.start_run("conversation-a", "serena")
     call_id = tracker.start_tool("conversation-a", "render_pdf_page", {"relative_path": "figure.pdf", "page": 1})
     link = ResourceLink(
@@ -479,7 +665,7 @@ def test_activity_tracker_exposes_media_without_serialized_payload_text() -> Non
     tracker.finish_tool(
         call_id,
         succeeded=True,
-        result_metadata=ActivityTracker.extract_result_metadata(link),
+        result_metadata=_ActivityHarness.extract_result_metadata(link),
     )
 
     assert call_id is not None
@@ -491,7 +677,7 @@ def test_activity_tracker_exposes_media_without_serialized_payload_text() -> Non
 
 
 def test_activity_tracker_exposes_media_from_prepared_mcp_result() -> None:
-    tracker = ActivityTracker(_FakeJobSource())
+    tracker = _ActivityHarness(_FakeJobSource())
     run = tracker.start_run("conversation-a", "serena")
     call_id = tracker.start_tool("conversation-a", "fetch_media_file", {"relative_path": "figure.png"})
     link = ResourceLink(
@@ -506,7 +692,7 @@ def test_activity_tracker_exposes_media_from_prepared_mcp_result() -> None:
     tracker.finish_tool(
         call_id,
         succeeded=True,
-        result_metadata=ActivityTracker.extract_result_metadata(logical_result),
+        result_metadata=_ActivityHarness.extract_result_metadata(logical_result),
     )
 
     assert call_id is not None
@@ -519,7 +705,7 @@ def test_activity_tracker_exposes_media_from_prepared_mcp_result() -> None:
 
 def test_activity_tracker_marks_current_turn_job_and_exposes_other_running_jobs() -> None:
     source = _FakeJobSource([_job_record("other-job", "other optimisation")])
-    tracker = ActivityTracker(source)
+    tracker = _ActivityHarness(source)
     run = tracker.start_run("conversation-a", "serena")
     call_id = tracker.start_tool("conversation-a", "start_job", {"label": "current optimisation"})
 
@@ -529,7 +715,7 @@ def test_activity_tracker_marks_current_turn_job_and_exposes_other_running_jobs(
         call_id,
         succeeded=True,
         result_serialization=json.dumps(result, separators=(",", ":")),
-        result_metadata=ActivityTracker.extract_result_metadata(result),
+        result_metadata=_ActivityHarness.extract_result_metadata(result),
     )
     snapshot = tracker.get_run("conversation-a", run["run_id"])
 
@@ -544,7 +730,7 @@ def test_activity_tracker_marks_current_turn_job_and_exposes_other_running_jobs(
 def test_activity_tracker_exposes_job_runtime_and_output_on_demand() -> None:
     source = _FakeJobSource([_job_record("current-job", "current optimisation")])
     source.outputs["current-job"] = "step 1\nstep 2"
-    tracker = ActivityTracker(source)
+    tracker = _ActivityHarness(source)
     run = tracker.start_run("conversation-a", "serena")
     call_id = tracker.start_tool("conversation-a", "start_job", {"label": "current optimisation"})
     result = {"job_id": "current-job", "label": "current optimisation"}
@@ -552,7 +738,7 @@ def test_activity_tracker_exposes_job_runtime_and_output_on_demand() -> None:
         call_id,
         succeeded=True,
         result_serialization=json.dumps(result, separators=(",", ":")),
-        result_metadata=ActivityTracker.extract_result_metadata(result),
+        result_metadata=_ActivityHarness.extract_result_metadata(result),
     )
 
     detail = tracker.get_job_detail("conversation-a", run["run_id"], "current-job")
@@ -567,7 +753,7 @@ def test_activity_tracker_exposes_job_runtime_and_output_on_demand() -> None:
 
 
 def test_activity_tracker_isolates_conversations() -> None:
-    tracker = ActivityTracker(_FakeJobSource())
+    tracker = _ActivityHarness(_FakeJobSource())
     run = tracker.start_run("conversation-a", "serena")
 
     with pytest.raises(ValueError, match="not available"):
@@ -575,7 +761,7 @@ def test_activity_tracker_isolates_conversations() -> None:
 
 
 def test_activity_tracker_supersedes_previous_panel_in_same_conversation() -> None:
-    tracker = ActivityTracker(_FakeJobSource())
+    tracker = _ActivityHarness(_FakeJobSource())
     first = tracker.start_run("conversation-a", "serena")
     call_id = tracker.start_tool("conversation-a", "execute_shell_command", {"command": "sleep 5"})
 
@@ -598,7 +784,7 @@ def test_superseded_panel_retains_its_jobs_without_absorbing_background_jobs() -
             _job_record("background-job", "background job"),
         ]
     )
-    tracker = ActivityTracker(source)
+    tracker = _ActivityHarness(source)
     first = tracker.start_run("conversation-a", "serena")
     call_id = tracker.start_tool("conversation-a", "start_job", {"command": "sleep 5"})
 
@@ -607,7 +793,7 @@ def test_superseded_panel_retains_its_jobs_without_absorbing_background_jobs() -
         call_id,
         succeeded=True,
         result_serialization=json.dumps(result, separators=(",", ":")),
-        result_metadata=ActivityTracker.extract_result_metadata(result),
+        result_metadata=_ActivityHarness.extract_result_metadata(result),
     )
     second = tracker.start_run("conversation-a", "serena")
 
@@ -623,7 +809,7 @@ def test_superseded_panel_retains_its_jobs_without_absorbing_background_jobs() -
 
 def test_carried_start_job_is_retained_by_old_and_new_panels() -> None:
     source = _FakeJobSource([_job_record("shared-job", "shared job")])
-    tracker = ActivityTracker(source)
+    tracker = _ActivityHarness(source)
     first = tracker.start_run("conversation-a", "serena")
     call_id = tracker.start_tool("conversation-a", "start_job", {"command": "sleep 5"})
 
@@ -633,7 +819,7 @@ def test_carried_start_job_is_retained_by_old_and_new_panels() -> None:
         call_id,
         succeeded=True,
         result_serialization=json.dumps(result, separators=(",", ":")),
-        result_metadata=ActivityTracker.extract_result_metadata(result),
+        result_metadata=_ActivityHarness.extract_result_metadata(result),
     )
 
     first_state = tracker.get_run("conversation-a", first["run_id"])
@@ -651,9 +837,9 @@ def test_get_mcp_session_id_prefers_openai_conversation_metadata() -> None:
 
 
 def test_mcp_tool_wrapper_records_activity() -> None:
-    tracker = ActivityTracker(_FakeJobSource())
+    tracker = _ActivityHarness(_FakeJobSource())
     run = tracker.start_run("global", "serena")
-    mcp_tool = SerenaMCPFactory.make_mcp_tool(_EchoCommandTool(), activity_tracker=tracker)
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(_EchoCommandTool(), activity_run_manager=tracker.run_manager)
 
     result = asyncio.run(mcp_tool.run({"command": "git status"}))
 
@@ -665,8 +851,8 @@ def test_mcp_tool_wrapper_records_activity() -> None:
 
 
 def test_mcp_tool_wrapper_records_execution_without_activity_panel() -> None:
-    tracker = ActivityTracker(_FakeJobSource())
-    mcp_tool = SerenaMCPFactory.make_mcp_tool(_EchoCommandTool(), activity_tracker=tracker)
+    tracker = _ActivityHarness(_FakeJobSource())
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(_EchoCommandTool(), activity_run_manager=tracker.run_manager)
 
     assert asyncio.run(mcp_tool.run({"command": "git status"})) == "git status"
 
@@ -674,14 +860,14 @@ def test_mcp_tool_wrapper_records_execution_without_activity_panel() -> None:
     assert len(records) == 1
     assert records[0].session_id == "global"
     assert records[0].tool_name == "echo_command"
-    assert json.loads(records[0].arguments) == {"command": "git status"}
+    assert records[0].arguments == {"command": "git status"}
     assert records[0].status == "completed"
 
 
 def test_mcp_tool_wrapper_tracks_logical_result_when_transport_conversion_is_enabled() -> None:
-    tracker = ActivityTracker(_FakeJobSource())
+    tracker = _ActivityHarness(_FakeJobSource())
     run = tracker.start_run("global", "serena")
-    mcp_tool = SerenaMCPFactory.make_mcp_tool(_EchoCommandTool(), activity_tracker=tracker)
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(_EchoCommandTool(), activity_run_manager=tracker.run_manager)
 
     asyncio.run(mcp_tool.run({"command": "git status"}, convert_result=True))
 
@@ -692,9 +878,9 @@ def test_mcp_tool_wrapper_tracks_logical_result_when_transport_conversion_is_ena
 
 
 def test_mcp_tool_wrapper_keeps_activity_polling_responsive_during_blocking_tool() -> None:
-    tracker = ActivityTracker(_FakeJobSource())
+    tracker = _ActivityHarness(_FakeJobSource())
     run = tracker.start_run("global", "serena")
-    mcp_tool = SerenaMCPFactory.make_mcp_tool(_SlowEchoCommandTool(), activity_tracker=tracker)
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(_SlowEchoCommandTool(), activity_run_manager=tracker.run_manager)
 
     async def exercise() -> str:
         invocation = asyncio.create_task(mcp_tool.run({"command": "slow command"}))
@@ -714,9 +900,9 @@ def test_mcp_tool_wrapper_keeps_activity_polling_responsive_during_blocking_tool
 
 def test_mcp_start_job_wrapper_associates_converted_result_with_current_turn() -> None:
     source = _FakeJobSource([_job_record("wrapped-job", "wrapped label")])
-    tracker = ActivityTracker(source)
+    tracker = _ActivityHarness(source)
     run = tracker.start_run("global", "serena")
-    mcp_tool = SerenaMCPFactory.make_mcp_tool(_StartJobResultTool(), activity_tracker=tracker)
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(_StartJobResultTool(), activity_run_manager=tracker.run_manager)
 
     asyncio.run(mcp_tool.run({"command": "sleep 1", "label": "wrapped label"}, convert_result=True))
 
@@ -726,7 +912,7 @@ def test_mcp_start_job_wrapper_associates_converted_result_with_current_turn() -
 
 def test_mcp_start_job_metadata_is_extracted_before_central_presentation(monkeypatch: pytest.MonkeyPatch) -> None:
     source = _FakeJobSource([_job_record("wrapped-job", "wrapped label")])
-    tracker = ActivityTracker(source)
+    tracker = _ActivityHarness(source)
     run = tracker.start_run("global", "serena")
     tool = _StartJobResultTool()
     logical_result = {
@@ -736,7 +922,7 @@ def test_mcp_start_job_metadata_is_extracted_before_central_presentation(monkeyp
         "suffix": "y" * 10_000,
     }
     monkeypatch.setattr(tool, "apply", lambda command, label: logical_result)
-    mcp_tool = SerenaMCPFactory.make_mcp_tool(tool, activity_tracker=tracker)
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(tool, activity_run_manager=tracker.run_manager)
 
     asyncio.run(mcp_tool.run({"command": "sleep 1", "label": "wrapped label"}, convert_result=True))
 
@@ -793,10 +979,12 @@ def test_activity_tools_expose_widget_and_private_polling_contract() -> None:
         def get_active_project_for_session(session_id: str):
             return None
 
-    async def inspect_tools() -> dict[str, object]:
+    async def inspect_tools() -> dict[str, Any]:
         factory = SerenaMCPFactory(transport="stdio")
         factory.agent = Agent()  # type: ignore[assignment]
-        factory._activity_tracker = ActivityTracker(_FakeJobSource())
+        harness = _ActivityHarness(_FakeJobSource())
+        factory._activity_run_manager = harness.run_manager
+        factory._activity_view = harness.view
         mcp = FastMCP("activity-test")
         factory._register_activity_tools(mcp)
         return {tool.name: tool for tool in await mcp.list_tools()}

@@ -1,6 +1,6 @@
 # Serena Activity UI Simplification and Dashboard Rebuild Plan
 
-Status: IN PROGRESS — U00 COMPLETE (2026-09-11)
+Status: IN PROGRESS — U00–U01 COMPLETE (2026-09-11)
 
 Baseline: `3435c894` (`Show current Git metrics in Serena activity`) plus the original mixed working tree. U00 preserved that pre-existing work as `a0c6a541` (backend performance fixes), `94818381` (dashboard notifications/PWA/deep links), and `04ef9b6e` (validation fixes for the preserved backend work), then recorded the measurable rebuild baseline in `docs/03-special-guides/serena_activity_ui_simplification_u00_baseline.md`.
 
@@ -693,7 +693,7 @@ Scale tests at this checkpoint must demonstrate structurally that discovery does
 
 Do not retrofit the old iframe frontend to this API merely for temporary compatibility.
 
-Checkpoint: the backend can supply bounded activity discovery and on-demand snapshots/details without UI compatibility layers or history-proportional polling cost.
+Checkpoint (complete 2026-09-11): the backend supplies bounded activity discovery and on-demand snapshots/details without history-proportional polling cost. Evidence: `docs/03-special-guides/serena_activity_ui_simplification_u01_checkpoint.md`.
 
 ### U02 — Build the small renderer and cut over both Serena surfaces
 

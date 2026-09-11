@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import threading
-import time
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -18,11 +15,9 @@ from pydantic import AnyUrl
 from orchestrator.config import OrchestratorConfig
 from orchestrator.dashboard_sessions import OrchestratorDashboardSessionArchive
 from orchestrator.delegates import DelegateError, DelegateStore
-from serena.activity import ActivityDetailFormatter, ActivityMedia
-from serena.dashboard_activity import DashboardActivityArchive, DashboardActivitySessionSummary
+from serena.activity_view import ActivityCallDetail, ActivityJobDetail, ActivityOverview, ActivitySnapshot, ActivityView
+from serena.dashboard_activity import DashboardActivityArchive
 from serena.dashboard_widgets import orchestrator_dashboard_widget_html, serena_dashboard_widget_html
-from serena.git_metrics import GitLineMetrics, GitMetricsSource
-from serena.jobs import JobManager, JobStatus
 from serena.push_notifications import WebPushNotifier
 from serena.tools.media_tools import read_result_file_link
 
@@ -90,355 +85,71 @@ class DashboardMemoryOverview:
         }
 
 
-class DashboardJobOverview:
-    """Read-only overview of retained durable jobs for the custom dashboard."""
-
-    def __init__(self, job_manager: JobManager):
-        self._job_manager = job_manager
-
-    @property
-    def max_concurrent_jobs(self) -> int:
-        """:return: hard global concurrency limit for durable Serena jobs."""
-        return self._job_manager.max_concurrent_jobs
-
-    def get_jobs(self) -> dict[str, Any]:
-        """Returns running jobs followed by retained terminal jobs with lightweight telemetry."""
-        snapshots = self._job_manager.list_job_snapshots(limit=_CUSTOM_DASHBOARD_JOB_LIMIT, running_only=False)
-        persistence = self._job_manager.persistence_info()
-
-        jobs: list[dict[str, Any]] = []
-        running_jobs = 0
-        terminal_jobs = 0
-        for snapshot in snapshots:
-            record = snapshot.record
-            runtime = snapshot.runtime
-            if record.status is JobStatus.RUNNING:
-                running_jobs += 1
-            elif record.status.is_terminal:
-                terminal_jobs += 1
-            jobs.append(
-                {
-                    "job_id": record.job_id,
-                    "label": record.label,
-                    "project": record.project_name,
-                    "cwd": record.cwd,
-                    "status": record.status.value,
-                    "created_at": record.created_at,
-                    "finished_at": record.finished_at,
-                    "return_code": record.return_code,
-                    "status_message": record.status_message,
-                    "timeout_seconds": record.timeout_seconds,
-                    "elapsed_seconds": runtime.elapsed_seconds,
-                    "seconds_since_last_output": runtime.seconds_since_last_output,
-                    "memory_bytes": runtime.memory_bytes,
-                    "cpu_seconds": runtime.cpu_seconds,
-                    "process_count": runtime.process_count,
-                }
-            )
-
-        return {
-            "status": "success",
-            "jobs": jobs,
-            "running_jobs": running_jobs,
-            "terminal_jobs": terminal_jobs,
-            "max_concurrent_jobs": self._job_manager.max_concurrent_jobs,
-            "persistence": {
-                "survives_serena_restart": persistence.survives_serena_restart,
-                "survives_logout": persistence.survives_logout,
-                "survives_reboot": persistence.survives_reboot,
-                "linger_enabled": persistence.linger_enabled,
-            },
-        }
-
-    def get_output(self, job_id: str, mode: str, cursor: str | None) -> dict[str, Any]:
-        """Returns one bounded output page for a retained durable job."""
-        if mode == "latest":
-            if cursor is not None:
-                raise ValueError("latest output does not accept a cursor")
-            snapshot = self._job_manager.get_job(job_id)
-        elif mode == "after":
-            if cursor is None:
-                raise ValueError("after output requires a cursor")
-            snapshot = self._job_manager.get_job(job_id, cursor=cursor)
-        elif mode == "before":
-            if cursor is None:
-                raise ValueError("before output requires a cursor")
-            snapshot = self._job_manager.get_job_output_before(job_id, cursor)
-        else:
-            raise ValueError(f"Unsupported output mode {mode!r}")
-
-        chunk = snapshot.output
-        if chunk is None:
-            raise RuntimeError(f"No output payload available for job {job_id!r}")
-        return {
-            "status": "success",
-            "job_id": snapshot.record.job_id,
-            "job_status": snapshot.record.status.value,
-            "output": chunk.output,
-            "newest_cursor": chunk.next_cursor,
-            "oldest_cursor": chunk.oldest_cursor,
-            "has_more_output": chunk.has_more_output,
-            "has_earlier_output": chunk.has_earlier_output,
-            "output_truncated": chunk.output_truncated,
-            "earlier_output_omitted": chunk.earlier_output_omitted,
-            "cursor_reset": chunk.cursor_reset,
-        }
-
-
 class DashboardSerenaActivityOverview:
-    """Provides retained ChatGPT-session Serena activity for the operator dashboard."""
+    """Adapts typed ``ActivityView`` snapshots to the legacy dashboard HTTP contract."""
 
-    def __init__(
-        self,
-        archive: DashboardActivityArchive,
-        job_overview: DashboardJobOverview,
-        git_metrics_source: GitMetricsSource | None = None,
-    ) -> None:
-        self._archive = archive
-        self._job_overview = job_overview
-        self._git_metrics_source = git_metrics_source
-        self._activity_formatter = ActivityDetailFormatter()
-        self._jobs_cache_lock = threading.Lock()
-        self._jobs_cache_at = 0.0
-        self._jobs_cache: dict[str, dict[str, Any]] = {}
+    def __init__(self, activity_view: ActivityView) -> None:
+        self._activity_view = activity_view
+
+    def dashboard_state(self, include_state: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Returns Serena panels and global running jobs from one canonical overview query."""
+        overview = self._activity_view.dashboard_overview()
+        return self._panels_payload(overview, include_state=include_state), self._running_jobs_payload(overview)
 
     def get_panels(self, include_state: bool = False) -> dict[str, Any]:
-        """Returns retained Serena session panels newest first by creation time."""
-        jobs = self._jobs_by_id()
-        panels: list[dict[str, Any]] = []
-        for summary in self._archive.list_session_summaries():
-            job_ids = list(summary.job_ids)
-            active = summary.has_active_calls or any(jobs.get(job_id, {}).get("status") == "running" for job_id in job_ids)
-            git_metrics = self._git_metrics(summary.project_name)
-            panel = {
-                "panel_id": summary.panel_id,
-                "project_name": summary.project_name,
-                "display_name": summary.display_name,
-                "started_at": summary.started_at,
-                "updated_at": summary.updated_at,
-                "revision": self._summary_revision(summary, jobs, git_metrics),
-                "active": active,
-            }
-            if include_state:
-                panel["initial_state"] = self._summary_panel_state(summary, jobs, git_metrics)
-            panels.append(panel)
-        panels.sort(key=lambda item: (float(item.get("started_at") or 0.0), str(item["panel_id"])), reverse=True)
-        return {"status": "success", "panels": panels}
+        """Returns every retained Serena session from one compact overview query."""
+        return self._panels_payload(self._activity_view.dashboard_overview(), include_state=include_state)
 
     def get_running_jobs(self) -> dict[str, Any]:
-        """Returns the current global running-job summary for the dashboard metadata panel."""
-        running = [item for item in self._jobs_by_id().values() if item.get("status") == "running"]
-        return {
-            "status": "success",
-            "jobs": running,
-            "running_jobs": len(running),
-            "max_concurrent_jobs": self._job_overview.max_concurrent_jobs,
-        }
+        """Returns current global running-job metadata without runtime telemetry."""
+        return self._running_jobs_payload(self._activity_view.dashboard_overview())
 
     def panel_id_for_job(self, job_id: str) -> str | None:
-        """:return: retained dashboard panel containing ``job_id``, when one exists."""
-        for summary in self._archive.list_session_summaries():
-            if job_id in summary.job_ids:
-                return summary.panel_id
-        return None
+        """Resolves a dashboard panel directly from canonical durable-job ownership."""
+        return self._activity_view.panel_id_for_job(job_id)
 
     def get_panel(self, panel_id: str, changed_since: float | None = None) -> dict[str, Any]:
-        """Returns one retained Serena session, optionally restricted to changes after ``changed_since``."""
-        session = self._archive.get_session(panel_id)
-        git_metrics = self._git_metrics(str(session.get("project_name") or ""))
-        return self._panel_state(session, self._jobs_by_id(), git_metrics, changed_since=changed_since)
+        """Returns one retained Serena session through the legacy panel transport shape."""
+        snapshot = self._activity_view.for_session(panel_id)
+        payload = self._snapshot_payload(snapshot)
+        if changed_since is not None:
+            payload["calls"] = [
+                call
+                for call in payload["calls"]
+                if max(float(call.get("started_at") or 0.0), float(call.get("finished_at") or 0.0)) > changed_since
+            ]
+            payload["jobs"] = [
+                job
+                for job in payload["jobs"]
+                if job.get("status") == "running"
+                or max(float(job.get("started_at") or 0.0), float(job.get("finished_at") or 0.0)) > changed_since
+            ]
+            payload["partial"] = True
+        return payload
 
-    def _summary_panel_state(
-        self,
-        summary: DashboardActivitySessionSummary,
-        jobs: dict[str, dict[str, Any]],
-        git_metrics: GitLineMetrics,
-    ) -> dict[str, Any]:
-        """Returns bounded first-paint state for one retained session."""
-        visible_jobs = [self._job_payload(jobs[job_id]) for job_id in summary.job_ids if job_id in jobs]
-        running_jobs = [job for job in visible_jobs if job.get("status") == "running"]
-        terminal_jobs = [job for job in visible_jobs if job.get("status") != "running"]
-
-        latest_timestamps: list[float] = []
-        if summary.latest_call is not None:
-            latest_call_at = (
-                summary.latest_call.get("finished_at") or summary.latest_call.get("started_at") or summary.latest_call.get("submitted_at")
-            )
-            if isinstance(latest_call_at, int | float):
-                latest_timestamps.append(float(latest_call_at))
-        for job in visible_jobs:
-            job_at = job.get("finished_at") or job.get("started_at")
-            if isinstance(job_at, int | float):
-                latest_timestamps.append(float(job_at))
-        recently_active = (
-            summary.has_active_calls or bool(running_jobs) or (latest_timestamps and time.time() - max(latest_timestamps) <= 5 * 60)
-        )
-
-        selected_calls = summary.recent_calls if recently_active else ((summary.latest_call,) if summary.latest_call is not None else ())
-        payload_jobs = [*running_jobs, *terminal_jobs[-4:]] if recently_active else terminal_jobs[-1:]
-        calls = [self._call_payload(call) for call in selected_calls]
-        return {
-            "run_id": summary.panel_id,
-            "project_name": summary.project_name,
-            "session_title": summary.display_name,
-            "started_at": summary.started_at,
-            "updated_at": summary.updated_at,
-            "revision": self._summary_revision(summary, jobs, git_metrics),
-            "superseded": False,
-            "summary_only": True,
-            "partial": False,
-            "initial_expanded": bool(recently_active),
-            "tool_count": summary.tool_count,
-            "job_count": len(visible_jobs),
-            "submission_span_seconds": summary.submission_span_seconds,
-            "git_additions": git_metrics.additions,
-            "git_deletions": git_metrics.deletions,
-            "git_ahead_commits": git_metrics.ahead_commits,
-            "calls": calls,
-            "jobs": payload_jobs,
-        }
-
-    def _panel_state(
-        self,
-        session: dict[str, Any],
-        jobs: dict[str, dict[str, Any]],
-        git_metrics: GitLineMetrics,
-        *,
-        summary: bool = False,
-        changed_since: float | None = None,
-    ) -> dict[str, Any]:
-        """Returns one retained session snapshot, optionally compact or incremental."""
-        calls = list(session.get("calls", []))
-        job_ids = self._session_job_ids(session)
-        visible_jobs = [self._job_payload(jobs[job_id]) for job_id in job_ids if job_id in jobs]
-
-        # keep inactive bootstrap state tiny; the full history remains available on expansion
-        if summary:
-            payload_calls = calls[-1:]
-            payload_jobs = visible_jobs[-1:]
-        elif changed_since is not None:
-            payload_calls = [call for call in calls if self._call_changed_after(call, changed_since)]
-            running_jobs = [job for job in visible_jobs if job.get("status") == "running"]
-            terminal_jobs = [job for job in visible_jobs if job.get("status") != "running"]
-            payload_jobs = [*running_jobs, *terminal_jobs[-4:]]
-        else:
-            payload_calls = calls
-            payload_jobs = visible_jobs
-
-        return {
-            "run_id": session["panel_id"],
-            "project_name": session.get("project_name") or "",
-            "session_title": session.get("display_name") or "",
-            "started_at": session.get("started_at"),
-            "updated_at": float(session.get("updated_at") or 0.0),
-            "revision": self._panel_revision(session, jobs, job_ids, git_metrics),
-            "superseded": False,
-            "summary_only": summary,
-            "partial": changed_since is not None and not summary,
-            "tool_count": len(calls),
-            "job_count": len(visible_jobs),
-            "submission_span_seconds": DashboardActivitySessionSummary.compute_submission_span(calls),
-            "git_additions": git_metrics.additions,
-            "git_deletions": git_metrics.deletions,
-            "git_ahead_commits": git_metrics.ahead_commits,
-            "calls": [self._call_payload(call) for call in payload_calls],
-            "jobs": payload_jobs,
-        }
-
-    @staticmethod
-    def _call_changed_after(call: dict[str, Any], timestamp: float) -> bool:
-        """Returns whether one call may have changed after ``timestamp``."""
-        if call.get("status") in {"running", "queued"}:
-            return True
-        for key in ("submitted_at", "started_at", "finished_at"):
-            value = call.get(key)
-            if isinstance(value, int | float) and float(value) > timestamp:
-                return True
-        return False
-
-    @staticmethod
-    def _summary_revision(
-        summary: DashboardActivitySessionSummary,
-        jobs: dict[str, dict[str, Any]],
-        git_metrics: GitLineMetrics,
-    ) -> str:
-        """Returns a compact revision from retained-session, Git, and visible-job state."""
-        parts = [
-            str(summary.updated_at),
-            str(git_metrics.additions),
-            str(git_metrics.deletions),
-            str(git_metrics.ahead_commits),
-        ]
-        for job_id in summary.job_ids:
-            item = jobs.get(job_id)
-            if item is None:
-                continue
-            parts.extend(
-                (
-                    job_id,
-                    str(item.get("status") or ""),
-                    str(item.get("finished_at") or ""),
-                    str(item.get("return_code") if item.get("return_code") is not None else ""),
-                )
-            )
-        return hashlib.blake2s("\x1f".join(parts).encode("utf-8"), digest_size=8).hexdigest()
-
-    @staticmethod
-    def _panel_revision(
-        session: dict[str, Any],
-        jobs: dict[str, dict[str, Any]],
-        job_ids: list[str],
-        git_metrics: GitLineMetrics,
-    ) -> str:
-        """Returns a compact revision that changes with visible tool, Git, or job state."""
-        parts = [
-            str(session.get("updated_at") or 0.0),
-            str(git_metrics.additions),
-            str(git_metrics.deletions),
-            str(git_metrics.ahead_commits),
-        ]
-        for job_id in job_ids:
-            item = jobs.get(job_id)
-            if item is None:
-                continue
-            parts.extend(
-                (
-                    job_id,
-                    str(item.get("status") or ""),
-                    str(item.get("finished_at") or ""),
-                    str(item.get("return_code") if item.get("return_code") is not None else ""),
-                )
-            )
-        return hashlib.blake2s("\x1f".join(parts).encode("utf-8"), digest_size=8).hexdigest()
-
-    def _git_metrics(self, project_name: str) -> GitLineMetrics:
-        """Returns current Git metrics for a panel project, defaulting to a clean state."""
-        if self._git_metrics_source is None or not project_name:
-            return GitLineMetrics()
-        metrics = self._git_metrics_source.get_project_git_metrics(project_name)
-        return metrics or GitLineMetrics()
+    def get_session_document(self, panel_id: str, expanded_entry_id: str | None = None) -> dict[str, Any]:
+        """Returns the new complete selected-session document with optional expanded detail."""
+        snapshot = self._activity_view.for_session(panel_id, expanded_entry_id=expanded_entry_id)
+        payload = self._snapshot_payload(snapshot)
+        payload["panel_id"] = snapshot.panel_id
+        payload["session_id"] = snapshot.session_id
+        payload["expanded_call"] = self._call_detail_payload(snapshot.expanded_call) if snapshot.expanded_call is not None else None
+        payload["expanded_job"] = self._job_detail_payload(snapshot.expanded_job) if snapshot.expanded_job is not None else None
+        return payload
 
     def get_call_detail(self, panel_id: str, call_id: str) -> dict[str, Any]:
-        """Returns one retained tool call with its persisted canonical result unchanged."""
-        call = self._archive.get_call(panel_id, call_id)
-        media = ActivityMedia.from_storage_dict(call.get("media"))
-        parameters = str(call.get("parameters") or "")
-        raw_result = call.get("error") or call.get("result")
-        return {
-            "call_id": call_id,
-            "tool_name": call.get("tool_name") or "",
-            "status": call.get("status") or "completed",
-            "arguments": parameters or "{}",
-            "structured_arguments": self._activity_formatter.parse_parameters(parameters),
-            "result": None if media is not None else raw_result,
-            "structured_result": None if media is not None else self._activity_formatter.parse_result(raw_result),
-            "media": media.public_dict() if media is not None else None,
-        }
+        """Returns call detail through the canonical selected-session view."""
+        snapshot = self._activity_view.for_session(panel_id, expanded_entry_id=call_id)
+        detail = snapshot.expanded_call
+        if detail is None:
+            raise KeyError(call_id)
+        return self._call_detail_payload(detail)
 
     def get_call_media(self, panel_id: str, call_id: str) -> DashboardMediaContent:
         """Returns retained media bytes for one dashboard activity call."""
-        call = self._archive.get_call(panel_id, call_id)
-        media = ActivityMedia.from_storage_dict(call.get("media"))
+        snapshot = self._activity_view.for_session(panel_id, expanded_entry_id=call_id)
+        detail = snapshot.expanded_call
+        media = detail.media if detail is not None else None
         if media is None:
             raise ValueError("Activity call has no retained media")
         link = ResourceLink(
@@ -455,88 +166,206 @@ class DashboardSerenaActivityOverview:
         )
 
     def get_job_detail(self, job_id: str) -> dict[str, Any]:
-        """Returns one retained durable job in the inline-widget detail shape."""
-        jobs = self._jobs_by_id()
-        item = jobs.get(job_id)
-        if item is None:
+        """Returns one job detail through canonical job-to-session ownership."""
+        panel_id = self._activity_view.panel_id_for_job(job_id)
+        if panel_id is None:
             raise KeyError(job_id)
-        try:
-            output = self._job_overview.get_output(job_id, "latest", None)
-        except (KeyError, RuntimeError, ValueError):
-            output = {"output": "", "has_earlier_output": False, "earlier_output_omitted": False}
-        return {
-            "job_id": job_id,
-            "status": item.get("status"),
-            "project": item.get("project"),
-            "elapsed_seconds": item.get("elapsed_seconds"),
-            "seconds_since_last_output": item.get("seconds_since_last_output"),
-            "memory_bytes": item.get("memory_bytes"),
-            "cpu_seconds": item.get("cpu_seconds"),
-            "process_count": item.get("process_count"),
-            "timeout_seconds": item.get("timeout_seconds"),
-            "return_code": item.get("return_code"),
-            "output": output.get("output") or "",
-            "has_earlier_output": bool(output.get("has_earlier_output")),
-            "earlier_output_omitted": bool(output.get("earlier_output_omitted")),
-        }
+        snapshot = self._activity_view.for_session(panel_id, expanded_entry_id=job_id)
+        detail = snapshot.expanded_job
+        if detail is None:
+            raise KeyError(job_id)
+        return self._job_detail_payload(detail)
 
-    def _jobs_by_id(self) -> dict[str, dict[str, Any]]:
-        """Returns briefly cached durable jobs indexed by job identifier."""
-        now = time.monotonic()
-        with self._jobs_cache_lock:
-            if self._jobs_cache and now - self._jobs_cache_at < 0.5:
-                return self._jobs_cache
+    def _panels_payload(self, overview: ActivityOverview, *, include_state: bool) -> dict[str, Any]:
+        """Converts the typed overview to the current outer-dashboard discovery contract."""
+        running_by_session: dict[str, list[dict[str, Any]]] = {}
+        for job in overview.running_jobs:
+            if job.session_id is not None:
+                running_by_session.setdefault(job.session_id, []).append(self._job_payload(job))
 
-            payload = self._job_overview.get_jobs()
-            self._jobs_cache = {str(item["job_id"]): item for item in payload.get("jobs", [])}
-            self._jobs_cache_at = time.monotonic()
-            return self._jobs_cache
+        panels: list[dict[str, Any]] = []
+        for summary in overview.sessions:
+            panel: dict[str, Any] = {
+                "panel_id": summary.panel_id,
+                "project_name": summary.project_name,
+                "display_name": summary.display_name,
+                "started_at": summary.started_at,
+                "updated_at": summary.updated_at,
+                "revision": self._summary_revision(summary, running_by_session.get(summary.session_id, [])),
+                "active": summary.active,
+            }
+            if include_state:
+                latest_calls = [self._entry_payload(summary.latest_call)] if summary.latest_call is not None else []
+                jobs = running_by_session.get(summary.session_id, [])
+                panel["initial_state"] = {
+                    "run_id": summary.panel_id,
+                    "project_name": summary.project_name,
+                    "session_title": summary.display_name,
+                    "started_at": summary.started_at,
+                    "updated_at": summary.updated_at,
+                    "revision": panel["revision"],
+                    "superseded": False,
+                    "summary_only": True,
+                    "partial": False,
+                    "initial_expanded": summary.active,
+                    "tool_count": summary.tool_count,
+                    "job_count": summary.job_count,
+                    "submission_span_seconds": summary.submission_span_seconds,
+                    "git_additions": summary.git_metrics.additions,
+                    "git_deletions": summary.git_metrics.deletions,
+                    "git_ahead_commits": summary.git_metrics.ahead_commits,
+                    "calls": latest_calls,
+                    "jobs": jobs,
+                }
+            panels.append(panel)
+        return {"status": "success", "panels": panels}
 
     @staticmethod
-    def _session_job_ids(session: dict[str, Any]) -> list[str]:
-        """Returns unique durable jobs launched from one retained ChatGPT session."""
-        result: list[str] = []
-        for call in session.get("calls", []):
-            job_id = call.get("job_id")
-            if job_id and job_id not in result:
-                result.append(str(job_id))
-        return result
-
-    def _call_payload(self, call: dict[str, Any]) -> dict[str, Any]:
-        """Returns one persistent call in the inline-widget list shape."""
-        tool_name = call.get("tool_name") or ""
-        parameters = call.get("parameters")
-        summary = self._activity_formatter.format_parameters(tool_name, parameters if isinstance(parameters, str) else None)
-
-        # re-derive historical entries from retained parameters; fall back to stored fields when parameters are unavailable
-        detail = summary.detail if summary.detail or summary.scope else call.get("detail") or ""
-        scope = summary.scope if summary.detail or summary.scope else call.get("scope") or ""
+    def _running_jobs_payload(overview: ActivityOverview) -> dict[str, Any]:
+        """Converts lightweight current running jobs to dashboard metadata."""
+        jobs = [DashboardSerenaActivityOverview._job_payload(job) for job in overview.running_jobs]
         return {
-            "call_id": call.get("call_id"),
-            "tool_name": tool_name,
-            "detail": detail,
-            "scope": scope,
-            "status": call.get("status") or "completed",
-            "submitted_at": call.get("submitted_at") or call.get("started_at"),
-            "started_at": call.get("started_at") or call.get("submitted_at"),
-            "finished_at": call.get("finished_at"),
-            "job_id": call.get("job_id"),
+            "status": "success",
+            "jobs": jobs,
+            "running_jobs": len(jobs),
+            "max_concurrent_jobs": overview.max_concurrent_jobs,
         }
 
     @staticmethod
-    def _job_payload(item: dict[str, Any]) -> dict[str, Any]:
-        """Returns one dashboard job in the inline-widget list shape."""
-        created_at = item.get("created_at")
-        finished_at = item.get("finished_at")
+    def _snapshot_payload(snapshot: ActivitySnapshot) -> dict[str, Any]:
+        """Converts one complete typed session snapshot to the legacy renderer shape."""
+        calls = [DashboardSerenaActivityOverview._entry_payload(call) for call in snapshot.calls]
+        jobs = [DashboardSerenaActivityOverview._job_payload(job) for job in snapshot.jobs]
+        submission_times = [call.started_at for call in snapshot.calls]
+        submission_span = max(submission_times) - min(submission_times) if submission_times else None
+        revision = DashboardSerenaActivityOverview._revision(
+            snapshot.updated_at,
+            [(call.call_id, call.status, call.finished_at, call.job_id) for call in snapshot.calls],
+            [(job.job_id, job.status, job.finished_at) for job in snapshot.jobs],
+            snapshot.git_metrics.additions,
+            snapshot.git_metrics.deletions,
+            snapshot.git_metrics.ahead_commits,
+        )
         return {
-            "job_id": item.get("job_id"),
-            "label": item.get("label") or "background job",
-            "project": item.get("project") or "",
-            "status": item.get("status") or "completed",
-            "started_at": datetime.fromisoformat(created_at).timestamp() if isinstance(created_at, str) else time.time(),
-            "finished_at": datetime.fromisoformat(finished_at).timestamp() if isinstance(finished_at, str) else None,
-            "current_turn": True,
+            "run_id": snapshot.run_id or snapshot.panel_id,
+            "project_name": snapshot.project_name,
+            "session_title": snapshot.session_title,
+            "started_at": snapshot.started_at,
+            "updated_at": snapshot.updated_at,
+            "revision": revision,
+            "superseded": snapshot.superseded,
+            "summary_only": False,
+            "partial": False,
+            "tool_count": len(calls),
+            "job_count": len(jobs),
+            "submission_span_seconds": submission_span,
+            "git_additions": snapshot.git_metrics.additions,
+            "git_deletions": snapshot.git_metrics.deletions,
+            "git_ahead_commits": snapshot.git_metrics.ahead_commits,
+            "calls": calls,
+            "jobs": jobs,
         }
+
+    @staticmethod
+    def _entry_payload(call: Any) -> dict[str, Any]:
+        """Converts one typed execution summary without including historical bodies."""
+        payload: dict[str, Any] = {
+            "call_id": call.call_id,
+            "tool_name": call.tool_name,
+            "detail": call.detail,
+            "scope": call.scope,
+            "project_name": call.project_name,
+            "submitted_at": call.started_at,
+            "started_at": call.started_at,
+            "finished_at": call.finished_at,
+            "status": call.status,
+        }
+        if call.job_id is not None:
+            payload["job_id"] = call.job_id
+        if call.job_label is not None:
+            payload["job_label"] = call.job_label
+        return payload
+
+    @staticmethod
+    def _job_payload(job: Any) -> dict[str, Any]:
+        """Converts one lightweight typed durable-job summary."""
+        return {
+            "job_id": job.job_id,
+            "label": job.label,
+            "project": job.project,
+            "status": job.status,
+            "started_at": job.started_at,
+            "finished_at": job.finished_at,
+            "current_turn": job.current_turn,
+        }
+
+    @staticmethod
+    def _call_detail_payload(detail: ActivityCallDetail) -> dict[str, Any]:
+        """Converts one typed call detail at the HTTP boundary."""
+        return {
+            "call_id": detail.call_id,
+            "tool_name": detail.tool_name,
+            "status": detail.status,
+            "arguments": detail.arguments,
+            "structured_arguments": detail.arguments,
+            "result": detail.result,
+            "structured_result": detail.structured_result,
+            "error": detail.error,
+            "media": detail.media.public_dict() if detail.media is not None else None,
+        }
+
+    @staticmethod
+    def _job_detail_payload(detail: ActivityJobDetail) -> dict[str, Any]:
+        """Converts one typed job detail at the HTTP boundary."""
+        return {
+            "job_id": detail.job_id,
+            "label": detail.label,
+            "project": detail.project,
+            "cwd": detail.cwd,
+            "status": detail.status,
+            "status_message": detail.status_message,
+            "return_code": detail.return_code,
+            "timeout_seconds": detail.timeout_seconds,
+            "elapsed_seconds": detail.elapsed_seconds,
+            "seconds_since_last_output": detail.seconds_since_last_output,
+            "memory_bytes": detail.memory_bytes,
+            "cpu_seconds": detail.cpu_seconds,
+            "process_count": detail.process_count,
+            "output": detail.output,
+            "output_truncated": detail.output_truncated,
+            "earlier_output_omitted": detail.earlier_output_omitted,
+            "has_earlier_output": detail.has_earlier_output,
+            "cursor_reset": detail.cursor_reset,
+        }
+
+    @staticmethod
+    def _summary_revision(summary: Any, running_jobs: list[dict[str, Any]]) -> str:
+        """Returns a temporary legacy browser revision outside the canonical view model."""
+        latest = summary.latest_call
+        return DashboardSerenaActivityOverview._revision(
+            summary.updated_at,
+            summary.active,
+            summary.tool_count,
+            summary.job_count,
+            (
+                latest.call_id,
+                latest.status,
+                latest.finished_at,
+                latest.job_id,
+            )
+            if latest is not None
+            else None,
+            [(job["job_id"], job["status"], job["finished_at"]) for job in running_jobs],
+            summary.git_metrics.additions,
+            summary.git_metrics.deletions,
+            summary.git_metrics.ahead_commits,
+        )
+
+    @staticmethod
+    def _revision(*parts: Any) -> str:
+        """Returns a deterministic short revision for the legacy iframe dirty protocol."""
+        serialized = json.dumps(parts, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
 
 
 class DashboardOrchestratorOverview:
@@ -618,12 +447,12 @@ class CustomDashboard:
         self._session_overview = DashboardSessionOverview(agent)
         self._memory_overview = DashboardMemoryOverview(agent)
         self._activity_archive = DashboardActivityArchive(agent.execution_store)
-        self._job_overview = DashboardJobOverview(agent.job_manager)
-        self._serena_activity_overview = DashboardSerenaActivityOverview(
-            self._activity_archive,
-            self._job_overview,
+        self._activity_view = ActivityView(
+            execution_store=agent.execution_store,
+            job_source=agent.job_manager,
             git_metrics_source=agent,
         )
+        self._serena_activity_overview = DashboardSerenaActivityOverview(self._activity_view)
         self._orchestrator_overview = DashboardOrchestratorOverview()
         self._push_notifier = WebPushNotifier()
         self._register_routes(app)
@@ -634,11 +463,11 @@ class CustomDashboard:
 
     def dashboard_state(self, *, include_state: bool = False) -> dict[str, Any]:
         """Returns the complete dashboard state payload for API and first-paint bootstrap use."""
-        serena = self._serena_activity_overview.get_panels(include_state=include_state)
+        serena, jobs = self._serena_activity_overview.dashboard_state(include_state=include_state)
         return {
             "status": "success",
             "session": self._session_overview.get_session(),
-            "jobs": self._serena_activity_overview.get_running_jobs(),
+            "jobs": jobs,
             "serena": serena,
             "orchestrator": self._orchestrator_overview.get_panels(),
         }
@@ -732,6 +561,17 @@ class CustomDashboard:
         def get_serena_panels() -> Response:
             include_state = request.args.get("include_state") == "1"
             payload = self._serena_activity_overview.get_panels(include_state=include_state)
+            return self._conditional_json_response(app, payload)
+
+        @app.route("/dashboard/api/serena/sessions/<panel_id>", methods=["GET"])
+        def get_serena_session_document(panel_id: str) -> Response:
+            expanded = request.args.get("expanded") or None
+            try:
+                payload = self._serena_activity_overview.get_session_document(panel_id, expanded_entry_id=expanded)
+            except ValueError:
+                abort(400)
+            except KeyError:
+                abort(404)
             return self._conditional_json_response(app, payload)
 
         @app.route("/dashboard/api/serena/panels/<panel_id>", methods=["GET"])

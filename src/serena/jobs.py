@@ -1017,6 +1017,38 @@ class JobManager:
         output = self._backend.read_output(record, cursor, self._output_char_limit, output_mode=output_mode)
         return JobSnapshot(record=record, runtime=self._backend.runtime_info(record), output=output)
 
+    def get_job_record(self, job_id: str) -> JobRecord:
+        """Returns lightweight current metadata for one job without runtime telemetry or output."""
+        record = self._reconcile_record(self._store.read(job_id))
+        self._sync_retention_observer()
+        return record
+
+    def get_job_records(self, job_ids: set[str]) -> list[JobRecord]:
+        """Returns current lightweight metadata for selected jobs with one retention sync."""
+        if not job_ids:
+            return []
+        records: list[JobRecord] = []
+        for job_id in job_ids:
+            try:
+                records.append(self._reconcile_record(self._store.read(job_id)))
+            except KeyError:
+                continue
+        self._sync_retention_observer()
+        return records
+
+    def list_running_jobs(self) -> list[JobRecord]:
+        """Returns current running-job metadata without inspecting terminal-job telemetry."""
+        self._store.cleanup_orphan_command_files()
+        stored_records = self._store.list_records()
+        current_by_id = {record.job_id: record for record in stored_records}
+        for record in stored_records:
+            if record.status is JobStatus.RUNNING:
+                current_by_id[record.job_id] = self._reconcile_record(record)
+        current_records = list(current_by_id.values())
+        self._sync_retention_observer(current_records)
+        running = [record for record in current_records if record.status is JobStatus.RUNNING]
+        return sorted(running, key=lambda record: record.created_at, reverse=True)
+
     def get_job_output_before(self, job_id: str, cursor: str) -> JobSnapshot:
         """Return bounded output immediately preceding ``cursor`` for one job."""
         record = self._reconcile_record(self._store.read(job_id))

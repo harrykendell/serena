@@ -57,6 +57,34 @@ class _CountingJobManager:
         )
         return [JobSnapshot(record=record, runtime=runtime) for record in records]
 
+    def list_running_jobs(self) -> list[JobRecord]:
+        """Returns running metadata while counting one lightweight overview query."""
+        self.snapshot_queries += 1
+        return [record for record in self._records if record.status is JobStatus.RUNNING]
+
+    def get_job_record(self, job_id: str) -> JobRecord:
+        """Returns one lightweight retained job record without telemetry."""
+        try:
+            return next(record for record in self._records if record.job_id == job_id)
+        except StopIteration:
+            raise KeyError(job_id) from None
+
+    def get_job_records(self, job_ids: set[str]) -> list[JobRecord]:
+        """Returns selected lightweight retained job records without telemetry."""
+        return [record for record in self._records if record.job_id in job_ids]
+
+    def get_job(self, job_id: str) -> JobSnapshot:
+        """Returns synthetic detail while counting the telemetry work it represents."""
+        self.telemetry_operations += 1
+        runtime = JobRuntimeInfo(
+            elapsed_seconds=12.0,
+            seconds_since_last_output=1.0,
+            memory_bytes=64 * 1024 * 1024,
+            cpu_seconds=2.5,
+            process_count=1,
+        )
+        return JobSnapshot(record=self.get_job_record(job_id), runtime=runtime)
+
     @staticmethod
     def persistence_info() -> JobPersistenceInfo:
         """Returns stable synthetic persistence metadata."""
@@ -153,15 +181,12 @@ class _Case:
 
             for call_index in range(self._calls_per_session):
                 execution_id = f"execution-{session_index:04d}-{call_index:02d}"
-                arguments = json.dumps(
-                    {
-                        "relative_path": f"src/synthetic/{session_index:04d}.py",
-                        "needle": "synthetic-target",
-                        "payload": argument_padding,
-                        "call_index": call_index,
-                    },
-                    separators=(",", ":"),
-                )
+                arguments = {
+                    "relative_path": f"src/synthetic/{session_index:04d}.py",
+                    "needle": "synthetic-target",
+                    "payload": argument_padding,
+                    "call_index": call_index,
+                }
                 result = json.dumps(
                     {
                         "status": "success",
@@ -229,11 +254,6 @@ class _Case:
         for _ in range(samples):
             self.agent.reset_counts()
             self.jobs.reset_counts()
-            # force the legacy presentation-layer job cache cold for an attributable request
-            overview = self.dashboard._serena_activity_overview
-            overview._jobs_cache = {}
-            overview._jobs_cache_at = 0.0
-
             started = time.perf_counter()
             response = self.client.get("/dashboard/api/state")
             elapsed_ms.append((time.perf_counter() - started) * 1000.0)
@@ -258,7 +278,7 @@ class _Case:
             "response_bytes": int(statistics.median(payload_bytes)),
             "git_cache_reads_per_request": int(statistics.median(git_reads)),
             "git_refreshes_per_request": int(statistics.median(git_refreshes)),
-            "job_snapshot_queries_per_request": int(statistics.median(job_queries)),
+            "running_job_metadata_queries_per_request": int(statistics.median(job_queries)),
             "job_telemetry_operations_per_request": int(statistics.median(telemetry_operations)),
         }
 

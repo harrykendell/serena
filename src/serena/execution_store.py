@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -11,14 +12,15 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from serena.retention import DEFAULT_SESSION_RETENTION, JobRetentionState, SessionRetentionPolicy
 from serena.storage_compression import RetainedTextCompression
 from serena.structured_output import StructuredOutputCompactor
 
 _FILE_RESOURCE_RE = re.compile(r"serena-file://export/([0-9a-f]{64}|[0-9a-f]{48})(?![0-9a-f])")
-_STATE_VERSION = 2
+_STATE_VERSION = 3
+_MIN_MIGRATABLE_STATE_VERSION = 2
 
 
 @dataclass
@@ -41,7 +43,7 @@ class ExecutionRecord:
     session_id: str
     project_name: str
     tool_name: str
-    arguments: str
+    arguments: dict[str, Any]
     started_at: float
     status: str = "running"
     finished_at: float | None = None
@@ -56,6 +58,22 @@ class ExecutionRecord:
     durable_job_label: str | None = None
 
 
+@dataclass(frozen=True)
+class ExecutionSummaryRecord:
+    """Bounded execution facts required by activity discovery and collapsed rows."""
+
+    execution_id: str
+    session_id: str
+    project_name: str
+    tool_name: str
+    arguments: dict[str, Any]
+    started_at: float
+    status: str
+    finished_at: float | None
+    durable_job_id: str | None
+    durable_job_label: str | None
+
+
 @dataclass
 class ActivityPanelRun:
     """Persistent grouping of execution identifiers shown by one inline activity panel."""
@@ -66,8 +84,36 @@ class ActivityPanelRun:
     started_at: float
     superseded: bool = False
     execution_ids: list[str] = field(default_factory=list)
-    job_ids: list[str] = field(default_factory=list)
-    retained_jobs: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SessionExecutionSummary:
+    """Lightweight retained-session facts backed by the execution index."""
+
+    session_id: str
+    panel_id: str
+    display_name: str
+    project_name: str
+    created_at: float
+    updated_at: float
+    execution_count: int
+    running_execution_count: int
+    durable_job_count: int
+    first_execution_started_at: float | None
+    latest_execution_started_at: float | None
+    latest_execution: ExecutionSummaryRecord | None
+
+
+@dataclass
+class _SessionExecutionIndex:
+    """Rebuildable execution identifiers and counts for one retained session."""
+
+    execution_ids: list[str] = field(default_factory=list)
+    running_execution_count: int = 0
+    durable_job_count: int = 0
+    first_execution_started_at: float | None = None
+    latest_execution_started_at: float | None = None
+    latest_execution_id: str | None = None
 
 
 class ExecutionStore:
@@ -94,11 +140,16 @@ class ExecutionStore:
         self._activity_runs: dict[str, ActivityPanelRun] = {}
         self._current_run_by_session: dict[str, str] = {}
         self._running_job_sessions: dict[str, str] = {}
+        self._session_execution_index: dict[str, _SessionExecutionIndex] = {}
+        self._job_session_index: dict[str, str] = {}
         self._save_batch_depth = 0
         self._save_pending = False
-        self._load()
+
+        migrated = self._load()
         self._interrupt_stale_state()
-        if self._prune():
+        pruned = self._prune()
+        self._rebuild_session_execution_index()
+        if migrated or pruned:
             self._save()
         if use_default_root:
             self._cleanup_unreferenced_artifacts()
@@ -117,9 +168,25 @@ class ExecutionStore:
         """Returns the stable opaque dashboard identifier for ``session_id``."""
         return uuid.uuid5(uuid.NAMESPACE_URL, f"serena-dashboard:{session_id}").hex[:16]
 
+    def panel_id_for_job(self, job_id: str) -> str | None:
+        """Returns the retained dashboard panel owning ``job_id`` from the rebuildable index."""
+        with self._lock:
+            session_id = self._job_session_index.get(job_id)
+            if session_id is None or session_id not in self._sessions:
+                return None
+            return self.panel_id_for_session(session_id)
+
+    @staticmethod
+    def compact_arguments(value: dict[str, Any]) -> dict[str, Any]:
+        """Returns bounded JSON-safe keyword arguments without pre-serializing them."""
+        compacted = StructuredOutputCompactor().compact(value, max_chars=8_000)
+        if isinstance(compacted, dict):
+            return cast(dict[str, Any], compacted)
+        return {"_serena_truncated": True}
+
     @staticmethod
     def serialize_auxiliary_value(value: object) -> str:
-        """Serializes one bounded auxiliary execution field such as arguments or errors."""
+        """Serializes one bounded auxiliary text field such as an unexpected error."""
         return StructuredOutputCompactor().serialize_for_storage(value, max_chars=8_000)
 
     def start_execution(
@@ -129,7 +196,7 @@ class ExecutionStore:
         session_id: str,
         project_name: str,
         tool_name: str,
-        arguments: str,
+        arguments: dict[str, Any],
         started_at: float | None = None,
     ) -> ExecutionRecord:
         """Creates one running execution record before dispatch leaves the MCP event loop."""
@@ -145,10 +212,11 @@ class ExecutionStore:
                 session_id=session_id,
                 project_name=project_name,
                 tool_name=tool_name,
-                arguments=arguments,
+                arguments=self.compact_arguments(arguments),
                 started_at=now,
             )
             self._executions[execution_id] = record
+            self._index_execution_start(record)
             self._prune()
             self._save()
             return record
@@ -195,6 +263,8 @@ class ExecutionStore:
             record = self._executions.get(execution_id)
             if record is None:
                 return
+            was_running = record.status in {"running", "queued"}
+            had_durable_job = record.durable_job_id is not None
 
             # finalize worker lifecycle without erasing an earlier request timeout/cancellation
             record.status = "completed" if succeeded else "failed"
@@ -217,6 +287,7 @@ class ExecutionStore:
             if record.project_name:
                 session.project_name = record.project_name
             session.updated_at = now
+            self._index_execution_finish(record, was_running=was_running, had_durable_job=had_durable_job)
             self._prune()
             self._save()
 
@@ -225,6 +296,12 @@ class ExecutionStore:
         with self._lock:
             record = self._executions.get(execution_id)
             return ExecutionRecord(**asdict(record)) if record is not None else None
+
+    def get_execution_summary(self, execution_id: str) -> ExecutionSummaryRecord | None:
+        """Returns bounded row metadata for one retained execution without copying its result body."""
+        with self._lock:
+            record = self._executions.get(execution_id)
+            return self._execution_summary_record(record) if record is not None else None
 
     def list_executions(self, *, newest_first: bool = True, limit: int | None = None) -> list[ExecutionRecord]:
         """Returns retained executions ordered by submission time."""
@@ -236,8 +313,58 @@ class ExecutionStore:
 
     def list_session_executions(self, session_id: str) -> list[ExecutionRecord]:
         """Returns executions belonging to one session from oldest to newest."""
-        records = [record for record in self.list_executions(newest_first=False) if record.session_id == session_id]
-        return records
+        with self._lock:
+            if self._prune():
+                self._save()
+            index = self._session_execution_index.get(session_id)
+            if index is None:
+                return []
+            return [
+                ExecutionRecord(**asdict(record))
+                for execution_id in index.execution_ids
+                if (record := self._executions.get(execution_id)) is not None
+            ]
+
+    def list_session_execution_items(self, session_id: str) -> list[ExecutionSummaryRecord]:
+        """Returns bounded execution rows for one session from oldest to newest."""
+        with self._lock:
+            if self._prune():
+                self._save()
+            index = self._session_execution_index.get(session_id)
+            if index is None:
+                return []
+            return [
+                self._execution_summary_record(record)
+                for execution_id in index.execution_ids
+                if (record := self._executions.get(execution_id)) is not None
+            ]
+
+    def list_session_execution_summaries(self) -> list[SessionExecutionSummary]:
+        """Returns lightweight retained-session facts without expanding execution payloads."""
+        with self._lock:
+            if self._prune():
+                self._save()
+            summaries: list[SessionExecutionSummary] = []
+            for session in self._sessions.values():
+                index = self._session_execution_index.get(session.session_id, _SessionExecutionIndex())
+                latest_record = self._executions.get(index.latest_execution_id) if index.latest_execution_id is not None else None
+                summaries.append(
+                    SessionExecutionSummary(
+                        session_id=session.session_id,
+                        panel_id=session.panel_id,
+                        display_name=session.display_name,
+                        project_name=session.project_name,
+                        created_at=session.created_at,
+                        updated_at=session.updated_at,
+                        execution_count=len(index.execution_ids),
+                        running_execution_count=index.running_execution_count,
+                        durable_job_count=index.durable_job_count,
+                        first_execution_started_at=index.first_execution_started_at,
+                        latest_execution_started_at=index.latest_execution_started_at,
+                        latest_execution=self._execution_summary_record(latest_record) if latest_record is not None else None,
+                    )
+                )
+            return summaries
 
     def set_session_display_name(self, session_id: str, display_name: str) -> str:
         """Sets the normalized operator-facing conversation title."""
@@ -329,24 +456,6 @@ class ExecutionStore:
             if run is not None:
                 run.project_name = project_name
                 self._save()
-
-    def update_activity_run_jobs(
-        self,
-        run_id: str,
-        *,
-        job_ids: list[str] | None = None,
-        retained_jobs: list[dict[str, Any]] | None = None,
-    ) -> None:
-        """Updates durable-job references retained by one panel run."""
-        with self._lock:
-            run = self._activity_runs.get(run_id)
-            if run is None:
-                return
-            if job_ids is not None:
-                run.job_ids = list(dict.fromkeys(job_ids))
-            if retained_jobs is not None:
-                run.retained_jobs = retained_jobs
-            self._save()
 
     def get_activity_run(self, run_id: str) -> ActivityPanelRun | None:
         """Returns one retained activity-panel run."""
@@ -493,21 +602,24 @@ class ExecutionStore:
             if changed:
                 self._save()
 
-    def _load(self) -> None:
+    def _load(self) -> bool:
+        """Loads canonical state and reports whether an on-disk schema migration occurred."""
         if not self._state_path.is_file():
-            return
+            return False
         try:
             payload = json.loads(RetainedTextCompression.read_text(self._state_path))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
-            return
+            return False
         if not isinstance(payload, dict):
-            return
+            return False
 
         version = payload.get("version")
-        if version != _STATE_VERSION:
+        if version not in {_MIN_MIGRATABLE_STATE_VERSION, _STATE_VERSION}:
             raise RuntimeError(
-                f"Unsupported Serena execution-store schema version {version!r}; Serena 2.1 requires schema version {_STATE_VERSION}."
+                f"Unsupported Serena execution-store schema version {version!r}; Serena requires schema version "
+                f"{_MIN_MIGRATABLE_STATE_VERSION} or {_STATE_VERSION}."
             )
+        migrated = version != _STATE_VERSION
 
         sessions = payload.get("sessions", {})
         executions = payload.get("executions", {})
@@ -521,23 +633,123 @@ class ExecutionStore:
                         continue
         if isinstance(executions, dict):
             for execution_id, item in executions.items():
-                if isinstance(item, dict):
-                    try:
-                        self._executions[str(execution_id)] = ExecutionRecord(**item)
-                    except (TypeError, ValueError):
-                        continue
+                if not isinstance(item, dict):
+                    continue
+                normalized = dict(item)
+                arguments = normalized.get("arguments", {})
+                if isinstance(arguments, str):
+                    normalized["arguments"] = self._migrate_arguments(arguments)
+                    migrated = True
+                elif isinstance(arguments, dict):
+                    normalized["arguments"] = self.compact_arguments(cast(dict[str, Any], arguments))
+                else:
+                    normalized["arguments"] = {}
+                    migrated = True
+                try:
+                    self._executions[str(execution_id)] = ExecutionRecord(**normalized)
+                except (TypeError, ValueError):
+                    continue
         if isinstance(activity_runs, dict):
             for run_id, item in activity_runs.items():
-                if isinstance(item, dict):
-                    try:
-                        run = ActivityPanelRun(**item)
-                    except (TypeError, ValueError):
-                        continue
-                    self._activity_runs[str(run_id)] = run
-                    if not run.superseded:
-                        current = self._current_run_by_session.get(run.session_id)
-                        if current is None or self._activity_runs[current].started_at < run.started_at:
-                            self._current_run_by_session[run.session_id] = run.run_id
+                if not isinstance(item, dict):
+                    continue
+                normalized = {
+                    key: value
+                    for key, value in item.items()
+                    if key in {"run_id", "session_id", "project_name", "started_at", "superseded", "execution_ids"}
+                }
+                if len(normalized) != len(item):
+                    migrated = True
+                try:
+                    run = ActivityPanelRun(**normalized)
+                except (TypeError, ValueError):
+                    continue
+                self._activity_runs[str(run_id)] = run
+                if not run.superseded:
+                    current = self._current_run_by_session.get(run.session_id)
+                    if current is None or self._activity_runs[current].started_at < run.started_at:
+                        self._current_run_by_session[run.session_id] = run.run_id
+        return migrated
+
+    @classmethod
+    def _migrate_arguments(cls, serialized: str) -> dict[str, Any]:
+        """Converts legacy serialized keyword arguments to bounded structured storage."""
+        if not serialized:
+            return {}
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                value = parser(serialized)
+            except (json.JSONDecodeError, SyntaxError, ValueError, TypeError):
+                continue
+            if isinstance(value, dict):
+                return cls.compact_arguments({str(key): item for key, item in value.items()})
+
+        try:
+            expression = ast.parse(f"_tool({serialized})", mode="eval").body
+            if isinstance(expression, ast.Call) and not expression.args:
+                arguments = {keyword.arg: ast.literal_eval(keyword.value) for keyword in expression.keywords if keyword.arg is not None}
+                return cls.compact_arguments(arguments)
+        except (SyntaxError, ValueError, TypeError):
+            pass
+        return {"_legacy_arguments": StructuredOutputCompactor.truncate_text(serialized, 7_900)}
+
+    def _rebuild_session_execution_index(self) -> None:
+        """Rebuilds non-authoritative retained-session and durable-job lookup indexes."""
+        self._session_execution_index = {session_id: _SessionExecutionIndex() for session_id in self._sessions}
+        self._job_session_index = {}
+        records = sorted(self._executions.values(), key=lambda record: (record.started_at, record.execution_id))
+        for record in records:
+            if record.session_id not in self._sessions:
+                continue
+            self._index_execution_start(record)
+            if record.status not in {"running", "queued"}:
+                index = self._session_execution_index[record.session_id]
+                index.running_execution_count = max(0, index.running_execution_count - 1)
+            if record.durable_job_id is not None:
+                self._session_execution_index[record.session_id].durable_job_count += 1
+                self._job_session_index[record.durable_job_id] = record.session_id
+
+    @staticmethod
+    def _execution_summary_record(record: ExecutionRecord) -> ExecutionSummaryRecord:
+        """Projects one canonical execution to bounded activity-row metadata."""
+        return ExecutionSummaryRecord(
+            execution_id=record.execution_id,
+            session_id=record.session_id,
+            project_name=record.project_name,
+            tool_name=record.tool_name,
+            arguments=dict(record.arguments),
+            started_at=record.started_at,
+            status=record.status,
+            finished_at=record.finished_at,
+            durable_job_id=record.durable_job_id,
+            durable_job_label=record.durable_job_label,
+        )
+
+    def _index_execution_start(self, record: ExecutionRecord) -> None:
+        """Adds one execution to the rebuildable session index."""
+        index = self._session_execution_index.setdefault(record.session_id, _SessionExecutionIndex())
+        if record.execution_id in index.execution_ids:
+            return
+        index.execution_ids.append(record.execution_id)
+        if record.status in {"running", "queued"}:
+            index.running_execution_count += 1
+        if index.first_execution_started_at is None:
+            index.first_execution_started_at = record.started_at
+        if index.latest_execution_started_at is None or record.started_at >= index.latest_execution_started_at:
+            index.latest_execution_started_at = record.started_at
+            index.latest_execution_id = record.execution_id
+
+    def _index_execution_finish(self, record: ExecutionRecord, *, was_running: bool, had_durable_job: bool) -> None:
+        """Updates mutable counts and durable-job ownership after one execution becomes terminal."""
+        index = self._session_execution_index.setdefault(record.session_id, _SessionExecutionIndex())
+        if record.execution_id not in index.execution_ids:
+            self._index_execution_start(record)
+        if was_running:
+            index.running_execution_count = max(0, index.running_execution_count - 1)
+        if not had_durable_job and record.durable_job_id is not None:
+            index.durable_job_count += 1
+        if record.durable_job_id is not None:
+            self._job_session_index[record.durable_job_id] = record.session_id
 
     @contextmanager
     def batch_updates(self) -> Iterator[None]:
@@ -602,6 +814,10 @@ class ExecutionStore:
             self._activity_runs.pop(run_id, None)
             changed = True
         self._current_run_by_session.pop(session_id, None)
+        self._session_execution_index.pop(session_id, None)
+        for job_id, owning_session_id in list(self._job_session_index.items()):
+            if owning_session_id == session_id:
+                self._job_session_index.pop(job_id, None)
 
         # remove immutable blobs only when no retained session still references them
         retained_snapshot_tokens = self.retained_file_tokens()

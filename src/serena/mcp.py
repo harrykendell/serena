@@ -4,6 +4,7 @@ The Serena Model Context Protocol (MCP) Server
 
 import asyncio
 import base64
+import json
 import sys
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -25,7 +26,8 @@ from pydantic import AnyUrl, ValidationError
 from pydantic_settings import SettingsConfigDict
 from sensai.util import logging
 
-from serena.activity import ACTIVITY_RESOURCE_URI, ActivityResultMetadata, ActivityTracker, register_activity_resource
+from serena.activity import ACTIVITY_RESOURCE_URI, ActivityRunManager, register_activity_resource
+from serena.activity_view import ActivityCallDetail, ActivityJobDetail, ActivitySnapshot, ActivityView
 from serena.agent import (
     SerenaAgent,
 )
@@ -34,6 +36,7 @@ from serena.config.serena_config import SerenaConfig
 from serena.constants import SERENA_LOG_FORMAT
 from serena.errors import UserFacingError
 from serena.execution import ExecutionAccess, bind_execution_id, get_current_execution_id, reset_execution_id
+from serena.execution_metadata import ExecutionResultMetadata, extract_execution_result_metadata
 from serena.result_presentation import ToolResultPresentation, ToolResultPresenter
 from serena.session import get_mcp_session_id
 from serena.tools import Tool, ToolMarkerExplicitResultPaging
@@ -98,7 +101,7 @@ class SerenaFastMCPTool(FastMCPTool):
         tool: Tool,
         openai_tool_compatible: bool,
         structured_output: bool | None,
-        activity_tracker: ActivityTracker | None = None,
+        activity_run_manager: ActivityRunManager | None = None,
     ):
         """
         :param tool: the Serena tool
@@ -173,10 +176,10 @@ class SerenaFastMCPTool(FastMCPTool):
 
         self._tool = tool
         self._param_aliases = tool.get_param_aliases()
-        self._activity_tracker = activity_tracker
+        self._activity_run_manager = activity_run_manager
         self._agent = tool.agent
         self._execution_access = tool.get_execution_access()
-        self._execution_store = activity_tracker.execution_store if activity_tracker is not None else tool.agent.execution_store
+        self._execution_store = activity_run_manager.execution_store if activity_run_manager is not None else tool.agent.execution_store
 
     def _present_result(self, logical_result: object) -> ToolResultPresentation:
         """Presents one complete logical result at the MCP execution boundary."""
@@ -249,17 +252,15 @@ class SerenaFastMCPTool(FastMCPTool):
                 session_id=session_id,
                 project_name=submission_project_name,
                 tool_name=self.name,
-                arguments=execution_store.serialize_auxiliary_value(arguments),
+                arguments=arguments,
             )
-            if self._activity_tracker is not None:
+            if self._activity_run_manager is not None:
                 if submission_project_name:
-                    self._activity_tracker.update_project(session_id, submission_project_name)
-                self._activity_tracker.start_tool(
+                    self._activity_run_manager.update_project(session_id, submission_project_name)
+                self._activity_run_manager.associate_execution(
                     session_id,
-                    self.name,
-                    arguments,
+                    execution_id,
                     project_name=submission_project_name,
-                    execution_id=execution_id,
                 )
 
         def finish_execution(
@@ -268,9 +269,9 @@ class SerenaFastMCPTool(FastMCPTool):
             presentation: ToolResultPresentation | None = None,
             error: str | None = None,
             project_name: str | None = None,
-            result_metadata: ActivityResultMetadata | None = None,
+            result_metadata: ExecutionResultMetadata | None = None,
         ) -> None:
-            metadata = result_metadata or ActivityResultMetadata(media=None, durable_job_id=None, durable_job_label=None)
+            metadata = result_metadata or ExecutionResultMetadata(media=None, durable_job_id=None, durable_job_label=None)
             media = metadata.media if succeeded else None
             durable_job_id = metadata.durable_job_id if succeeded else None
             durable_job_label = metadata.durable_job_label if succeeded else None
@@ -279,32 +280,20 @@ class SerenaFastMCPTool(FastMCPTool):
             retained_output_chars = presentation.retained_output_chars if succeeded and presentation is not None else None
 
             with execution_store.batch_updates():
-                if self._activity_tracker is not None:
-                    if project_name:
-                        self._activity_tracker.update_project(session_id, project_name)
-                    self._activity_tracker.finish_tool(
-                        execution_id,
-                        succeeded=succeeded,
-                        result_serialization=result_serialization,
-                        error=error,
-                        project_name=project_name,
-                        result_metadata=metadata,
-                        retained_output_id=retained_output_id,
-                        retained_output_chars=retained_output_chars,
-                    )
-                else:
-                    execution_store.finish_execution(
-                        execution_id,
-                        succeeded=succeeded,
-                        result=result_serialization if media is None else None,
-                        error=error,
-                        project_name=project_name,
-                        retained_output_id=retained_output_id,
-                        retained_output_chars=retained_output_chars,
-                        media=media.storage_dict() if media is not None else None,
-                        durable_job_id=durable_job_id,
-                        durable_job_label=durable_job_label,
-                    )
+                if self._activity_run_manager is not None and project_name:
+                    self._activity_run_manager.update_project(session_id, project_name)
+                execution_store.finish_execution(
+                    execution_id,
+                    succeeded=succeeded,
+                    result=result_serialization if media is None else None,
+                    error=error,
+                    project_name=project_name,
+                    retained_output_id=retained_output_id,
+                    retained_output_chars=retained_output_chars,
+                    media=media.storage_dict() if media is not None else None,
+                    durable_job_id=durable_job_id,
+                    durable_job_label=durable_job_label,
+                )
 
         def completed_project_name() -> str:
             current_project = self._agent.get_active_project_for_session(session_id)
@@ -407,7 +396,7 @@ class SerenaFastMCPTool(FastMCPTool):
 
             logical_result = result
             try:
-                result_metadata = ActivityTracker.extract_result_metadata(logical_result)
+                result_metadata = extract_execution_result_metadata(logical_result)
                 presentation = self._present_result(logical_result)
                 prepared_result = self._tool.prepare_mcp_result(presentation.transport_value)
                 result = self._convert_presented_result(presentation, prepared_result) if convert_result else prepared_result
@@ -445,7 +434,8 @@ class SerenaMCPFactory:
         self.transport = transport
         self.project = project
         self.agent: SerenaAgent | None = None
-        self._activity_tracker: ActivityTracker | None = None
+        self._activity_run_manager: ActivityRunManager | None = None
+        self._activity_view: ActivityView | None = None
 
     @staticmethod
     def _sanitize_for_openai_tools(schema: dict) -> dict:
@@ -588,7 +578,7 @@ class SerenaMCPFactory:
         tool: Tool,
         openai_tool_compatible: bool = True,
         structured_output: bool | None = None,
-        activity_tracker: ActivityTracker | None = None,
+        activity_run_manager: ActivityRunManager | None = None,
     ) -> SerenaFastMCPTool:
         """
         Creates an MCP tool from a Serena Tool instance.
@@ -597,13 +587,13 @@ class SerenaMCPFactory:
         :param openai_tool_compatible: whether to process the tool schema to be compatible with OpenAI tools
             (doesn't accept integer, needs number instead, etc.). This allows using Serena MCP within codex.
         :param structured_output: whether to use structured output for the tool (None = auto)
-        :param activity_tracker: optional activity lifecycle recorder for ChatGPT UI integration
+        :param activity_run_manager: optional activity lifecycle recorder for ChatGPT UI integration
         """
         return SerenaFastMCPTool(
             tool,
             openai_tool_compatible=openai_tool_compatible,
             structured_output=structured_output,
-            activity_tracker=activity_tracker,
+            activity_run_manager=activity_run_manager,
         )
 
     def _iter_tools(self) -> Iterator[Tool]:
@@ -626,7 +616,7 @@ class SerenaMCPFactory:
                     tool,
                     openai_tool_compatible=openai_tool_compatible,
                     structured_output=structured_output,
-                    activity_tracker=self._activity_tracker,
+                    activity_run_manager=self._activity_run_manager,
                 )
                 mcp._tool_manager._tools[tool.get_name()] = mcp_tool
             self._register_activity_tools(mcp)
@@ -635,9 +625,94 @@ class SerenaMCPFactory:
     def _register_activity_tools(self, mcp: FastMCP) -> None:
         """Registers ChatGPT-only activity tools outside Serena's serial executor."""
         assert self.agent is not None
-        assert self._activity_tracker is not None
+        assert self._activity_run_manager is not None
+        assert self._activity_view is not None
         agent = self.agent
-        activity_tracker = self._activity_tracker
+        activity_run_manager = self._activity_run_manager
+        activity_view = self._activity_view
+
+        def snapshot_payload(snapshot: ActivitySnapshot) -> dict[str, Any]:
+            """Converts one typed activity snapshot at the MCP transport boundary."""
+            calls: list[dict[str, Any]] = []
+            for call in snapshot.calls:
+                item: dict[str, Any] = {
+                    "call_id": call.call_id,
+                    "tool_name": call.tool_name,
+                    "detail": call.detail,
+                    "project_name": call.project_name,
+                    "started_at": call.started_at,
+                    "finished_at": call.finished_at,
+                    "status": call.status,
+                }
+                if call.scope:
+                    item["scope"] = call.scope
+                if call.job_id is not None:
+                    item["job_id"] = call.job_id
+                if call.job_label is not None:
+                    item["job_label"] = call.job_label
+                calls.append(item)
+            jobs = [
+                {
+                    "job_id": job.job_id,
+                    "label": job.label,
+                    "project": job.project,
+                    "status": job.status,
+                    "started_at": job.started_at,
+                    "finished_at": job.finished_at,
+                    "current_turn": job.current_turn,
+                }
+                for job in snapshot.jobs
+            ]
+            return {
+                "run_id": snapshot.run_id or snapshot.panel_id,
+                "project_name": snapshot.project_name,
+                "session_title": snapshot.session_title,
+                "git_additions": snapshot.git_metrics.additions,
+                "git_deletions": snapshot.git_metrics.deletions,
+                "git_ahead_commits": snapshot.git_metrics.ahead_commits,
+                "started_at": snapshot.started_at,
+                "superseded": snapshot.superseded,
+                "calls": calls,
+                "jobs": jobs,
+            }
+
+        def call_detail_payload(detail: ActivityCallDetail) -> dict[str, Any]:
+            """Converts one typed call detail at the MCP transport boundary."""
+            media = detail.media.public_dict() if detail.media is not None else None
+            return {
+                "call_id": detail.call_id,
+                "tool_name": detail.tool_name,
+                "status": detail.status,
+                "arguments": json.dumps(detail.arguments, ensure_ascii=False, separators=(",", ":")),
+                "structured_arguments": detail.arguments,
+                "result": detail.result,
+                "structured_result": detail.structured_result,
+                "error": detail.error,
+                "media": media,
+            }
+
+        def job_detail_payload(detail: ActivityJobDetail) -> dict[str, Any]:
+            """Converts one typed job detail at the MCP transport boundary."""
+            return {
+                "job_id": detail.job_id,
+                "label": detail.label,
+                "project": detail.project,
+                "cwd": detail.cwd,
+                "status": detail.status,
+                "status_message": detail.status_message,
+                "return_code": detail.return_code,
+                "timeout_seconds": detail.timeout_seconds,
+                "elapsed_seconds": detail.elapsed_seconds,
+                "seconds_since_last_output": detail.seconds_since_last_output,
+                "memory_bytes": detail.memory_bytes,
+                "cpu_seconds": detail.cpu_seconds,
+                "process_count": detail.process_count,
+                "output": detail.output,
+                "output_truncated": detail.output_truncated,
+                "earlier_output_omitted": detail.earlier_output_omitted,
+                "has_earlier_output": detail.has_earlier_output,
+                "cursor_reset": detail.cursor_reset,
+            }
 
         @mcp.tool(
             name="show_activity",
@@ -671,11 +746,18 @@ class SerenaMCPFactory:
                 session_id=session_id,
                 project_name=project_name,
                 tool_name="show_activity",
-                arguments=store.serialize_auxiliary_value({"conversation_title": conversation_title}),
+                arguments={"conversation_title": conversation_title},
             )
             try:
                 await asyncio.to_thread(agent.set_dashboard_session_name, session_id, conversation_title)
-                result = await asyncio.to_thread(activity_tracker.start_run, session_id, project_name)
+                run = await asyncio.to_thread(activity_run_manager.start_run, session_id, project_name)
+                snapshot = await asyncio.to_thread(
+                    activity_view.for_run,
+                    session_id,
+                    run.run_id,
+                    refresh_git_metrics=True,
+                )
+                result = snapshot_payload(snapshot)
             except Exception as exc:
                 store.finish_execution(
                     execution_id,
@@ -718,12 +800,13 @@ class SerenaMCPFactory:
             structured_output=True,
         )
         async def get_activity(run_id: str, mcp_ctx: Context) -> dict[str, Any]:
-            return await asyncio.to_thread(
-                activity_tracker.get_run,
+            snapshot = await asyncio.to_thread(
+                activity_view.for_run,
                 get_mcp_session_id(mcp_ctx),
                 run_id,
                 refresh_git_metrics=True,
             )
+            return snapshot_payload(snapshot)
 
         @mcp.tool(
             name="get_activity_detail",
@@ -738,7 +821,8 @@ class SerenaMCPFactory:
             structured_output=True,
         )
         def get_activity_detail(run_id: str, call_id: str, mcp_ctx: Context) -> dict[str, Any]:
-            return activity_tracker.get_call_detail(get_mcp_session_id(mcp_ctx), run_id, call_id)
+            detail = activity_view.call_detail(get_mcp_session_id(mcp_ctx), run_id, call_id)
+            return call_detail_payload(detail)
 
         @mcp.tool(
             name="get_activity_media",
@@ -753,7 +837,7 @@ class SerenaMCPFactory:
             structured_output=False,
         )
         def get_activity_media(run_id: str, call_id: str, mcp_ctx: Context) -> CallToolResult:
-            media = activity_tracker.get_call_media(get_mcp_session_id(mcp_ctx), run_id, call_id)
+            media = activity_view.call_media(get_mcp_session_id(mcp_ctx), run_id, call_id)
             link = ResourceLink(
                 type="resource_link",
                 name=media.name,
@@ -783,12 +867,13 @@ class SerenaMCPFactory:
             structured_output=True,
         )
         async def get_activity_job_detail(run_id: str, job_id: str, mcp_ctx: Context) -> dict[str, Any]:
-            return await asyncio.to_thread(
-                activity_tracker.get_job_detail,
+            detail = await asyncio.to_thread(
+                activity_view.job_detail,
                 get_mcp_session_id(mcp_ctx),
                 run_id,
                 job_id,
             )
+            return job_detail_payload(detail)
 
     def _create_serena_agent(
         self,
@@ -851,9 +936,10 @@ class SerenaMCPFactory:
                 project_activation_error=project_activation_error,
                 web_dashboard_port=web_dashboard_port,
             )
-            self._activity_tracker = ActivityTracker(
-                job_source=self.agent.job_manager,
+            self._activity_run_manager = ActivityRunManager(self.agent.execution_store)
+            self._activity_view = ActivityView(
                 execution_store=self.agent.execution_store,
+                job_source=self.agent.job_manager,
                 git_metrics_source=self.agent,
             )
         except Exception as e:

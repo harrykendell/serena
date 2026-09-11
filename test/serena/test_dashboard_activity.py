@@ -8,6 +8,7 @@ import pytest
 from serena.dashboard_activity import DashboardActivityArchive
 from serena.execution_store import ExecutionStore
 from serena.retention import JobRetentionState, SessionRetentionPolicy
+from serena.storage_compression import RetainedTextCompression
 
 
 def test_dashboard_activity_archive_survives_restart_and_pins_file_snapshots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -20,7 +21,7 @@ def test_dashboard_activity_archive_survives_restart_and_pins_file_snapshots(tmp
         session_id="chat-a",
         project_name="project-a",
         tool_name="fetch_media_file",
-        arguments='{"relative_path": "figure.png"}',
+        arguments={"relative_path": "figure.png"},
         started_at=now,
     )
     store.finish_execution(
@@ -71,7 +72,7 @@ def test_dashboard_activity_archive_marks_interrupted_calls_terminal_on_restart(
         session_id="chat-a",
         project_name="project-a",
         tool_name="read_file",
-        arguments='{"relative_path": "notes.txt"}',
+        arguments={"relative_path": "notes.txt"},
     )
 
     restored = DashboardActivityArchive(ExecutionStore())
@@ -95,7 +96,7 @@ def test_execution_retention_evicts_oldest_session_atomically(tmp_path: Path, mo
         session_id="chat-a",
         project_name="project-a",
         tool_name="read_file",
-        arguments="{}",
+        arguments={},
     )
     run = store.start_activity_run("chat-a", "project-a")
     store.append_execution_to_current_run("chat-a", "a-1")
@@ -105,7 +106,7 @@ def test_execution_retention_evicts_oldest_session_atomically(tmp_path: Path, mo
         session_id="chat-a",
         project_name="project-a",
         tool_name="read_file",
-        arguments="{}",
+        arguments={},
     )
     store.append_execution_to_current_run("chat-a", "a-2")
     store.finish_execution("a-2", succeeded=True, result="a-2")
@@ -116,7 +117,7 @@ def test_execution_retention_evicts_oldest_session_atomically(tmp_path: Path, mo
         session_id="chat-b",
         project_name="project-b",
         tool_name="read_file",
-        arguments="{}",
+        arguments={},
     )
 
     assert [session.session_id for session in store.list_sessions()] == ["chat-b"]
@@ -141,7 +142,7 @@ def test_shared_snapshot_survives_until_last_referencing_session_expires(tmp_pat
         session_id="chat-a",
         project_name="project-a",
         tool_name="fetch_media_file",
-        arguments="{}",
+        arguments={},
     )
     store.finish_execution(
         "a-1",
@@ -155,7 +156,7 @@ def test_shared_snapshot_survives_until_last_referencing_session_expires(tmp_pat
         session_id="chat-b",
         project_name="project-b",
         tool_name="fetch_media_file",
-        arguments="{}",
+        arguments={},
     )
     store.finish_execution(
         "b-1",
@@ -187,7 +188,7 @@ def test_running_job_protects_session_and_completion_extends_retention(tmp_path:
         session_id="chat-a",
         project_name="project-a",
         tool_name="start_job",
-        arguments="{}",
+        arguments={},
     )
     store.finish_execution("a-1", succeeded=True, result="{}", durable_job_id=job_id)
     store.sync_job_retention([JobRetentionState(job_id=job_id, session_id="chat-a", is_running=True, finished_at=None)])
@@ -198,7 +199,7 @@ def test_running_job_protects_session_and_completion_extends_retention(tmp_path:
         session_id="chat-b",
         project_name="project-b",
         tool_name="read_file",
-        arguments="{}",
+        arguments={},
     )
     store.finish_execution("b-1", succeeded=True, result="b-1")
     assert {session.session_id for session in store.list_sessions()} == {"chat-a", "chat-b"}
@@ -212,7 +213,7 @@ def test_running_job_protects_session_and_completion_extends_retention(tmp_path:
         session_id="chat-b",
         project_name="project-b",
         tool_name="read_file",
-        arguments="{}",
+        arguments={},
     )
     store.finish_execution("b-2", succeeded=True, result="b-2")
 
@@ -229,5 +230,70 @@ def test_execution_store_rejects_pre_v2_state(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(RuntimeError, match="requires schema version 2"):
+    with pytest.raises(RuntimeError, match="requires schema version 2 or 3"):
         ExecutionStore(root)
+
+
+def test_execution_store_migrates_v2_arguments_and_drops_run_job_mirrors(tmp_path: Path) -> None:
+    root = tmp_path / "execution-store"
+    root.mkdir()
+    state_path = root / "state.json"
+    now = time.time()
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "sessions": {
+                    "chat-a": {
+                        "session_id": "chat-a",
+                        "panel_id": ExecutionStore.panel_id_for_session("chat-a"),
+                        "created_at": now,
+                        "updated_at": now + 1.0,
+                        "display_name": "Migration test",
+                        "project_name": "serena",
+                    }
+                },
+                "executions": {
+                    "execution-a": {
+                        "execution_id": "execution-a",
+                        "session_id": "chat-a",
+                        "project_name": "serena",
+                        "tool_name": "read_file",
+                        "arguments": '{"relative_path":"notes.txt"}',
+                        "started_at": now,
+                        "status": "completed",
+                        "finished_at": now + 1.0,
+                    }
+                },
+                "activity_runs": {
+                    "run-a": {
+                        "run_id": "run-a",
+                        "session_id": "chat-a",
+                        "project_name": "serena",
+                        "started_at": now,
+                        "superseded": False,
+                        "execution_ids": ["execution-a"],
+                        "job_ids": ["legacy-job"],
+                        "retained_jobs": [{"job_id": "legacy-job", "status": "completed"}],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = ExecutionStore(root)
+
+    assert store.get_execution("execution-a").arguments == {"relative_path": "notes.txt"}
+    assert store.get_activity_run("run-a").execution_ids == ["execution-a"]
+    rewritten = json.loads(RetainedTextCompression.read_text(state_path))
+    assert rewritten["version"] == 3
+    assert rewritten["executions"]["execution-a"]["arguments"] == {"relative_path": "notes.txt"}
+    assert set(rewritten["activity_runs"]["run-a"]) == {
+        "run_id",
+        "session_id",
+        "project_name",
+        "started_at",
+        "superseded",
+        "execution_ids",
+    }

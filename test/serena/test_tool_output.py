@@ -93,7 +93,7 @@ def test_retained_output_survives_store_restart(tmp_path: Path) -> None:
         session_id="chat-a",
         project_name="project-a",
         tool_name="overflow_probe",
-        arguments="{}",
+        arguments={},
     )
     store = ToolOutputStore(tmp_path / "tool-outputs", execution_store=execution_store)
     output_id = store.retain("persistent-output")

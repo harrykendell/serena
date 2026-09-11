@@ -15,7 +15,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolRequest, CallToolRequestParams, CallToolResult, RequestParams
 
-from serena.activity import ActivityTracker
+from serena.activity import ActivityRunManager
+from serena.activity_view import ActivityView
 from serena.agent import SerenaAgent
 from serena.config.serena_config import ProjectConfig, RegisteredProject, SerenaConfig
 from serena.errors import UserFacingError
@@ -47,8 +48,19 @@ from solidlsp.ls_process import LanguageServerTerminatedException
 
 
 class _EmptyJobSource:
-    def list_jobs(self, limit: int = 20) -> list[Any]:
+    max_concurrent_jobs = 12
+
+    def list_running_jobs(self) -> list[Any]:
         return []
+
+    def get_job_record(self, job_id: str) -> Any:
+        raise KeyError(job_id)
+
+    def get_job_records(self, job_ids: set[str]) -> list[Any]:
+        return []
+
+    def get_job(self, job_id: str) -> Any:
+        raise KeyError(job_id)
 
 
 def _mcp_context(session_id: str) -> Any:
@@ -1106,10 +1118,12 @@ def test_show_activity_uses_compact_model_json_with_structured_app_content(
 ) -> None:
     agent, _ = multi_project_agent
     _activate(agent, "global", "project_a")
-    tracker = ActivityTracker(_EmptyJobSource(), execution_store=agent.execution_store)
+    run_manager = ActivityRunManager(agent.execution_store)
+    activity_view = ActivityView(agent.execution_store, _EmptyJobSource())
     factory = SerenaMCPFactory(transport="stdio")
     factory.agent = agent
-    factory._activity_tracker = tracker
+    factory._activity_run_manager = run_manager
+    factory._activity_view = activity_view
     mcp = FastMCP("activity-presentation-test")
     factory._register_activity_tools(mcp)
 
@@ -1143,8 +1157,9 @@ def test_model_and_dashboard_share_canonical_presentation_for_small_and_large_re
     agent, _ = multi_project_agent
     _activate(agent, "global", "project_a")
     agent.serena_config.default_max_tool_answer_tokens = 1_000
-    tracker = ActivityTracker(_EmptyJobSource(), execution_store=agent.execution_store)
-    run = tracker.start_run("global", "project_a")
+    run_manager = ActivityRunManager(agent.execution_store)
+    activity_view = ActivityView(agent.execution_store, _EmptyJobSource())
+    run = run_manager.start_run("global", "project_a")
 
     scenarios = [
         (
@@ -1176,7 +1191,7 @@ def test_model_and_dashboard_share_canonical_presentation_for_small_and_large_re
         for index, (tool_cls, arguments, logical_result, expect_truncated) in enumerate(scenarios):
             tool = agent.get_tool(tool_cls)
             monkeypatch.setattr(tool, "apply", lambda logical_result=logical_result, **kwargs: logical_result)
-            mcp_tool = SerenaMCPFactory.make_mcp_tool(tool, activity_tracker=tracker)
+            mcp_tool = SerenaMCPFactory.make_mcp_tool(tool, activity_run_manager=run_manager)
             mcp = FastMCP(f"presentation-equivalence-{index}")
             mcp._tool_manager._tools[mcp_tool.name] = mcp_tool
             handler = mcp._mcp_server.request_handlers[CallToolRequest]
@@ -1202,9 +1217,9 @@ def test_model_and_dashboard_share_canonical_presentation_for_small_and_large_re
             assert json.loads(execution.result) == model_value
             assert result.content[0].text == execution.result
 
-            detail = tracker.get_call_detail("global", run["run_id"], execution.execution_id)
-            assert detail["result"] == execution.result
-            assert detail["structured_result"] == model_value
+            detail = activity_view.call_detail("global", run.run_id, execution.execution_id)
+            assert detail.result == execution.result
+            assert detail.structured_result == model_value
 
             if not expect_truncated:
                 assert model_value == logical_result
@@ -1975,13 +1990,14 @@ def test_activation_message_embeds_memories_from_new_project(multi_project_agent
 
 def test_activity_project_attribution_follows_session_activation(multi_project_agent: tuple[SerenaAgent, dict[str, Path]]) -> None:
     agent, _ = multi_project_agent
-    tracker = ActivityTracker(_EmptyJobSource())
-    run = tracker.start_run("session-a", "")
-    mcp_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(ActivateProjectTool), activity_tracker=tracker)
+    run_manager = ActivityRunManager(agent.execution_store)
+    activity_view = ActivityView(agent.execution_store, _EmptyJobSource())
+    run = run_manager.start_run("session-a", "")
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(agent.get_tool(ActivateProjectTool), activity_run_manager=run_manager)
 
     asyncio.run(mcp_tool.run({"project": "project_a"}, context=_mcp_context("session-a")))
 
-    snapshot = tracker.get_run("session-a", run["run_id"])
-    assert snapshot["project_name"] == "project_a"
-    assert snapshot["calls"][0]["tool_name"] == "activate_project"
-    assert snapshot["calls"][0]["project_name"] == "project_a"
+    snapshot = activity_view.for_run("session-a", run.run_id)
+    assert snapshot.project_name == "project_a"
+    assert snapshot.calls[0].tool_name == "activate_project"
+    assert snapshot.calls[0].project_name == "project_a"

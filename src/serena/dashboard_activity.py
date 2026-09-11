@@ -3,90 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
-from dataclasses import dataclass
 from typing import Any
 
-from serena.activity import ActivityDetailFormatter
+from serena.activity_view import ActivityDetailFormatter
 from serena.execution_store import ExecutionRecord, ExecutionStore, SessionRecord
 
 _FILE_RESOURCE_RE = re.compile(r"serena-file://export/([0-9a-f]{64}|[0-9a-f]{48})(?![0-9a-f])")
 _PANEL_ID_RE = re.compile(r"[0-9a-f]{16}")
-
-
-@dataclass(frozen=True)
-class DashboardActivitySessionSummary:
-    """Compact retained-session state used for dashboard discovery and polling."""
-
-    _RECENT_TERMINAL_CALL_LIMIT = 8
-    _ACTIVE_STATUSES = frozenset({"running", "queued"})
-    _CALL_KEYS = (
-        "call_id",
-        "tool_name",
-        "detail",
-        "scope",
-        "status",
-        "submitted_at",
-        "started_at",
-        "finished_at",
-        "job_id",
-    )
-
-    panel_id: str
-    project_name: str
-    display_name: str
-    started_at: float
-    updated_at: float
-    tool_count: int
-    job_ids: tuple[str, ...]
-    has_active_calls: bool
-    recent_calls: tuple[dict[str, Any], ...]
-    latest_call: dict[str, Any] | None
-    submission_span_seconds: float | None
-
-    @staticmethod
-    def compute_submission_span(calls: list[dict[str, Any]]) -> float | None:
-        """Returns the elapsed span from the first to latest submitted call."""
-        submitted = [
-            float(timestamp) for call in calls if isinstance(timestamp := call.get("submitted_at") or call.get("started_at"), int | float)
-        ]
-        if not submitted:
-            return None
-        return max(submitted) - min(submitted)
-
-    @classmethod
-    def from_session(cls, session: dict[str, Any]) -> "DashboardActivitySessionSummary":
-        """Builds a bounded visual summary without retaining full results or arguments."""
-        calls = list(session.get("calls", []))
-        job_ids = tuple(dict.fromkeys(str(call["job_id"]) for call in calls if call.get("job_id")))
-
-        active_calls = [call for call in calls if call.get("status") in cls._ACTIVE_STATUSES]
-        terminal_calls = [call for call in calls if call.get("status") not in cls._ACTIVE_STATUSES]
-        selected_calls = [*active_calls, *terminal_calls[-cls._RECENT_TERMINAL_CALL_LIMIT :]]
-        selected_ids: set[str] = set()
-        recent_calls: list[dict[str, Any]] = []
-        for call in selected_calls:
-            call_id = str(call.get("call_id") or "")
-            if call_id and call_id in selected_ids:
-                continue
-            if call_id:
-                selected_ids.add(call_id)
-            recent_calls.append({key: call.get(key) for key in cls._CALL_KEYS})
-
-        latest_call = {key: calls[-1].get(key) for key in cls._CALL_KEYS} if calls else None
-        return cls(
-            panel_id=str(session["panel_id"]),
-            project_name=str(session.get("project_name") or ""),
-            display_name=str(session.get("display_name") or ""),
-            started_at=float(session.get("started_at") or 0.0),
-            updated_at=float(session.get("updated_at") or 0.0),
-            tool_count=len(calls),
-            job_ids=job_ids,
-            has_active_calls=bool(active_calls),
-            recent_calls=tuple(recent_calls),
-            latest_call=latest_call,
-            submission_span_seconds=cls.compute_submission_span(calls),
-        )
 
 
 class DashboardActivityArchive:
@@ -99,10 +24,6 @@ class DashboardActivityArchive:
     def list_sessions(self) -> list[dict[str, Any]]:
         """Returns retained dashboard session records newest first."""
         return [self._session_payload(session) for session in self._store.list_sessions()]
-
-    def list_session_summaries(self) -> list[DashboardActivitySessionSummary]:
-        """Returns compact retained-session summaries from canonical execution records."""
-        return [DashboardActivitySessionSummary.from_session(session) for session in self.list_sessions()]
 
     def get_session(self, panel_id: str) -> dict[str, Any]:
         """Returns one retained session by its opaque dashboard identifier."""
@@ -156,8 +77,7 @@ class DashboardActivityArchive:
         }
 
     def _call_payload(self, record: ExecutionRecord) -> dict[str, Any]:
-        arguments = self._formatter.parse_parameters(record.arguments) or {}
-        summary = self._formatter.format(record.tool_name, arguments)
+        summary = self._formatter.format(record.tool_name, record.arguments)
         return {
             "call_id": record.execution_id,
             "tool_name": record.tool_name,
@@ -167,7 +87,7 @@ class DashboardActivityArchive:
             "submitted_at": record.started_at,
             "started_at": record.started_at,
             "finished_at": record.finished_at,
-            "parameters": record.arguments,
+            "parameters": json.dumps(record.arguments, ensure_ascii=False, separators=(",", ":")),
             "result": record.result,
             "error": record.error,
             "media": record.media,

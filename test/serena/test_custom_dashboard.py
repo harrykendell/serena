@@ -56,7 +56,7 @@ def test_dashboard_serves_kendell_frontend_and_session_api(tmp_path: Path, monke
         session_id="session-a",
         project_name="serena",
         tool_name="get_current_config",
-        arguments="{}",
+        arguments={},
     )
     agent.execution_store.finish_execution("execution-a", succeeded=True, result="config")
     dashboard = DashboardServer(
@@ -126,7 +126,7 @@ def test_job_notification_link_redirects_to_originating_panel(tmp_path: Path, mo
         session_id="session-a",
         project_name="thesis",
         tool_name="start_job",
-        arguments="{}",
+        arguments={},
     )
     agent.execution_store.finish_execution(
         "execution-job",
@@ -214,7 +214,7 @@ def test_dashboard_bootstraps_inactive_serena_panels_with_compact_history(tmp_pa
             session_id="session-a",
             project_name="serena",
             tool_name="read_file",
-            arguments=f'{{"relative_path": "file-{task}.txt"}}',
+            arguments={"relative_path": f"file-{task}.txt"},
             started_at=float(task),
         )
         agent.execution_store.finish_execution(execution_id, succeeded=True, result=f"file {task}")
@@ -233,7 +233,7 @@ def test_dashboard_bootstraps_inactive_serena_panels_with_compact_history(tmp_pa
     assert state["git_additions"] == 17
     assert state["git_deletions"] == 4
     assert state["git_ahead_commits"] == 3
-    assert len(state["calls"]) == 8
+    assert len(state["calls"]) == 1
     assert state["calls"][-1]["scope"] == "file-12.txt"
 
     full_state = client.get(f"/dashboard/api/serena/panels/{panel['panel_id']}").get_json()
@@ -243,6 +243,43 @@ def test_dashboard_bootstraps_inactive_serena_panels_with_compact_history(tmp_pa
     assert full_state["git_deletions"] == 4
     assert full_state["git_ahead_commits"] == 3
     assert len(full_state["calls"]) == 12
+
+
+def test_dashboard_selected_session_document_defers_call_body_until_expanded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
+    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
+    agent = _DashboardAgent()
+    for index in range(2):
+        execution_id = f"execution-{index}"
+        agent.execution_store.start_execution(
+            execution_id=execution_id,
+            session_id="session-a",
+            project_name="serena",
+            tool_name="read_file",
+            arguments={"relative_path": f"file-{index}.txt"},
+        )
+        agent.execution_store.finish_execution(
+            execution_id,
+            succeeded=True,
+            result=f"retained body {index}",
+        )
+    dashboard = DashboardServer(agent=agent)
+    client = dashboard._app.test_client()
+    panel_id = agent.execution_store.panel_id_for_session("session-a")
+
+    document = client.get(f"/dashboard/api/serena/sessions/{panel_id}").get_json()
+    assert len(document["calls"]) == 2
+    assert all("result" not in call for call in document["calls"])
+    assert document["expanded_call"] is None
+    assert document["expanded_job"] is None
+
+    expanded = client.get(f"/dashboard/api/serena/sessions/{panel_id}?expanded=execution-1").get_json()
+    assert expanded["expanded_call"]["call_id"] == "execution-1"
+    assert expanded["expanded_call"]["result"] == "retained body 1"
+    assert expanded["expanded_job"] is None
 
 
 def test_dashboard_orders_serena_panels_newest_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -305,14 +342,14 @@ def test_retained_serena_panel_preserves_semantic_detail_and_scope(tmp_path: Pat
         session_id="session-a",
         project_name="serena",
         tool_name="search_for_pattern",
-        arguments='{"substring_pattern": "ActivityTracker.*detail", "relative_path": "src/serena"}',
+        arguments={"substring_pattern": "ActivityRunManager.*detail", "relative_path": "src/serena"},
     )
     agent.execution_store.start_execution(
         execution_id="replace-execution",
         session_id="session-a",
         project_name="serena",
         tool_name="replace_in_files",
-        arguments='{"needle": "old value", "repl": "new value", "mode": "literal", "relative_path": "src/serena"}',
+        arguments={"needle": "old value", "repl": "new value", "mode": "literal", "relative_path": "src/serena"},
     )
     dashboard = DashboardServer(
         agent=agent,
@@ -324,7 +361,7 @@ def test_retained_serena_panel_preserves_semantic_detail_and_scope(tmp_path: Pat
     panel = client.get(f"/dashboard/api/serena/panels/{panel_id}").get_json()
 
     calls = {call["tool_name"]: call for call in panel["calls"]}
-    assert calls["search_for_pattern"]["detail"] == "ActivityTracker.*detail"
+    assert calls["search_for_pattern"]["detail"] == "ActivityRunManager.*detail"
     assert calls["search_for_pattern"]["scope"] == "src/serena"
     assert calls["replace_in_files"]["detail"] == "old value"
     assert calls["replace_in_files"]["scope"] == "src/serena"
@@ -347,7 +384,7 @@ def test_retained_serena_panel_exposes_typed_shell_result(tmp_path: Path, monkey
         session_id="session-a",
         project_name="serena",
         tool_name="execute_shell_command",
-        arguments='{"command": "printf hello"}',
+        arguments={"command": "printf hello"},
     )
     agent.execution_store.finish_execution(
         "shell-execution",
@@ -380,7 +417,7 @@ def test_retained_serena_panel_serves_rendered_media_instead_of_result_repr(tmp_
         session_id="session-a",
         project_name="serena",
         tool_name="render_pdf_page",
-        arguments='{"relative_path": "figure.pdf", "page": 1, "dpi": 150}',
+        arguments={"relative_path": "figure.pdf", "page": 1, "dpi": 150},
     )
     agent.execution_store.finish_execution(
         "render-execution",
