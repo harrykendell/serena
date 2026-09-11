@@ -254,20 +254,20 @@ function activitySummarySnapshot(panel) {
 function renderSerenaOverview(panels) {
   const container = byId("serena-widgets");
   if (!container) return;
-  container.replaceChildren();
   visibleActivityPanels = [];
   setText("serena-panel-count", panels.length, "0");
   setSectionDetail("serena", false);
 
   if (!panels.length) {
-    container.append(emptyCard("No Serena session activity recorded yet."));
+    container.replaceChildren(emptyCard("No Serena session activity recorded yet."));
     return;
   }
 
+  const fragment = document.createDocumentFragment();
   for (const summary of panels) {
     const root = document.createElement("div");
     root.className = "dashboard-activity-card";
-    container.append(root);
+    fragment.append(root);
     const panel = new window.SerenaActivity.ActivityPanel(root, {
       initialCollapsed: true,
       summaryMode: true,
@@ -276,6 +276,7 @@ function renderSerenaOverview(panels) {
     panel.render(activitySummarySnapshot(summary));
     visibleActivityPanels.push(panel);
   }
+  container.replaceChildren(fragment);
 }
 
 function selectedBackButton(label) {

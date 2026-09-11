@@ -1,6 +1,6 @@
 # Serena Activity UI Simplification and Dashboard Rebuild Plan
 
-Status: IN PROGRESS — U00–U02 COMPLETE (2026-09-11)
+Status: COMPLETE — U00–U03 COMPLETE (2026-09-11)
 
 Baseline: `3435c894` (`Show current Git metrics in Serena activity`) plus the original mixed working tree. U00 preserved that pre-existing work as `a0c6a541` (backend performance fixes), `94818381` (dashboard notifications/PWA/deep links), and `04ef9b6e` (validation fixes for the preserved backend work), then recorded the measurable rebuild baseline in `docs/03-special-guides/serena_activity_ui_simplification_u00_baseline.md`.
 
@@ -795,6 +795,8 @@ Finally:
 5. manually verify the acceptance matrix;
 6. checkpoint the coherent rebuild;
 7. restart deployed Serena only after the cutover is internally consistent.
+
+Checkpoint (complete 2026-09-11): notification/PWA/deep-link and Orchestrator behaviour are verified on the direct route architecture; the final compatibility audit is clean; the 1,000-session scale/request/DOM guardrails pass. Evidence: `docs/03-special-guides/serena_activity_ui_simplification_u03_checkpoint.md`.
 
 Completion condition: canonical facts are stored once, the dashboard has one current server document and one periodic request, overview work is limited to compact session summaries rather than historical bodies, and no retained behaviour depends on the old compatibility architecture.
 
