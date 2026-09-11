@@ -334,6 +334,10 @@ class Project(ToStringMixin):
         if os.path.isfile(start_path):
             return [relative_path]
 
+        # refresh automatically detected languages before filtering source files
+        if self.project_config.auto_detect_language_servers:
+            self.determine_language_server_candidates()
+
         for root, dirs, files in os.walk(start_path, followlinks=True):
             # prevent recursion into ignored directories
             dirs[:] = [d for d in dirs if not self.is_ignored_path(os.path.join(root, d))]

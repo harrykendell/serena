@@ -82,7 +82,7 @@ def test_execute_shell_command_uses_user_shell_environment(monkeypatch, tmp_path
 
 def test_shell_tool_returns_compact_decision_relevant_payload(tmp_path) -> None:
     agent = MagicMock()
-    agent.get_active_project_or_raise.return_value = SimpleNamespace(project_root=str(tmp_path))
+    agent.get_active_project_or_raise.return_value = SimpleNamespace(project_root=str(tmp_path), ls_sync_file_system_changes=lambda: 0)
     agent.serena_config.tool_timeout = 30
     tool = ExecuteShellCommandTool(agent)
 
@@ -93,7 +93,7 @@ def test_shell_tool_returns_compact_decision_relevant_payload(tmp_path) -> None:
 
 def test_shell_tool_returns_complete_output(tmp_path) -> None:
     agent = MagicMock()
-    agent.get_active_project_or_raise.return_value = SimpleNamespace(project_root=str(tmp_path))
+    agent.get_active_project_or_raise.return_value = SimpleNamespace(project_root=str(tmp_path), ls_sync_file_system_changes=lambda: 0)
     agent.serena_config.tool_timeout = 30
     tool = ExecuteShellCommandTool(agent)
     program = 'print("x" * 1200, flush=True)'
