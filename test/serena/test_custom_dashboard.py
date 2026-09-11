@@ -6,6 +6,7 @@ import pytest
 
 from orchestrator.config import OrchestratorConfig
 from orchestrator.dashboard_sessions import OrchestratorDashboardSessionArchive
+from orchestrator.delegates import CreateDelegateRequest, DelegateStore
 from serena.dashboard import DashboardServer
 from serena.execution_store import ExecutionStore
 from serena.git_metrics import GitLineMetrics
@@ -174,10 +175,39 @@ def test_dashboard_revalidates_unchanged_overview_without_response_body(tmp_path
     client = dashboard._app.test_client()
 
     first = client.get("/dashboard/api/state")
+    monkeypatch.setattr(
+        dashboard._custom_dashboard,
+        "dashboard_state",
+        MagicMock(side_effect=AssertionError("unchanged overview was rebuilt")),
+    )
     second = client.get("/dashboard/api/state", headers={"If-None-Match": first.headers["ETag"]})
 
     assert first.status_code == 200
     assert first.headers["Cache-Control"] == "private, no-cache"
+    assert second.status_code == 304
+    assert second.data == b""
+
+
+def test_dashboard_revalidates_unchanged_selected_session_before_building_document(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_roots(tmp_path, monkeypatch)
+    agent = _DashboardAgent()
+    _one_execution(agent)
+    dashboard = DashboardServer(agent=agent)
+    client = dashboard._app.test_client()
+    panel_id = agent.execution_store.panel_id_for_session("session-a")
+
+    first = client.get(f"/dashboard/api/serena/sessions/{panel_id}")
+    monkeypatch.setattr(
+        dashboard._custom_dashboard._activity_view,
+        "for_session",
+        MagicMock(side_effect=AssertionError("unchanged selected session was rebuilt")),
+    )
+    second = client.get(
+        f"/dashboard/api/serena/sessions/{panel_id}",
+        headers={"If-None-Match": first.headers["ETag"]},
+    )
+
+    assert first.status_code == 200
     assert second.status_code == 304
     assert second.data == b""
 
@@ -285,9 +315,103 @@ def test_custom_dashboard_shows_named_orchestrator_conversation_before_first_del
     selected = client.get(f"/dashboard/api/orchestrator/sessions/{panel['panel_id']}").get_json()
 
     assert panel["display_name"] == "Automatic Session Titles"
-    assert panel["delegates"] == []
+    assert panel["delegate_count"] == 0
+    assert panel["active_count"] == 0
+    assert "delegates" not in panel
     assert selected["display_name"] == "Automatic Session Titles"
     assert selected["delegates"] == []
+
+
+def test_orchestrator_dashboard_retains_all_sessions_and_selected_delegates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_roots(tmp_path, monkeypatch)
+    config = OrchestratorConfig.from_environment(tmp_path / "orchestrator-home")
+    archive = OrchestratorDashboardSessionArchive(config)
+    for index in range(130):
+        archive.set_display_name(f"session-{index}", f"Session {index}")
+
+    store = DelegateStore(config)
+    request = CreateDelegateRequest.model_validate(
+        {
+            "project_name": "serena",
+            "kind": "explore",
+            "goal": "Verify retained dashboard scale without truncation.",
+            "acceptance_criteria": ["The selected session exposes every retained delegate."],
+        }
+    )
+    for _ in range(55):
+        store.create("session-129", request)
+
+    dashboard = DashboardServer(agent=_DashboardAgent())
+    client = dashboard._app.test_client()
+    panels = client.get("/dashboard/api/state").get_json()["orchestrator"]["panels"]
+    target = next(panel for panel in panels if panel["display_name"] == "Session 129")
+    selected = client.get(f"/dashboard/api/orchestrator/sessions/{target['panel_id']}").get_json()
+
+    assert len(panels) == 130
+    assert target["delegate_count"] == 55
+    assert target["active_count"] == 55
+    assert "delegates" not in target
+    assert len(selected["delegates"]) == 55
+
+
+def test_dashboard_revalidates_unchanged_orchestrator_session_before_building_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_roots(tmp_path, monkeypatch)
+    config = OrchestratorConfig.from_environment(tmp_path / "orchestrator-home")
+    OrchestratorDashboardSessionArchive(config).set_display_name("session-a", "Cached orchestration")
+    request = CreateDelegateRequest.model_validate(
+        {
+            "project_name": "serena",
+            "kind": "explore",
+            "goal": "Verify selected-session conditional requests.",
+            "acceptance_criteria": ["The unchanged route returns before rebuilding the document."],
+        }
+    )
+    DelegateStore(config).create("session-a", request)
+    dashboard = DashboardServer(agent=_DashboardAgent())
+    client = dashboard._app.test_client()
+    panel_id = client.get("/dashboard/api/state").get_json()["orchestrator"]["panels"][0]["panel_id"]
+
+    first = client.get(f"/dashboard/api/orchestrator/sessions/{panel_id}")
+    monkeypatch.setattr(
+        dashboard._custom_dashboard._orchestrator_overview,
+        "get_panel",
+        MagicMock(side_effect=AssertionError("unchanged Orchestrator session was rebuilt")),
+    )
+    second = client.get(
+        f"/dashboard/api/orchestrator/sessions/{panel_id}",
+        headers={"If-None-Match": first.headers["ETag"]},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 304
+    assert second.data == b""
+
+
+def test_dashboard_observes_delegate_updates_written_by_another_store_instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_roots(tmp_path, monkeypatch)
+    config = OrchestratorConfig.from_environment(tmp_path / "orchestrator-home")
+    OrchestratorDashboardSessionArchive(config).set_display_name("session-a", "Live orchestration")
+    external_store = DelegateStore(config)
+    request = CreateDelegateRequest.model_validate(
+        {
+            "project_name": "serena",
+            "kind": "explore",
+            "goal": "Verify cross-process dashboard projection updates.",
+            "acceptance_criteria": ["A second store sees the committed projection update."],
+        }
+    )
+    external_store.create("session-a", request)
+    dashboard = DashboardServer(agent=_DashboardAgent())
+    client = dashboard._app.test_client()
+
+    first = client.get("/dashboard/api/state").get_json()["orchestrator"]["panels"][0]
+    external_store.create("session-a", request)
+    second = client.get("/dashboard/api/state").get_json()["orchestrator"]["panels"][0]
+
+    assert first["delegate_count"] == 1
+    assert second["delegate_count"] == 2
 
 
 def test_retained_serena_session_preserves_semantic_detail_scope_and_arguments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -321,7 +445,7 @@ def test_retained_serena_session_preserves_semantic_detail_scope_and_arguments(t
     assert calls["replace_in_files"]["scope"] == "src/serena"
 
     expanded = client.get(f"/dashboard/api/serena/sessions/{panel_id}?expanded=replace-execution").get_json()
-    assert expanded["expanded_call"]["structured_arguments"] == {
+    assert expanded["expanded_call"]["arguments"] == {
         "needle": "old value",
         "repl": "new value",
         "mode": "literal",

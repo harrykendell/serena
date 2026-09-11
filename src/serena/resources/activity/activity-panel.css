@@ -160,6 +160,11 @@
   display: none;
 }
 
+.activity-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 43px;
+}
+
 .activity-row + .activity-row {
   border-top: 1px solid color-mix(in srgb, var(--serena-activity-border) 78%, transparent);
 }

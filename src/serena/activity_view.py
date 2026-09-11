@@ -229,6 +229,18 @@ class ActivityJobSummary:
 
 
 @dataclass(frozen=True)
+class ActivityLatestSummary:
+    """Exact renderer-facing summary of the most recently submitted activity."""
+
+    label: str
+    detail: str
+    scope: str
+    status: str
+    started_at: float
+    finished_at: float | None
+
+
+@dataclass(frozen=True)
 class ActivityCallDetail:
     """Bounded structured detail for one Serena execution."""
 
@@ -278,6 +290,8 @@ class ActivitySnapshot:
     started_at: float
     updated_at: float
     superseded: bool
+    submission_span_seconds: float | None
+    latest_activity: ActivityLatestSummary | None
     git_metrics: GitLineMetrics
     calls: tuple[ActivityEntrySummary, ...]
     jobs: tuple[ActivityJobSummary, ...]
@@ -298,7 +312,7 @@ class ActivitySessionSummary:
     active: bool
     tool_count: int
     job_count: int
-    latest_call: ActivityEntrySummary | None
+    latest_activity: ActivityLatestSummary | None
     submission_span_seconds: float | None
     git_metrics: GitLineMetrics
 
@@ -329,10 +343,11 @@ class ActivityView:
     def dashboard_overview(self) -> ActivityOverview:
         """Returns every retained session as one compact active-first overview document."""
         running_records = self._list_running_jobs_safely()
-        running_by_session: dict[str, list[JobRecord]] = {}
-        for record in running_records:
-            if record.session_id:
-                running_by_session.setdefault(record.session_id, []).append(record)
+        running_jobs = tuple(self._job_summary(record, current_turn=False) for record in running_records)
+        running_by_session: dict[str, list[ActivityJobSummary]] = {}
+        for job in running_jobs:
+            if job.session_id:
+                running_by_session.setdefault(job.session_id, []).append(job)
 
         git_by_project: dict[str, GitLineMetrics] = {}
         sessions: list[ActivitySessionSummary] = []
@@ -341,6 +356,7 @@ class ActivityView:
                 git_by_project[summary.project_name] = self._git_metrics(summary.project_name)
             git_metrics = git_by_project[summary.project_name]
             latest_call = self._entry_summary(summary.latest_execution) if summary.latest_execution is not None else None
+            calls = (latest_call,) if latest_call is not None else ()
             sessions.append(
                 ActivitySessionSummary(
                     session_id=summary.session_id,
@@ -352,7 +368,7 @@ class ActivityView:
                     active=summary.running_execution_count > 0 or bool(running_by_session.get(summary.session_id)),
                     tool_count=summary.execution_count,
                     job_count=summary.durable_job_count,
-                    latest_call=latest_call,
+                    latest_activity=self._latest_activity(calls, running_by_session.get(summary.session_id, ())),
                     submission_span_seconds=self._submission_span(summary),
                     git_metrics=git_metrics,
                 )
@@ -360,7 +376,7 @@ class ActivityView:
         sessions.sort(key=lambda item: (not item.active, -item.updated_at, item.panel_id))
         return ActivityOverview(
             sessions=tuple(sessions),
-            running_jobs=tuple(self._job_summary(record, current_turn=False) for record in running_records),
+            running_jobs=running_jobs,
             max_concurrent_jobs=self._job_source.max_concurrent_jobs,
         )
 
@@ -385,6 +401,7 @@ class ActivityView:
             ],
         )
         known_job_labels = self._job_labels(records)
+        calls = tuple(self._entry_summary(record, known_job_labels=known_job_labels) for record in records)
         return ActivitySnapshot(
             session_id=session_id,
             panel_id=self._execution_store.panel_id_for_session(session_id),
@@ -394,8 +411,10 @@ class ActivityView:
             started_at=run.started_at,
             updated_at=updated_at,
             superseded=run.superseded,
+            submission_span_seconds=self._submission_span_records(records),
+            latest_activity=self._latest_activity(calls, jobs),
             git_metrics=self._git_metrics(run.project_name, refresh=refresh_git_metrics),
-            calls=tuple(self._entry_summary(record, known_job_labels=known_job_labels) for record in records),
+            calls=calls,
             jobs=jobs,
         )
 
@@ -429,6 +448,7 @@ class ActivityView:
             ],
         )
         known_job_labels = self._job_labels(records)
+        calls = tuple(self._entry_summary(record, known_job_labels=known_job_labels) for record in records)
         return ActivitySnapshot(
             session_id=session.session_id,
             panel_id=session.panel_id,
@@ -438,8 +458,10 @@ class ActivityView:
             started_at=session.created_at,
             updated_at=updated_at,
             superseded=False,
+            submission_span_seconds=self._submission_span_records(records),
+            latest_activity=self._latest_activity(calls, jobs),
             git_metrics=self._git_metrics(session.project_name),
-            calls=tuple(self._entry_summary(record, known_job_labels=known_job_labels) for record in records),
+            calls=calls,
             jobs=jobs,
             expanded_call=expanded_call,
             expanded_job=expanded_job,
@@ -638,6 +660,43 @@ class ActivityView:
             current_turn=current_turn,
             session_id=record.session_id,
         )
+
+    @staticmethod
+    def _latest_activity(
+        calls: Sequence[ActivityEntrySummary],
+        jobs: Sequence[ActivityJobSummary],
+    ) -> ActivityLatestSummary | None:
+        """Returns the most recently submitted call or job using one renderer-wide rule."""
+        latest_call = max(calls, key=lambda item: item.started_at, default=None)
+        latest_job = max(jobs, key=lambda item: item.started_at, default=None)
+        if latest_call is None and latest_job is None:
+            return None
+        if latest_job is not None and (latest_call is None or latest_job.started_at > latest_call.started_at):
+            return ActivityLatestSummary(
+                label=latest_job.label or "Job",
+                detail="durable job",
+                scope=latest_job.project,
+                status=latest_job.status,
+                started_at=latest_job.started_at,
+                finished_at=latest_job.finished_at,
+            )
+        assert latest_call is not None
+        return ActivityLatestSummary(
+            label=latest_call.tool_name,
+            detail=latest_call.detail,
+            scope=latest_call.scope or latest_call.project_name,
+            status=latest_call.status,
+            started_at=latest_call.started_at,
+            finished_at=latest_call.finished_at,
+        )
+
+    @staticmethod
+    def _submission_span_records(records: Sequence[ExecutionSummaryRecord]) -> float | None:
+        """Returns the first-to-latest execution submission span for one materialized document."""
+        if not records:
+            return None
+        starts = [record.started_at for record in records]
+        return max(starts) - min(starts)
 
     @staticmethod
     def _submission_span(summary: SessionExecutionSummary) -> float | None:

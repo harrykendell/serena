@@ -14,14 +14,13 @@ import os
 import statistics
 import tempfile
 import time
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from flask import Flask
 
 from serena.custom_dashboard import CustomDashboard
-from serena.execution_store import _STATE_VERSION, ActivityPanelRun, ExecutionRecord, ExecutionStore, SessionRecord
+from serena.execution_store import ExecutionStore
 from serena.git_metrics import GitLineMetrics
 from serena.jobs import (
     JobBackend,
@@ -87,6 +86,10 @@ class _CountingJobManager:
     def max_concurrent_jobs(self) -> int:
         """Returns the real manager's configured concurrency limit."""
         return self._manager.max_concurrent_jobs
+
+    def dashboard_revision(self) -> str:
+        """Returns the real manager's cheap dashboard revision token."""
+        return self._manager.dashboard_revision()
 
     def reset_counts(self) -> None:
         """Resets per-request instrumentation."""
@@ -179,8 +182,8 @@ class _Case:
         self._calls_per_session = calls_per_session
         self._job_count = job_count
         self._running_job_count = min(running_job_count, job_count)
-        self._write_execution_state()
         self.store = ExecutionStore(root)
+        self._write_execution_state()
         self.jobs = _CountingJobManager(root, self._job_records())
         self.agent = _BenchmarkAgent(self.store, self.jobs)
 
@@ -192,81 +195,48 @@ class _Case:
         self.client = app.test_client()
 
     def _write_execution_state(self) -> None:
-        """Writes a current-schema state fixture with deliberately non-trivial historical bodies."""
-        now = time.time()
-        sessions: dict[str, dict[str, Any]] = {}
-        executions: dict[str, dict[str, Any]] = {}
-        activity_runs: dict[str, dict[str, Any]] = {}
+        """Builds current-schema retained state with deliberately non-trivial historical bodies."""
         argument_padding = "argument-value-" * 96
         result_padding = "result-value-" * 512
 
-        for session_index in range(self._session_count):
-            session_id = f"benchmark-session-{session_index:04d}"
-            created_at = now - float(self._session_count - session_index)
-            updated_at = created_at + self._calls_per_session * 0.1
-            session = SessionRecord(
-                session_id=session_id,
-                panel_id=ExecutionStore.panel_id_for_session(session_id),
-                created_at=created_at,
-                updated_at=updated_at,
-                display_name=f"Synthetic retained session {session_index:04d}",
-                project_name="serena",
-            )
-            sessions[session_id] = asdict(session)
+        with self.store.batch_updates():
+            for session_index in range(self._session_count):
+                session_id = f"benchmark-session-{session_index:04d}"
+                self.store.start_activity_run(session_id, "serena")
+                self.store.set_session_display_name(session_id, f"Synthetic retained session {session_index:04d}")
 
-            for call_index in range(self._calls_per_session):
-                execution_id = f"execution-{session_index:04d}-{call_index:02d}"
-                arguments = {
-                    "relative_path": f"src/synthetic/{session_index:04d}.py",
-                    "needle": "synthetic-target",
-                    "payload": argument_padding,
-                    "call_index": call_index,
-                }
-                result = json.dumps(
-                    {
-                        "status": "success",
-                        "summary": f"synthetic result {session_index}:{call_index}",
-                        "body": result_padding,
-                    },
-                    separators=(",", ":"),
-                )
-                job_id = f"{session_index:032x}" if call_index == 0 and session_index < self._job_count else None
-                execution = ExecutionRecord(
-                    execution_id=execution_id,
-                    session_id=session_id,
-                    project_name="serena",
-                    tool_name="replace_content",
-                    arguments=arguments,
-                    started_at=created_at + call_index * 0.1,
-                    status="completed",
-                    finished_at=created_at + call_index * 0.1 + 0.05,
-                    request_finished_at=created_at + call_index * 0.1 + 0.05,
-                    result=result,
-                    durable_job_id=job_id,
-                    durable_job_label=f"Synthetic job {session_index}" if job_id else None,
-                )
-                executions[execution_id] = asdict(execution)
-
-            run_id = f"run-{session_index:04d}"
-            activity_runs[run_id] = asdict(
-                ActivityPanelRun(
-                    run_id=run_id,
-                    session_id=session_id,
-                    project_name="serena",
-                    started_at=created_at,
-                    superseded=True,
-                    execution_ids=[f"execution-{session_index:04d}-{call_index:02d}" for call_index in range(self._calls_per_session)],
-                )
-            )
-
-        payload = {
-            "version": _STATE_VERSION,
-            "sessions": sessions,
-            "executions": executions,
-            "activity_runs": activity_runs,
-        }
-        self._root.mkdir(parents=True, exist_ok=True)
-        (self._root / "state.json").write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
+                for call_index in range(self._calls_per_session):
+                    execution_id = f"execution-{session_index:04d}-{call_index:02d}"
+                    arguments = {
+                        "relative_path": f"src/synthetic/{session_index:04d}.py",
+                        "needle": "synthetic-target",
+                        "payload": argument_padding,
+                        "call_index": call_index,
+                    }
+                    result = json.dumps(
+                        {
+                            "status": "success",
+                            "summary": f"synthetic result {session_index}:{call_index}",
+                            "body": result_padding,
+                        },
+                        separators=(",", ":"),
+                    )
+                    job_id = f"{session_index:032x}" if call_index == 0 and session_index < self._job_count else None
+                    self.store.start_execution(
+                        execution_id=execution_id,
+                        session_id=session_id,
+                        project_name="serena",
+                        tool_name="replace_content",
+                        arguments=arguments,
+                    )
+                    self.store.append_execution_to_current_run(session_id, execution_id, project_name="serena")
+                    self.store.finish_execution(
+                        execution_id,
+                        succeeded=True,
+                        result=result,
+                        durable_job_id=job_id,
+                        durable_job_label=f"Synthetic job {session_index}" if job_id else None,
+                    )
 
     def _job_records(self) -> list[JobRecord]:
         """Returns real retained job records with bounded synthetic running history."""

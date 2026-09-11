@@ -215,6 +215,7 @@ function renderCurrentDocument() {
   if (currentRoute.kind === "serena") renderSelectedSerena(currentDocument);
   else if (currentRoute.kind === "orchestrator") renderSelectedOrchestrator(currentDocument);
   else renderOverview(currentDocument);
+  startClock();
 }
 
 function renderOverview(state) {
@@ -274,7 +275,6 @@ function renderSerenaOverview(panels) {
       onOpen: () => navigate({ kind: "serena", panelId: summary.panel_id, expandedEntryId: null }),
     });
     panel.render(activitySummarySnapshot(summary));
-    visibleActivityPanels.push(panel);
   }
   container.replaceChildren(fragment);
 }
@@ -307,7 +307,6 @@ function renderSelectedSerena(snapshot) {
         currentRoute = { ...currentRoute, expandedEntryId: entryId || null };
         routeGeneration += 1;
         currentEtag = null;
-        renderSelectedSerena({ ...currentDocument, expanded_call: null, expanded_job: null });
         void refresh();
       },
       loadMedia: loadDashboardMedia,
@@ -385,9 +384,9 @@ function renderOrchestratorOverview(panels) {
     const title = document.createElement("strong");
     title.textContent = panel.display_name || "Orchestrator";
     const summary = document.createElement("span");
-    const delegates = panel.delegates || [];
-    const active = delegates.filter(delegateIsActive).length;
-    summary.textContent = `${delegates.length} ${delegates.length === 1 ? "delegate" : "delegates"}${active ? ` · ${active} active` : ""}`;
+    const delegateCount = Number(panel.delegate_count || 0);
+    const activeCount = Number(panel.active_count || 0);
+    summary.textContent = `${delegateCount} ${delegateCount === 1 ? "delegate" : "delegates"}${activeCount ? ` · ${activeCount} active` : ""}`;
     copy.append(title, summary);
     const chevron = document.createElement("span");
     chevron.textContent = "›";
@@ -740,11 +739,20 @@ function tickVisibleActivity() {
 }
 
 function startClock() {
-  if (clockTimer !== null) clearInterval(clockTimer);
-  clockTimer = setInterval(tickVisibleActivity, 1000);
+  const needsClock = !document.hidden && (
+    visibleElapsedNodes.length > 0
+    || visibleActivityPanels.some(panel => panel.hasLiveActivity())
+  );
+  if (needsClock && clockTimer === null) {
+    clockTimer = setInterval(tickVisibleActivity, 1000);
+  } else if (!needsClock && clockTimer !== null) {
+    clearInterval(clockTimer);
+    clockTimer = null;
+  }
 }
 
 function handleVisibilityChange() {
+  startClock();
   scheduleRefresh(document.hidden ? HIDDEN_POLL_INTERVAL_MS : 0);
 }
 

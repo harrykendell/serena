@@ -4,7 +4,6 @@ The Serena Model Context Protocol (MCP) Server
 
 import asyncio
 import base64
-import json
 import sys
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -27,7 +26,8 @@ from pydantic_settings import SettingsConfigDict
 from sensai.util import logging
 
 from serena.activity import ACTIVITY_RESOURCE_URI, ActivityRunManager, register_activity_resource
-from serena.activity_view import ActivityCallDetail, ActivityJobDetail, ActivitySnapshot, ActivityView
+from serena.activity_transport import activity_call_detail_payload, activity_job_detail_payload, activity_snapshot_payload
+from serena.activity_view import ActivityView
 from serena.agent import (
     SerenaAgent,
 )
@@ -631,89 +631,6 @@ class SerenaMCPFactory:
         activity_run_manager = self._activity_run_manager
         activity_view = self._activity_view
 
-        def snapshot_payload(snapshot: ActivitySnapshot) -> dict[str, Any]:
-            """Converts one typed activity snapshot at the MCP transport boundary."""
-            calls: list[dict[str, Any]] = []
-            for call in snapshot.calls:
-                item: dict[str, Any] = {
-                    "call_id": call.call_id,
-                    "tool_name": call.tool_name,
-                    "detail": call.detail,
-                    "project_name": call.project_name,
-                    "started_at": call.started_at,
-                    "finished_at": call.finished_at,
-                    "status": call.status,
-                }
-                if call.scope:
-                    item["scope"] = call.scope
-                if call.job_id is not None:
-                    item["job_id"] = call.job_id
-                if call.job_label is not None:
-                    item["job_label"] = call.job_label
-                calls.append(item)
-            jobs = [
-                {
-                    "job_id": job.job_id,
-                    "label": job.label,
-                    "project": job.project,
-                    "status": job.status,
-                    "started_at": job.started_at,
-                    "finished_at": job.finished_at,
-                    "current_turn": job.current_turn,
-                }
-                for job in snapshot.jobs
-            ]
-            return {
-                "run_id": snapshot.run_id or snapshot.panel_id,
-                "project_name": snapshot.project_name,
-                "session_title": snapshot.session_title,
-                "git_additions": snapshot.git_metrics.additions,
-                "git_deletions": snapshot.git_metrics.deletions,
-                "git_ahead_commits": snapshot.git_metrics.ahead_commits,
-                "started_at": snapshot.started_at,
-                "superseded": snapshot.superseded,
-                "calls": calls,
-                "jobs": jobs,
-            }
-
-        def call_detail_payload(detail: ActivityCallDetail) -> dict[str, Any]:
-            """Converts one typed call detail at the MCP transport boundary."""
-            media = detail.media.public_dict() if detail.media is not None else None
-            return {
-                "call_id": detail.call_id,
-                "tool_name": detail.tool_name,
-                "status": detail.status,
-                "arguments": json.dumps(detail.arguments, ensure_ascii=False, separators=(",", ":")),
-                "structured_arguments": detail.arguments,
-                "result": detail.result,
-                "structured_result": detail.structured_result,
-                "error": detail.error,
-                "media": media,
-            }
-
-        def job_detail_payload(detail: ActivityJobDetail) -> dict[str, Any]:
-            """Converts one typed job detail at the MCP transport boundary."""
-            return {
-                "job_id": detail.job_id,
-                "label": detail.label,
-                "project": detail.project,
-                "cwd": detail.cwd,
-                "status": detail.status,
-                "status_message": detail.status_message,
-                "return_code": detail.return_code,
-                "timeout_seconds": detail.timeout_seconds,
-                "elapsed_seconds": detail.elapsed_seconds,
-                "seconds_since_last_output": detail.seconds_since_last_output,
-                "memory_bytes": detail.memory_bytes,
-                "cpu_seconds": detail.cpu_seconds,
-                "process_count": detail.process_count,
-                "output": detail.output,
-                "output_truncated": detail.output_truncated,
-                "earlier_output_omitted": detail.earlier_output_omitted,
-                "has_earlier_output": detail.has_earlier_output,
-                "cursor_reset": detail.cursor_reset,
-            }
-
         @mcp.tool(
             name="show_activity",
             title="Show Serena Activity",
@@ -757,7 +674,7 @@ class SerenaMCPFactory:
                     run.run_id,
                     refresh_git_metrics=True,
                 )
-                result = snapshot_payload(snapshot)
+                result = activity_snapshot_payload(snapshot)
             except Exception as exc:
                 store.finish_execution(
                     execution_id,
@@ -806,7 +723,7 @@ class SerenaMCPFactory:
                 run_id,
                 refresh_git_metrics=True,
             )
-            return snapshot_payload(snapshot)
+            return activity_snapshot_payload(snapshot)
 
         @mcp.tool(
             name="get_activity_detail",
@@ -822,7 +739,7 @@ class SerenaMCPFactory:
         )
         def get_activity_detail(run_id: str, call_id: str, mcp_ctx: Context) -> dict[str, Any]:
             detail = activity_view.call_detail(get_mcp_session_id(mcp_ctx), run_id, call_id)
-            return call_detail_payload(detail)
+            return activity_call_detail_payload(detail)
 
         @mcp.tool(
             name="get_activity_media",
@@ -873,7 +790,7 @@ class SerenaMCPFactory:
                 run_id,
                 job_id,
             )
-            return job_detail_payload(detail)
+            return activity_job_detail_payload(detail)
 
     def _create_serena_agent(
         self,

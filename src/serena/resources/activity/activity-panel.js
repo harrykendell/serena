@@ -187,8 +187,22 @@
       this.clockNode = appendText(meta, "", "activity-clock");
       this.durationNode = appendText(meta, "", "activity-header-duration");
 
-      this.chevron = appendText(this.header, "⌄", "activity-chevron");
+      this.chevron = appendText(this.header, this.options.summaryMode ? "›" : "⌄", "activity-chevron");
       this.header.prepend(logo, heading, meta);
+      this.root.append(this.header);
+
+      this.header.addEventListener("click", () => {
+        if (this.options.summaryMode && typeof this.options.onOpen === "function" && this.snapshot) {
+          this.options.onOpen(this.snapshot);
+          return;
+        }
+        this.setCollapsed(!this.collapsed);
+      });
+
+      if (this.options.summaryMode) {
+        this.header.setAttribute("aria-expanded", "false");
+        return;
+      }
 
       this.body = document.createElement("div");
       this.body.className = "activity-body";
@@ -207,14 +221,17 @@
       this.otherJobsList.hidden = true;
 
       this.body.append(this.empty, this.list, this.otherJobsButton, this.otherJobsList);
-      this.root.append(this.header, this.body);
+      this.root.append(this.body);
 
-      this.header.addEventListener("click", () => {
-        if (this.options.summaryMode && typeof this.options.onOpen === "function" && this.snapshot) {
-          this.options.onOpen(this.snapshot);
-          return;
-        }
-        this.setCollapsed(!this.collapsed);
+      this.body.addEventListener("click", event => {
+        if (!(event.target instanceof Element)) return;
+        const button = event.target.closest(".activity-row-button");
+        const row = button?.closest(".activity-row");
+        if (!button || !row || !this.body.contains(row)) return;
+        const id = row.dataset.entryId;
+        if (!id) return;
+        const next = this.expandedEntryId === id ? null : id;
+        this.setExpandedEntryId(next, { notify: true });
       });
       this.otherJobsButton.addEventListener("click", () => {
         this.otherJobsExpanded = !this.otherJobsExpanded;
@@ -225,6 +242,7 @@
     }
 
     setCollapsed(collapsed) {
+      if (this.options.summaryMode) return;
       const next = Boolean(collapsed);
       if (this.collapsed === next) return;
       this.collapsed = next;
@@ -236,22 +254,83 @@
     setExpandedEntryId(entryId, { notify = false } = {}) {
       const next = entryId || null;
       if (this.expandedEntryId === next) return;
+      const previous = this.expandedEntryId;
       this.expandedEntryId = next;
-      if (!this.collapsed) this._renderRows();
+      if (!this.collapsed && !this.options.summaryMode && this.hasRenderedRows) {
+        this._patchExpandedRow(previous, false);
+        this._patchExpandedRow(next, true);
+      }
       if (notify && typeof this.options.onExpandedChange === "function") {
         this.options.onExpandedChange(next, this._entryForId(next));
       }
       this._notifyHeight();
     }
 
+
+    _findRow(entryId) {
+      if (!entryId) return null;
+      for (const list of [this.list, this.otherJobsList]) {
+        if (!list) continue;
+        for (const row of list.children) {
+          if (row.dataset?.entryId === entryId) return row;
+        }
+      }
+      return null;
+    }
+
+    _patchExpandedRow(entryId, expanded) {
+      const row = this._findRow(entryId);
+      if (!row) return;
+      const button = row.querySelector(".activity-row-button");
+      const chevron = row.querySelector(".activity-row-chevron");
+      button?.setAttribute("aria-expanded", String(expanded));
+      if (chevron) chevron.textContent = expanded ? "⌄" : "›";
+      row.querySelector(".activity-detail")?.remove();
+      if (!expanded) return;
+      const detailContainer = document.createElement("div");
+      detailContainer.className = "activity-detail";
+      row.append(detailContainer);
+      this._renderExpandedDetail(detailContainer, row.dataset.kind, entryId);
+    }
+
+    _refreshExpandedDetail() {
+      if (!this.expandedEntryId) return;
+      const row = this._findRow(this.expandedEntryId);
+      const detailContainer = row?.querySelector(".activity-detail");
+      if (!row || !detailContainer) return;
+      detailContainer.replaceChildren();
+      this._renderExpandedDetail(detailContainer, row.dataset.kind, this.expandedEntryId);
+    }
+
+    hasLiveActivity() {
+      return this._runningEntries().length > 0 || this.liveNodes.length > 0;
+    }
+
     render(snapshot) {
+      const previous = this.snapshot;
       this.snapshot = snapshot || {};
       if (this.retired) return;
       this._renderHeader();
-      if (!this.collapsed) this._renderRows();
-      else {
+      if (this.options.summaryMode) {
+        this.tick(Date.now() / 1000);
+        this._notifyHeight();
+        return;
+      }
+      if (!this.collapsed) {
+        const rowsUnchanged = Boolean(
+          this.hasRenderedRows
+          && previous
+          && previous.updated_at === this.snapshot.updated_at
+          && (previous.calls || []).length === (this.snapshot.calls || []).length
+          && (previous.jobs || []).length === (this.snapshot.jobs || []).length
+        );
+        if (rowsUnchanged) this._refreshExpandedDetail();
+        else this._renderRows();
+      } else {
         this.list.replaceChildren();
         this.otherJobsList.replaceChildren();
+        this.liveNodes = [];
+        this.hasRenderedRows = false;
       }
       this.tick(Date.now() / 1000);
       this._notifyHeight();
@@ -300,13 +379,13 @@
       const title = snapshot.session_title || snapshot.display_name || "Serena";
       this.titleNode.textContent = title;
 
-      const latest = snapshot.latest_activity || [...calls, ...jobs].sort((a, b) => (number(b.finished_at) ?? number(b.started_at) ?? 0) - (number(a.finished_at) ?? number(a.started_at) ?? 0))[0];
+      const latest = snapshot.latest_activity || null;
       const additions = number(snapshot.git_additions) ?? 0;
       const deletions = number(snapshot.git_deletions) ?? 0;
       const ahead = number(snapshot.git_ahead_commits) ?? 0;
       this.summaryNode.replaceChildren();
       if (latest) {
-        const latestLabel = latest.label || latest.tool_name || "Activity";
+        const latestLabel = latest.label || "Activity";
         const latestDetail = latest.detail || latest.scope || "";
         appendText(this.summaryNode, latestDetail ? `${latestLabel} · ${latestDetail} · ` : `${latestLabel} · `, "activity-latest-summary");
       }
@@ -322,11 +401,8 @@
         appendText(this.summaryNode, `(+${ahead})`, "activity-git-ahead");
       }
 
-      this.clockNode.textContent = latest ? formatClock(latest.started_at ?? latest.submitted_at) : formatClock(snapshot.started_at);
-
-      const explicitSpan = number(snapshot.submission_span_seconds);
-      const starts = calls.map(call => number(call.started_at ?? call.submitted_at)).filter(value => value !== null);
-      const span = explicitSpan ?? (starts.length > 1 ? Math.max(...starts) - Math.min(...starts) : null);
+      this.clockNode.textContent = latest ? formatClock(latest.started_at) : formatClock(snapshot.started_at);
+      const span = number(snapshot.submission_span_seconds);
       this.durationNode.textContent = span === null ? "" : formatDuration(span);
       this.durationNode.title = span === null ? "" : "Time between first and latest submitted tool";
     }
@@ -334,8 +410,6 @@
     _renderRows() {
       const previousScroll = this.list.scrollTop;
       const followLatest = !this.hasRenderedRows || this.list.scrollHeight - this.list.scrollTop - this.list.clientHeight <= 32;
-      this.list.replaceChildren();
-      this.otherJobsList.replaceChildren();
       this.liveNodes = [];
 
       const snapshot = this.snapshot || {};
@@ -350,7 +424,9 @@
       ].sort((a, b) => (number(a.item.started_at ?? a.item.submitted_at) ?? 0) - (number(b.item.started_at ?? b.item.submitted_at) ?? 0));
 
       this.empty.hidden = primary.length > 0 || backgroundJobs.length > 0;
-      for (const entry of primary) this.list.append(this._renderRow(entry.kind, entry.id, entry.item));
+      const primaryFragment = document.createDocumentFragment();
+      for (const entry of primary) primaryFragment.append(this._renderRow(entry.kind, entry.id, entry.item));
+      this.list.replaceChildren(primaryFragment);
       if (followLatest) this.list.scrollTop = this.list.scrollHeight;
       else this.list.scrollTop = Math.min(previousScroll, Math.max(0, this.list.scrollHeight - this.list.clientHeight));
       this.hasRenderedRows = true;
@@ -359,9 +435,11 @@
       this.otherJobsButton.textContent = backgroundJobs.length === 1 ? "1 other job running" : `${backgroundJobs.length} other jobs running`;
       this.otherJobsButton.setAttribute("aria-expanded", String(this.otherJobsExpanded));
       this.otherJobsList.hidden = !this.otherJobsExpanded || backgroundJobs.length === 0;
+      const backgroundFragment = document.createDocumentFragment();
       if (this.otherJobsExpanded) {
-        for (const job of backgroundJobs) this.otherJobsList.append(this._renderRow("job", job.job_id, job));
+        for (const job of backgroundJobs) backgroundFragment.append(this._renderRow("job", job.job_id, job));
       }
+      this.otherJobsList.replaceChildren(backgroundFragment);
     }
 
     _renderRow(kind, id, item) {
@@ -412,10 +490,6 @@
       button.prepend(status, copy, timing);
       row.append(button);
 
-      button.addEventListener("click", () => {
-        const next = this.expandedEntryId === id ? null : id;
-        this.setExpandedEntryId(next, { notify: true });
-      });
 
       if (this.expandedEntryId === id) {
         const detailContainer = document.createElement("div");
@@ -440,8 +514,7 @@
     }
 
     _renderCallDetail(container, detail) {
-      const argumentsValue = detail.structured_arguments ?? detail.arguments ?? {};
-      this._appendDetailSection(container, "Parameters", renderValue(argumentsValue));
+      this._appendDetailSection(container, "Parameters", renderValue(detail.arguments ?? {}));
 
       if (detail.error) {
         const error = document.createElement("pre");

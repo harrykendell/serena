@@ -1,6 +1,6 @@
 # Serena Activity UI Simplification and Dashboard Rebuild Plan
 
-Status: ACTIVE — U00–U05 COMPLETE; U06–U07 PLANNED (2026-09-11)
+Status: COMPLETE — U00–U07 COMPLETE (2026-09-11)
 
 Baseline: `3435c894` (`Show current Git metrics in Serena activity`) plus the original mixed working tree. U00 preserved that pre-existing work as `a0c6a541` (backend performance fixes), `94818381` (dashboard notifications/PWA/deep links), and `04ef9b6e` (validation fixes for the preserved backend work), then recorded the measurable rebuild baseline in `docs/03-special-guides/serena_activity_ui_simplification_u00_baseline.md`.
 
@@ -910,7 +910,7 @@ Re-run the 2,048-call selected-session benchmark after those changes. If full co
 
 Acceptance measurements should cover initial render, unchanged rerender, expand/collapse interaction, preservation of scroll position and 1,000-card overview construction. The existing one-periodic-request invariant remains unchanged.
 
-Checkpoint: unchanged polls are cheap before serialization, overview summaries are cheap DOM, and large selected sessions no longer rebuild thousands of rows for a one-row interaction.
+Checkpoint (complete 2026-09-11): unchanged polls are cheap before serialization, overview summaries are cheap DOM, and large selected sessions no longer rebuild thousands of rows for a one-row interaction. Evidence: `docs/03-special-guides/serena_activity_ui_simplification_u06_checkpoint.md`.
 
 ### U07 — Give Orchestrator the same compact-query discipline and close the programme
 
@@ -944,7 +944,7 @@ After the deployed instance has migrated successfully:
 5. checkpoint the follow-on optimisation programme;
 6. restart deployed Serena and verify the SQLite state survives restart with the same retained sessions/jobs and dashboard behaviour.
 
-Checkpoint: U04–U07 close the measured post-cutover gaps while preserving the simple U02 architecture: canonical facts have one owner, storage mutations touch only changed records, overview work is compact and linear, one selected document owns detail, and the browser performs only work visible to the user.
+Checkpoint (complete 2026-09-11): U04–U07 close the measured post-cutover gaps while preserving the simple U02 architecture: canonical facts have one owner, storage mutations touch only changed records, overview work is compact and linear, one selected document owns detail, and the browser performs only work visible to the user. Evidence: `docs/03-special-guides/serena_activity_ui_simplification_u07_checkpoint.md`.
 
 ## 11. Acceptance matrix
 

@@ -760,7 +760,6 @@ class JobStore:
         self._start_lock = FileLock(self.root / ".start.lock")
         self._lock = threading.RLock()
         self._database_path = self.root / self._DATABASE_FILENAME
-        database_existed = self._database_path.exists()
         self._connection = sqlite3.connect(
             self._database_path,
             timeout=self._BUSY_TIMEOUT_MS / 1_000,
@@ -770,13 +769,13 @@ class JobStore:
         self._connection.row_factory = sqlite3.Row
         self._configure_database()
         self._create_schema()
-        if not database_existed:
-            try:
-                self._import_legacy_records()
-            except Exception:
-                self._connection.close()
-                self._discard_failed_database()
-                raise
+
+    def dashboard_revision(self) -> str:
+        """Returns an O(1) process-local revision for dashboard-visible durable-job state."""
+        with self._lock:
+            data_version = int(self._connection.execute("PRAGMA data_version").fetchone()[0])
+            total_changes = self._connection.total_changes
+        return f"{total_changes}:{data_version}"
 
     def start_lock(self) -> FileLock:
         """:return: process-safe lock serialising concurrency-limit checks and job creation."""
@@ -926,11 +925,6 @@ class JobStore:
         if parsed.hex != job_id:
             raise UserFacingError(f"Invalid job ID {job_id!r}")
 
-    def _discard_failed_database(self) -> None:
-        """Removes a newly-created database whose one-time legacy import did not complete."""
-        for suffix in ("", "-wal", "-shm"):
-            Path(str(self._database_path) + suffix).unlink(missing_ok=True)
-
     def _configure_database(self) -> None:
         """Configures SQLite for concurrent Serena and runner-process access."""
         self._connection.execute("PRAGMA journal_mode=WAL")
@@ -965,48 +959,6 @@ class JobStore:
                 ON jobs(finished_at DESC, created_at DESC);
             """
         )
-
-    def _import_legacy_records(self) -> None:
-        """Imports retained per-job JSON metadata once, then marks each source migrated."""
-        legacy: list[tuple[Path, JobRecord]] = []
-        for path in self.root.glob("*.json"):
-            try:
-                with path.open("r", encoding="utf-8") as stream:
-                    data = json.load(stream)
-                if isinstance(data, dict):
-                    legacy.append((path, JobRecord.from_dict(data)))
-            except (OSError, ValueError, KeyError, json.JSONDecodeError):
-                continue
-        if not legacy:
-            return
-
-        with self._lock:
-            self._connection.execute("BEGIN IMMEDIATE")
-            try:
-                for _, record in legacy:
-                    self._connection.execute(
-                        """
-                        INSERT OR IGNORE INTO jobs (
-                            job_id, unit_name, project_root, cwd, status, created_at, session_id,
-                            project_name, label, timeout_seconds, process_group_id, finished_at,
-                            return_code, status_message
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        self._record_values(record),
-                    )
-                row = self._connection.execute(
-                    "SELECT COUNT(*) AS count FROM jobs WHERE job_id IN ({})".format(",".join("?" for _ in legacy)),
-                    tuple(record.job_id for _, record in legacy),
-                ).fetchone()
-                if row is None or int(row["count"]) != len({record.job_id for _, record in legacy}):
-                    raise RuntimeError("Legacy durable-job migration validation failed")
-                self._connection.commit()
-            except Exception:
-                self._connection.rollback()
-                raise
-
-        for path, _ in legacy:
-            os.replace(path, path.with_name(path.name + ".migrated"))
 
     @staticmethod
     def _record_values(record: JobRecord) -> tuple[object, ...]:
@@ -1072,6 +1024,10 @@ class JobManager:
 
         self._store.cleanup_orphan_command_files()
         self._sync_retention_observer(self._store.list_records())
+
+    def dashboard_revision(self) -> str:
+        """Returns a cheap token for durable-job state visible to dashboard documents."""
+        return self._store.dashboard_revision()
 
     def _sync_retention_observer(self, records: list[JobRecord] | None = None) -> None:
         """Synchronize durable jobs with session retention and prune unowned terminal metadata."""

@@ -1,10 +1,11 @@
+from functools import lru_cache
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
 from serena.execution_store import ActivityPanelRun, ExecutionStore
 
-ACTIVITY_RESOURCE_URI = "ui://serena/activity-v32.html"
+ACTIVITY_RESOURCE_URI = "ui://serena/activity-v33.html"
 _ACTIVITY_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
 ACTIVITY_RESOURCE_DIR = Path(__file__).parent / "resources" / "activity"
 
@@ -49,6 +50,7 @@ def register_activity_resource(mcp: FastMCP) -> None:
         return activity_widget_html()
 
 
+@lru_cache(maxsize=1)
 def activity_widget_html() -> str:
     """Returns the self-contained activity widget HTML assembled from shared assets."""
     styles = (ACTIVITY_RESOURCE_DIR / "activity-panel.css").read_text(encoding="utf-8")

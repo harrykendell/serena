@@ -68,27 +68,34 @@ def test_dashboard_activity_retains_terminal_parent_sessions(orchestrator_config
     second = store.create("parent-a", request)
     third = store.create("parent-b", request)
 
-    panels = store.list_dashboard_activity()
+    summaries = store.list_dashboard_summaries()
 
-    assert len(panels) == 2
-    assert all("parent_session_id" not in panel for panel in panels)
-    assert sorted(len(panel["delegates"]) for panel in panels) == [1, 2]
-    assert {delegate["delegate_id"] for panel in panels for delegate in panel["delegates"]} == {
+    assert len(summaries) == 2
+    assert sorted(summary.delegate_count for summary in summaries) == [1, 2]
+    assert sorted(summary.active_count for summary in summaries) == [1, 2]
+    two_delegate_summary = next(summary for summary in summaries if summary.delegate_count == 2)
+    one_delegate_summary = next(summary for summary in summaries if summary.delegate_count == 1)
+    two_delegate_session = store.get_dashboard_session(two_delegate_summary.panel_id)
+    one_delegate_session = store.get_dashboard_session(one_delegate_summary.panel_id)
+    assert two_delegate_session is not None
+    assert one_delegate_session is not None
+    assert {delegate.delegate_id for delegate in two_delegate_session.delegates} == {
         first.delegate_id,
         second.delegate_id,
-        third.delegate_id,
     }
+    assert {delegate.delegate_id for delegate in one_delegate_session.delegates} == {third.delegate_id}
     assert store.dashboard_detail(first.delegate_id).goal == request.goal
 
     store.cancel(first.delegate_id, "parent-a")
     store.cancel(second.delegate_id, "parent-a")
-    retained = store.list_dashboard_activity()
+    retained = store.list_dashboard_summaries()
 
-    assert len(retained) == 2
-    assert retained[0]["active"] is True
-    assert retained[0]["delegates"][0]["delegate_id"] == third.delegate_id
-    assert retained[1]["active"] is False
-    assert {delegate["delegate_id"] for delegate in retained[1]["delegates"]} == {first.delegate_id, second.delegate_id}
+    terminal_summary = next(summary for summary in retained if summary.delegate_count == 2)
+    active_summary = next(summary for summary in retained if summary.delegate_count == 1)
+    assert terminal_summary.active is False
+    assert terminal_summary.active_count == 0
+    assert active_summary.active is True
+    assert active_summary.active_count == 1
 
 
 def test_manual_delegate_flow_survives_server_recreation(orchestrator_config: OrchestratorConfig) -> None:

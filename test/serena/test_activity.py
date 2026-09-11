@@ -15,7 +15,8 @@ from mcp.types import CallToolResult, RequestParams, ResourceLink
 from pydantic import AnyUrl
 
 from serena.activity import ACTIVITY_RESOURCE_URI, ActivityRunManager, register_activity_resource
-from serena.activity_view import ActivityCallDetail, ActivityJobDetail, ActivitySnapshot, ActivityView
+from serena.activity_transport import activity_call_detail_payload, activity_job_detail_payload, activity_snapshot_payload
+from serena.activity_view import ActivityView
 from serena.execution_metadata import ExecutionResultMetadata, extract_execution_result_metadata
 from serena.execution_store import ExecutionStore
 from serena.git_metrics import GitLineMetrics
@@ -218,86 +219,16 @@ class _ActivityHarness:
         return self._job_detail_payload(self.view.job_detail(session_id, run_id, job_id))
 
     @staticmethod
-    def _snapshot_payload(snapshot: ActivitySnapshot) -> dict[str, Any]:
-        calls: list[dict[str, Any]] = []
-        for call in snapshot.calls:
-            payload: dict[str, Any] = {
-                "call_id": call.call_id,
-                "tool_name": call.tool_name,
-                "detail": call.detail,
-                "project_name": call.project_name,
-                "started_at": call.started_at,
-                "finished_at": call.finished_at,
-                "status": call.status,
-            }
-            if call.scope:
-                payload["scope"] = call.scope
-            if call.job_id is not None:
-                payload["job_id"] = call.job_id
-            if call.job_label is not None:
-                payload["job_label"] = call.job_label
-            calls.append(payload)
-        jobs = [
-            {
-                "job_id": job.job_id,
-                "label": job.label,
-                "project": job.project,
-                "status": job.status,
-                "started_at": job.started_at,
-                "finished_at": job.finished_at,
-                "current_turn": job.current_turn,
-            }
-            for job in snapshot.jobs
-        ]
-        return {
-            "run_id": snapshot.run_id or snapshot.panel_id,
-            "project_name": snapshot.project_name,
-            "session_title": snapshot.session_title,
-            "git_additions": snapshot.git_metrics.additions,
-            "git_deletions": snapshot.git_metrics.deletions,
-            "git_ahead_commits": snapshot.git_metrics.ahead_commits,
-            "started_at": snapshot.started_at,
-            "superseded": snapshot.superseded,
-            "calls": calls,
-            "jobs": jobs,
-        }
+    def _snapshot_payload(snapshot) -> dict[str, Any]:
+        return activity_snapshot_payload(snapshot)
 
     @staticmethod
-    def _call_detail_payload(detail: ActivityCallDetail) -> dict[str, Any]:
-        return {
-            "call_id": detail.call_id,
-            "tool_name": detail.tool_name,
-            "status": detail.status,
-            "arguments": json.dumps(detail.arguments, separators=(",", ":")),
-            "structured_arguments": detail.arguments,
-            "result": detail.result,
-            "structured_result": detail.structured_result,
-            "error": detail.error,
-            "media": detail.media.public_dict() if detail.media is not None else None,
-        }
+    def _call_detail_payload(detail) -> dict[str, Any]:
+        return activity_call_detail_payload(detail)
 
     @staticmethod
-    def _job_detail_payload(detail: ActivityJobDetail) -> dict[str, Any]:
-        return {
-            "job_id": detail.job_id,
-            "label": detail.label,
-            "project": detail.project,
-            "cwd": detail.cwd,
-            "status": detail.status,
-            "status_message": detail.status_message,
-            "return_code": detail.return_code,
-            "timeout_seconds": detail.timeout_seconds,
-            "elapsed_seconds": detail.elapsed_seconds,
-            "seconds_since_last_output": detail.seconds_since_last_output,
-            "memory_bytes": detail.memory_bytes,
-            "cpu_seconds": detail.cpu_seconds,
-            "process_count": detail.process_count,
-            "output": detail.output,
-            "output_truncated": detail.output_truncated,
-            "earlier_output_omitted": detail.earlier_output_omitted,
-            "has_earlier_output": detail.has_earlier_output,
-            "cursor_reset": detail.cursor_reset,
-        }
+    def _job_detail_payload(detail) -> dict[str, Any]:
+        return activity_job_detail_payload(detail)
 
 
 class _FixedGitMetricsSource:
@@ -430,7 +361,7 @@ def test_activity_tracker_rehydrates_historical_turn_after_restart(tmp_path: Pat
     assert snapshot["calls"][-1]["status"] == "failed"
     assert snapshot["calls"][-1]["finished_at"] is not None
     assert [(job["job_id"], job["current_turn"]) for job in snapshot["jobs"]] == [("job-a", True)]
-    assert json.loads(detail["arguments"]) == {"substring_pattern": "_ActivityHarness", "relative_path": "src/serena"}
+    assert detail["arguments"] == {"substring_pattern": "_ActivityHarness", "relative_path": "src/serena"}
     assert json.loads(detail["result"]) == {"matches": 3}
 
 
@@ -580,7 +511,7 @@ def test_activity_tracker_exposes_tool_detail_on_demand() -> None:
 
     assert call_id is not None
     detail = tracker.get_call_detail("conversation-a", run["run_id"], call_id)
-    arguments = json.loads(detail["arguments"])
+    arguments = detail["arguments"]
     result = json.loads(detail["result"])
 
     assert detail["tool_name"] == "execute_shell_command"

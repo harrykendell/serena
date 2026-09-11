@@ -136,6 +136,18 @@
     snapshot = next;
     applyInitialCollapsedPolicy(next);
     panel.render(next);
+    syncClock();
+  }
+
+
+  function syncClock() {
+    const needsClock = !retired && !document.hidden && panel.hasLiveActivity();
+    if (needsClock && clockTimer === null) {
+      clockTimer = setInterval(() => panel.tick(Date.now() / 1000), 1000);
+    } else if (!needsClock && clockTimer !== null) {
+      clearInterval(clockTimer);
+      clockTimer = null;
+    }
   }
 
   function retire() {
@@ -180,9 +192,10 @@
   }
 
   window.addEventListener("openai:set_globals", acceptGlobals, { passive: true });
+  document.addEventListener("visibilitychange", syncClock, { passive: true });
 
   const initial = window.openai?.toolOutput;
   if (initial?.run_id) render(initial);
-  clockTimer = setInterval(() => panel.tick(Date.now() / 1000), 1000);
+  syncClock();
   void poll();
 })();

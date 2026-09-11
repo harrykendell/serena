@@ -1,4 +1,3 @@
-import json
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -52,38 +51,26 @@ def test_dashboard_overview_scales_from_lightweight_indexes_without_history_expa
     monkeypatch,
 ) -> None:
     root = tmp_path / "execution-store"
-    root.mkdir()
-    base = time.time() - 2_000.0
-    sessions: dict[str, dict[str, Any]] = {}
-    executions: dict[str, dict[str, Any]] = {}
-    for index in range(1_000):
-        execution_id = f"execution-{index}"
-        session_id = f"session-{index}"
-        started_at = base + index
-        sessions[session_id] = {
-            "session_id": session_id,
-            "panel_id": ExecutionStore.panel_id_for_session(session_id),
-            "created_at": started_at,
-            "updated_at": started_at + 0.25,
-            "display_name": f"Session {index}",
-            "project_name": "serena",
-        }
-        executions[execution_id] = {
-            "execution_id": execution_id,
-            "session_id": session_id,
-            "project_name": "serena",
-            "tool_name": "read_file",
-            "arguments": {"relative_path": f"file-{index}.txt"},
-            "started_at": started_at,
-            "status": "completed",
-            "finished_at": started_at + 0.25,
-            "result": "historical-result:" + ("x" * 2_000),
-        }
-    (root / "state.json").write_text(
-        json.dumps({"version": 3, "sessions": sessions, "executions": executions, "activity_runs": {}}),
-        encoding="utf-8",
-    )
     store = ExecutionStore(root)
+    base = time.time() - 2_000.0
+    with store.batch_updates():
+        for index in range(1_000):
+            execution_id = f"execution-{index}"
+            session_id = f"session-{index}"
+            store.start_execution(
+                execution_id=execution_id,
+                session_id=session_id,
+                project_name="serena",
+                tool_name="read_file",
+                arguments={"relative_path": f"file-{index}.txt"},
+            )
+            store.set_session_display_name(session_id, f"Session {index}")
+            store.finish_execution(
+                execution_id,
+                succeeded=True,
+                result="historical-result:" + ("x" * 2_000),
+            )
+
     original_get_execution = store.get_execution
     original_parse_result = ActivityDetailFormatter.parse_result
 

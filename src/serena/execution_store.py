@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import json
 import os
 import re
@@ -19,12 +18,9 @@ from serena.retention import (
     JobRetentionState,
     SessionRetentionPolicy,
 )
-from serena.storage_compression import RetainedTextCompression
 from serena.structured_output import StructuredOutputCompactor
 
 _FILE_RESOURCE_RE = re.compile(r"serena-file://export/([0-9a-f]{64}|[0-9a-f]{48})(?![0-9a-f])")
-_STATE_VERSION = 3
-_MIN_MIGRATABLE_STATE_VERSION = 2
 
 
 @dataclass
@@ -111,14 +107,12 @@ class SessionExecutionSummary:
 class ExecutionStore:
     """Owns indexed persistent Serena session, execution and activity-panel state.
 
-    The store is the single persistence boundary for model-visible tool execution state. Normal
-    operation reads and mutates SQLite rows directly; the legacy JSON/zstd state is imported only
-    when no SQLite database exists yet.
+    The store is the single persistence boundary for model-visible tool execution state and reads
+    and mutates normalized SQLite rows directly.
     """
 
     _DATABASE_SCHEMA_VERSION = 1
     _DATABASE_FILENAME = "state.sqlite3"
-    _LEGACY_FILENAME = "state.json"
     _BUSY_TIMEOUT_MS = 5_000
 
     def __init__(
@@ -130,17 +124,11 @@ class ExecutionStore:
         use_default_root = root is None
         self._root = root or self._default_root()
         self._database_path = self._root / self._DATABASE_FILENAME
-        self._legacy_state_path = self._root / self._LEGACY_FILENAME
         self._retention = retention
         self._lock = threading.RLock()
         self._transaction_depth = 0
         self._running_job_sessions: dict[str, str] = {}
         self._pending_artifact_cleanup: set[tuple[str, str]] = set()
-
-        # validate legacy input before creating the authoritative database
-        legacy_payload = None
-        if not self._database_path.exists() and self._legacy_state_path.is_file():
-            legacy_payload = self._read_legacy_state()
 
         # configure one process-local connection behind the store lock
         self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -155,18 +143,27 @@ class ExecutionStore:
         self._configure_database()
         self._create_schema()
 
-        if legacy_payload is not None:
-            try:
-                self._import_legacy_state(legacy_payload)
-                self._mark_legacy_migrated()
-            except Exception:
-                self._connection.close()
-                self._discard_failed_database()
-                raise
-
         self._interrupt_stale_state()
         if use_default_root:
             self._cleanup_unreferenced_artifacts()
+
+    def dashboard_revision(self) -> str:
+        """Returns an O(1) process-local revision for dashboard-visible execution state."""
+        with self._lock:
+            data_version = int(self._connection.execute("PRAGMA data_version").fetchone()[0])
+            total_changes = self._connection.total_changes
+        return f"{total_changes}:{data_version}"
+
+    def session_revision(self, panel_id: str) -> str | None:
+        """Returns the indexed revision for one retained dashboard session."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT updated_at FROM sessions WHERE panel_id = ?",
+                (panel_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return f"{float(row['updated_at']):.9f}"
 
     @staticmethod
     def _serena_home() -> Path:
@@ -779,10 +776,7 @@ class ExecutionStore:
     @classmethod
     def retained_file_tokens_from_disk(cls) -> set[str]:
         """Returns snapshot tokens from canonical persisted state without constructing runtime services."""
-        sqlite_tokens = cls._retained_resource_ids_from_database("snapshot")
-        if sqlite_tokens is not None:
-            return sqlite_tokens
-        return cls._retained_file_tokens_from_legacy_state()
+        return cls._retained_resource_ids_from_database("snapshot")
 
     def retained_output_ids(self) -> set[str]:
         """Returns pageable-output identifiers referenced by retained executions."""
@@ -793,29 +787,7 @@ class ExecutionStore:
     @classmethod
     def retained_output_ids_from_disk(cls) -> set[str]:
         """Returns pageable-output identifiers from canonical persisted state."""
-        sqlite_ids = cls._retained_resource_ids_from_database("output")
-        if sqlite_ids is not None:
-            return sqlite_ids
-        path = cls._default_root() / cls._LEGACY_FILENAME
-        try:
-            payload = json.loads(RetainedTextCompression.read_text(path))
-        except (
-            FileNotFoundError,
-            OSError,
-            UnicodeDecodeError,
-            json.JSONDecodeError,
-            TypeError,
-            ValueError,
-        ):
-            return set()
-        executions = payload.get("executions", {}) if isinstance(payload, dict) else {}
-        if not isinstance(executions, dict):
-            return set()
-        return {
-            str(execution.get("retained_output_id"))
-            for execution in executions.values()
-            if isinstance(execution, dict) and execution.get("retained_output_id")
-        }
+        return cls._retained_resource_ids_from_database("output")
 
     @contextmanager
     def batch_updates(self) -> Iterator[None]:
@@ -847,11 +819,6 @@ class ExecutionStore:
                     pending = set(self._pending_artifact_cleanup)
                     self._pending_artifact_cleanup.clear()
                     self._cleanup_candidate_artifacts(pending)
-
-    def _discard_failed_database(self) -> None:
-        """Removes a newly-created database whose one-time legacy import did not complete."""
-        for suffix in ("", "-wal", "-shm"):
-            Path(str(self._database_path) + suffix).unlink(missing_ok=True)
 
     def _configure_database(self) -> None:
         """Configures SQLite for the single-process, multi-threaded Serena service."""
@@ -980,224 +947,6 @@ class ExecutionStore:
                 (now, now, message, message),
             )
             self._connection.execute("UPDATE activity_runs SET superseded = 1 WHERE superseded = 0")
-
-    def _read_legacy_state(self) -> dict[str, Any]:
-        """Loads and validates the one supported JSON/zstd cutover input."""
-        try:
-            payload = json.loads(RetainedTextCompression.read_text(self._legacy_state_path))
-        except (
-            OSError,
-            UnicodeDecodeError,
-            json.JSONDecodeError,
-            TypeError,
-            ValueError,
-        ) as error:
-            raise RuntimeError(f"Could not read legacy Serena execution state: {error}") from error
-        if not isinstance(payload, dict):
-            raise RuntimeError("Legacy Serena execution state must be a JSON object")
-        version = payload.get("version")
-        if version not in {_MIN_MIGRATABLE_STATE_VERSION, _STATE_VERSION}:
-            raise RuntimeError(
-                f"Unsupported Serena execution-store schema version {version!r}; Serena requires schema version "
-                f"{_MIN_MIGRATABLE_STATE_VERSION} or {_STATE_VERSION}."
-            )
-        return cast(dict[str, Any], payload)
-
-    def _import_legacy_state(self, payload: dict[str, Any]) -> None:
-        """Imports validated legacy state exactly once into normalized SQLite rows."""
-        sessions: dict[str, SessionRecord] = {}
-        executions: dict[str, ExecutionRecord] = {}
-        runs: dict[str, ActivityPanelRun] = {}
-
-        raw_sessions = payload.get("sessions", {})
-        if isinstance(raw_sessions, dict):
-            for session_id, item in raw_sessions.items():
-                if not isinstance(item, dict):
-                    continue
-                try:
-                    record = SessionRecord(**item)
-                except (TypeError, ValueError):
-                    continue
-                sessions[str(session_id)] = record
-
-        raw_executions = payload.get("executions", {})
-        if isinstance(raw_executions, dict):
-            for execution_id, item in raw_executions.items():
-                if not isinstance(item, dict):
-                    continue
-                normalized = dict(item)
-                arguments = normalized.get("arguments", {})
-                if isinstance(arguments, str):
-                    normalized["arguments"] = self._migrate_arguments(arguments)
-                elif isinstance(arguments, dict):
-                    normalized["arguments"] = self.compact_arguments(cast(dict[str, Any], arguments))
-                else:
-                    normalized["arguments"] = {}
-                try:
-                    record = ExecutionRecord(**normalized)
-                except (TypeError, ValueError):
-                    continue
-                if record.session_id in sessions:
-                    executions[str(execution_id)] = record
-
-        raw_runs = payload.get("activity_runs", {})
-        if isinstance(raw_runs, dict):
-            for run_id, item in raw_runs.items():
-                if not isinstance(item, dict):
-                    continue
-                normalized = {
-                    key: value
-                    for key, value in item.items()
-                    if key
-                    in {
-                        "run_id",
-                        "session_id",
-                        "project_name",
-                        "started_at",
-                        "superseded",
-                        "execution_ids",
-                    }
-                }
-                try:
-                    run = ActivityPanelRun(**normalized)
-                except (TypeError, ValueError):
-                    continue
-                if run.session_id in sessions:
-                    runs[str(run_id)] = run
-
-        expected_memberships: set[tuple[str, str]] = set()
-        expected_resources: set[tuple[str, str, str]] = set()
-        with self._transaction():
-            self._connection.executemany(
-                """
-                INSERT INTO sessions (
-                    session_id, panel_id, created_at, updated_at, display_name, project_name
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        record.session_id,
-                        record.panel_id,
-                        record.created_at,
-                        record.updated_at,
-                        record.display_name,
-                        record.project_name,
-                    )
-                    for record in sessions.values()
-                ],
-            )
-            self._connection.executemany(
-                """
-                INSERT INTO executions (
-                    execution_id, session_id, project_name, tool_name, arguments_json, started_at,
-                    status, finished_at, request_finished_at, request_error, result, error,
-                    retained_output_id, retained_output_chars, media_json, durable_job_id,
-                    durable_job_label
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [self._execution_values(record) for record in executions.values()],
-            )
-            for record in executions.values():
-                resources = self._resource_entries(
-                    result=record.result,
-                    media=record.media,
-                    retained_output_id=record.retained_output_id,
-                )
-                expected_resources.update((record.execution_id, kind, resource_id) for kind, resource_id, _ in resources)
-                self._connection.executemany(
-                    """
-                    INSERT INTO retained_resources (execution_id, kind, resource_id, size_bytes)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    [(record.execution_id, kind, resource_id, size_bytes) for kind, resource_id, size_bytes in resources],
-                )
-
-            for run in runs.values():
-                self._connection.execute(
-                    """
-                    INSERT INTO activity_runs (run_id, session_id, project_name, started_at, superseded)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        run.run_id,
-                        run.session_id,
-                        run.project_name,
-                        run.started_at,
-                        int(run.superseded),
-                    ),
-                )
-                position = 0
-                for execution_id in run.execution_ids:
-                    execution = executions.get(execution_id)
-                    if execution is None or execution.session_id != run.session_id:
-                        continue
-                    self._connection.execute(
-                        """
-                        INSERT OR IGNORE INTO activity_run_executions (run_id, execution_id, position)
-                        VALUES (?, ?, ?)
-                        """,
-                        (run.run_id, execution_id, position),
-                    )
-                    expected_memberships.add((run.run_id, execution_id))
-                    position += 1
-
-            self._verify_legacy_import(
-                session_count=len(sessions),
-                execution_count=len(executions),
-                run_count=len(runs),
-                membership_count=len(expected_memberships),
-                resource_count=len(expected_resources),
-            )
-
-    def _verify_legacy_import(
-        self,
-        *,
-        session_count: int,
-        execution_count: int,
-        run_count: int,
-        membership_count: int,
-        resource_count: int,
-    ) -> None:
-        """Verifies the canonical counts and ownership invariants of one cutover transaction."""
-        expected = {
-            "sessions": session_count,
-            "executions": execution_count,
-            "activity_runs": run_count,
-            "activity_run_executions": membership_count,
-            "retained_resources": resource_count,
-        }
-        for table, expected_count in expected.items():
-            row = self._connection.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
-            actual_count = int(row["count"]) if row is not None else -1
-            if actual_count != expected_count:
-                raise RuntimeError(f"Legacy Serena migration validation failed for {table}: expected {expected_count}, got {actual_count}")
-
-    def _mark_legacy_migrated(self) -> None:
-        """Renames the legacy state only after the SQLite import transaction has committed."""
-        target = self._legacy_state_path.with_name(self._legacy_state_path.name + ".migrated")
-        os.replace(self._legacy_state_path, target)
-
-    @classmethod
-    def _migrate_arguments(cls, serialized: str) -> dict[str, Any]:
-        """Converts legacy serialized keyword arguments to bounded structured storage."""
-        if not serialized:
-            return {}
-        for parser in (json.loads, ast.literal_eval):
-            try:
-                value = parser(serialized)
-            except (json.JSONDecodeError, SyntaxError, ValueError, TypeError):
-                continue
-            if isinstance(value, dict):
-                return cls.compact_arguments({str(key): item for key, item in value.items()})
-
-        try:
-            expression = ast.parse(f"_tool({serialized})", mode="eval").body
-            if isinstance(expression, ast.Call) and not expression.args:
-                arguments = {keyword.arg: ast.literal_eval(keyword.value) for keyword in expression.keywords if keyword.arg is not None}
-                return cls.compact_arguments(arguments)
-        except (SyntaxError, ValueError, TypeError):
-            pass
-        return {"_legacy_arguments": StructuredOutputCompactor.truncate_text(serialized, 7_900)}
 
     @staticmethod
     def _dump_json(value: object) -> str:
@@ -1360,11 +1109,11 @@ class ExecutionStore:
             return 0
 
     @classmethod
-    def _retained_resource_ids_from_database(cls, kind: str) -> set[str] | None:
+    def _retained_resource_ids_from_database(cls, kind: str) -> set[str]:
         """Reads retained resource identifiers directly from the authoritative SQLite database."""
         path = cls._default_root() / cls._DATABASE_FILENAME
         if not path.is_file():
-            return None
+            return set()
         try:
             connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
             try:
@@ -1377,33 +1126,6 @@ class ExecutionStore:
         except sqlite3.DatabaseError:
             return set()
         return {str(row[0]) for row in rows}
-
-    @classmethod
-    def _retained_file_tokens_from_legacy_state(cls) -> set[str]:
-        """Reads legacy snapshot references during the one-release cutover window."""
-        path = cls._default_root() / cls._LEGACY_FILENAME
-        try:
-            payload = json.loads(RetainedTextCompression.read_text(path))
-        except (
-            FileNotFoundError,
-            OSError,
-            UnicodeDecodeError,
-            json.JSONDecodeError,
-            TypeError,
-            ValueError,
-        ):
-            return set()
-        tokens: set[str] = set()
-        executions = payload.get("executions", {}) if isinstance(payload, dict) else {}
-        if isinstance(executions, dict):
-            for execution in executions.values():
-                if not isinstance(execution, dict):
-                    continue
-                media = execution.get("media")
-                if isinstance(media, dict):
-                    tokens.update(_FILE_RESOURCE_RE.findall(str(media.get("uri") or "")))
-                tokens.update(_FILE_RESOURCE_RE.findall(str(execution.get("result") or "")))
-        return tokens
 
     def _drop_session(self, session_id: str) -> bool:
         """Drops one retained session with cascading execution/run/resource deletion."""

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -15,6 +17,7 @@ from filelock import FileLock
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from orchestrator.config import OrchestratorConfig
+from orchestrator.dashboard_sessions import dashboard_panel_id_for_session
 
 _MAX_PARENT_NOTES_CHARS = 2_000
 _MAX_TASK_PACKET_CHARS = 16_000
@@ -449,6 +452,275 @@ class DelegateProviderTask(BaseModel):
     result_json_schema: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class DelegateDashboardSummary:
+    """Summarizes one retained parent session without hydrating delegate records."""
+
+    panel_id: str
+    parent_session_id: str
+    started_at: float
+    updated_at: float
+    active: bool
+    delegate_count: int
+    active_count: int
+
+
+@dataclass(frozen=True)
+class DelegateDashboardSession:
+    """Provides one retained parent session and its compact delegate statuses."""
+
+    summary: DelegateDashboardSummary
+    delegates: tuple[DelegateStatusResponse, ...]
+
+
+class _DelegateDashboardIndex:
+    """Maintains a rebuildable SQLite projection for dashboard reads."""
+
+    _ACTIVE_STATE_VALUES = tuple(sorted(state.value for state in _ACTIVE_STATES))
+
+    def __init__(self, path: Path) -> None:
+        self._connection = sqlite3.connect(path, timeout=5.0, isolation_level=None, check_same_thread=False)
+        self._connection.row_factory = sqlite3.Row
+        self._configure_database()
+        self._create_schema()
+
+    def rebuild(self, entries: list[tuple[DelegateRecord, DelegateStatusResponse]]) -> None:
+        """Rebuilds the complete derived projection from canonical delegate records."""
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            generation = self._next_generation()
+            self._connection.execute("DELETE FROM dashboard_delegates")
+            self._connection.executemany(
+                """
+                INSERT INTO dashboard_delegates (
+                    delegate_id, panel_id, parent_session_id, project_name, kind,
+                    provider_policy, active_provider, state, created_at, claim_deadline,
+                    claimed_at, started_at, finished_at, result_available, message,
+                    activity_updated_at, generation
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [self._values(record, status, generation) for record, status in entries],
+            )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+
+    def upsert(self, record: DelegateRecord, status: DelegateStatusResponse) -> None:
+        """Updates the derived projection for one changed canonical record."""
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            generation = self._next_generation()
+            self._connection.execute(
+                """
+                INSERT INTO dashboard_delegates (
+                    delegate_id, panel_id, parent_session_id, project_name, kind,
+                    provider_policy, active_provider, state, created_at, claim_deadline,
+                    claimed_at, started_at, finished_at, result_available, message,
+                    activity_updated_at, generation
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(delegate_id) DO UPDATE SET
+                    panel_id = excluded.panel_id,
+                    parent_session_id = excluded.parent_session_id,
+                    project_name = excluded.project_name,
+                    kind = excluded.kind,
+                    provider_policy = excluded.provider_policy,
+                    active_provider = excluded.active_provider,
+                    state = excluded.state,
+                    created_at = excluded.created_at,
+                    claim_deadline = excluded.claim_deadline,
+                    claimed_at = excluded.claimed_at,
+                    started_at = excluded.started_at,
+                    finished_at = excluded.finished_at,
+                    result_available = excluded.result_available,
+                    message = excluded.message,
+                    activity_updated_at = excluded.activity_updated_at,
+                    generation = excluded.generation
+                """,
+                self._values(record, status, generation),
+            )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+
+    def summaries(self) -> list[DelegateDashboardSummary]:
+        """Returns one compact aggregate row per retained parent session."""
+        placeholders = ", ".join("?" for _ in self._ACTIVE_STATE_VALUES)
+        rows = self._connection.execute(
+            f"""
+            SELECT
+                panel_id,
+                parent_session_id,
+                MIN(created_at) AS started_at,
+                MAX(activity_updated_at) AS updated_at,
+                COUNT(*) AS delegate_count,
+                SUM(CASE WHEN state IN ({placeholders}) THEN 1 ELSE 0 END) AS active_count
+            FROM dashboard_delegates
+            GROUP BY panel_id, parent_session_id
+            ORDER BY started_at DESC, panel_id DESC
+            """,
+            self._ACTIVE_STATE_VALUES,
+        ).fetchall()
+        return [self._summary_from_row(row) for row in rows]
+
+    def session(self, panel_id: str) -> DelegateDashboardSession | None:
+        """Returns one selected parent session without scanning unrelated delegates."""
+        rows = self._connection.execute(
+            """
+            SELECT
+                delegate_id, panel_id, parent_session_id, project_name, kind,
+                provider_policy, active_provider, state, created_at, claim_deadline,
+                claimed_at, started_at, finished_at, result_available, message,
+                activity_updated_at
+            FROM dashboard_delegates
+            WHERE panel_id = ?
+            ORDER BY created_at DESC, delegate_id DESC
+            """,
+            (panel_id,),
+        ).fetchall()
+        if not rows:
+            return None
+
+        active_count = sum(str(row["state"]) in self._ACTIVE_STATE_VALUES for row in rows)
+        summary = DelegateDashboardSummary(
+            panel_id=panel_id,
+            parent_session_id=str(rows[0]["parent_session_id"]),
+            started_at=min(float(row["created_at"]) for row in rows),
+            updated_at=max(float(row["activity_updated_at"]) for row in rows),
+            active=active_count > 0,
+            delegate_count=len(rows),
+            active_count=active_count,
+        )
+        delegates = tuple(self._status_from_row(row) for row in rows)
+        return DelegateDashboardSession(summary=summary, delegates=delegates)
+
+    def revision(self, panel_id: str | None = None) -> str:
+        """Returns an O(1) global or indexed selected-session invalidation generation."""
+        if panel_id is None:
+            row = self._connection.execute("SELECT generation FROM dashboard_meta WHERE id = 1").fetchone()
+        else:
+            row = self._connection.execute(
+                "SELECT MAX(generation) AS generation FROM dashboard_delegates WHERE panel_id = ?",
+                (panel_id,),
+            ).fetchone()
+        if row is None or row["generation"] is None:
+            return "0"
+        return str(int(row["generation"]))
+
+    def _configure_database(self) -> None:
+        """Configures the derived index for low-overhead concurrent process reads."""
+        self._connection.execute("PRAGMA journal_mode=WAL")
+        self._connection.execute("PRAGMA synchronous=NORMAL")
+        self._connection.execute("PRAGMA busy_timeout=5000")
+
+    def _create_schema(self) -> None:
+        """Creates the rebuildable dashboard projection schema."""
+        self._connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS dashboard_meta (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                generation INTEGER NOT NULL
+            );
+            INSERT OR IGNORE INTO dashboard_meta (id, generation) VALUES (1, 0);
+
+            CREATE TABLE IF NOT EXISTS dashboard_delegates (
+                delegate_id TEXT PRIMARY KEY,
+                panel_id TEXT NOT NULL,
+                parent_session_id TEXT NOT NULL,
+                project_name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                provider_policy TEXT NOT NULL,
+                active_provider TEXT,
+                state TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                claim_deadline REAL,
+                claimed_at REAL,
+                started_at REAL,
+                finished_at REAL,
+                result_available INTEGER NOT NULL,
+                message TEXT,
+                activity_updated_at REAL NOT NULL,
+                generation INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_dashboard_delegates_panel_created
+                ON dashboard_delegates(panel_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_dashboard_delegates_panel_generation
+                ON dashboard_delegates(panel_id, generation DESC);
+            """
+        )
+
+    def _next_generation(self) -> int:
+        """Advances and returns the global projection generation inside a transaction."""
+        row = self._connection.execute("SELECT generation FROM dashboard_meta WHERE id = 1").fetchone()
+        generation = (int(row["generation"]) if row is not None else 0) + 1
+        self._connection.execute("UPDATE dashboard_meta SET generation = ? WHERE id = 1", (generation,))
+        return generation
+
+    @staticmethod
+    def _values(
+        record: DelegateRecord,
+        status: DelegateStatusResponse,
+        generation: int,
+    ) -> tuple[object, ...]:
+        """Converts one canonical record into the compact dashboard projection row."""
+        activity_updated_at = (record.finished_at or record.started_at or record.created_at).timestamp()
+        return (
+            record.delegate_id,
+            dashboard_panel_id_for_session(record.parent_session_id),
+            record.parent_session_id,
+            status.project_name,
+            status.kind.value,
+            status.provider_policy.value,
+            status.active_provider.value if status.active_provider is not None else None,
+            status.state.value,
+            status.created_at.timestamp(),
+            status.claim_deadline.timestamp() if status.claim_deadline is not None else None,
+            status.claimed_at.timestamp() if status.claimed_at is not None else None,
+            status.started_at.timestamp() if status.started_at is not None else None,
+            status.finished_at.timestamp() if status.finished_at is not None else None,
+            int(status.result_available),
+            status.message,
+            activity_updated_at,
+            generation,
+        )
+
+    @staticmethod
+    def _summary_from_row(row: sqlite3.Row) -> DelegateDashboardSummary:
+        """Converts one aggregate query row into an immutable dashboard summary."""
+        active_count = int(row["active_count"] or 0)
+        return DelegateDashboardSummary(
+            panel_id=str(row["panel_id"]),
+            parent_session_id=str(row["parent_session_id"]),
+            started_at=float(row["started_at"]),
+            updated_at=float(row["updated_at"]),
+            active=active_count > 0,
+            delegate_count=int(row["delegate_count"]),
+            active_count=active_count,
+        )
+
+    @staticmethod
+    def _status_from_row(row: sqlite3.Row) -> DelegateStatusResponse:
+        """Converts one projection row back into the public compact status model."""
+        return DelegateStatusResponse.model_validate(
+            {
+                "delegate_id": row["delegate_id"],
+                "project_name": row["project_name"],
+                "kind": row["kind"],
+                "provider_policy": row["provider_policy"],
+                "active_provider": row["active_provider"],
+                "state": row["state"],
+                "created_at": row["created_at"],
+                "claim_deadline": row["claim_deadline"],
+                "claimed_at": row["claimed_at"],
+                "started_at": row["started_at"],
+                "finished_at": row["finished_at"],
+                "result_available": bool(row["result_available"]),
+                "message": row["message"],
+            }
+        )
+
+
 class DelegateStore:
     """Owns durable delegate persistence, ownership checks, and state transitions."""
 
@@ -456,6 +728,9 @@ class DelegateStore:
         self._config = config
         self._config.ensure_state_layout()
         self._lock = FileLock(str(self._config.delegates_dir / ".store.lock"))
+        self._dashboard_index = _DelegateDashboardIndex(self._config.delegates_dir / ".dashboard-index.sqlite3")
+        with self._lock:
+            self._rebuild_dashboard_index()
 
     def create(self, parent_session_id: str, request: CreateDelegateRequest) -> CreateDelegateResponse:
         """Creates one durable delegate in the initial state for its provider policy."""
@@ -656,40 +931,20 @@ class DelegateStore:
             records.sort(key=lambda item: item.created_at, reverse=True)
             return [self._status_response(record) for record in records[: max(0, limit)]]
 
-    def list_dashboard_activity(self, *, limit_per_session: int = 50, max_sessions: int = 128) -> list[dict[str, Any]]:
-        """Lists retained orchestration groups for the operator dashboard."""
+    def list_dashboard_summaries(self) -> list[DelegateDashboardSummary]:
+        """Returns compact retained parent-session summaries for dashboard overview."""
         with self._lock:
-            grouped: dict[str, list[DelegateRecord]] = {}
-            for delegate_dir in self._config.delegates_dir.glob("d_*"):
-                if not delegate_dir.is_dir():
-                    continue
-                try:
-                    record = self._read_record(delegate_dir.name)
-                except DelegateError:
-                    continue
-                grouped.setdefault(record.parent_session_id, []).append(record)
+            return self._dashboard_index.summaries()
 
-            panels: list[dict[str, Any]] = []
-            for parent_session_id, records in grouped.items():
-                records.sort(key=lambda item: item.created_at, reverse=True)
-                visible = records[: max(0, limit_per_session)]
-                if not visible:
-                    continue
-                active = any(record.state in _ACTIVE_STATES for record in visible)
-                updated_at = max((record.finished_at or record.started_at or record.created_at).timestamp() for record in visible)
-                panel_id = uuid.uuid5(uuid.NAMESPACE_URL, f"orchestrator:{parent_session_id}").hex[:16]
-                panels.append(
-                    {
-                        "panel_id": panel_id,
-                        "started_at": min(record.created_at for record in visible).timestamp(),
-                        "updated_at": updated_at,
-                        "active": active,
-                        "delegates": [self._status_response(record).model_dump(mode="json") for record in visible],
-                    }
-                )
+    def get_dashboard_session(self, panel_id: str) -> DelegateDashboardSession | None:
+        """Returns one retained parent session directly by dashboard panel identifier."""
+        with self._lock:
+            return self._dashboard_index.session(panel_id)
 
-            panels.sort(key=lambda panel: (not panel["active"], -panel["updated_at"]))
-            return panels[: max(0, max_sessions)]
+    def dashboard_revision(self, panel_id: str | None = None) -> str:
+        """Returns cheap invalidation state for dashboard overview or one selected session."""
+        with self._lock:
+            return self._dashboard_index.revision(panel_id)
 
     def dashboard_detail(self, delegate_id: str) -> DelegatePrivateDetail:
         """Returns one delegate's operator-visible detail without session ownership filtering."""
@@ -1097,10 +1352,24 @@ class DelegateStore:
         except (OSError, ValidationError) as exc:
             raise DelegateError(f"Delegate {delegate_id} record could not be read.") from exc
 
+    def _rebuild_dashboard_index(self) -> None:
+        """Rebuilds the derived dashboard projection from canonical delegate records."""
+        entries: list[tuple[DelegateRecord, DelegateStatusResponse]] = []
+        for delegate_dir in self._config.delegates_dir.glob("d_*"):
+            if not delegate_dir.is_dir():
+                continue
+            try:
+                record = self._read_record(delegate_dir.name)
+            except DelegateError:
+                continue
+            entries.append((record, self._status_response(record)))
+        self._dashboard_index.rebuild(entries)
+
     def _write_record(self, record: DelegateRecord) -> None:
-        """Atomically replaces one delegate record."""
+        """Atomically replaces one delegate record and its rebuildable dashboard projection."""
         path = self._delegate_dir(record.delegate_id) / "record.json"
         self._atomic_write_json(path, record.model_dump(mode="json"))
+        self._dashboard_index.upsert(record, self._status_response(record))
 
     def _delegate_dir(self, delegate_id: str) -> Path:
         """Returns the state directory owned by one delegate."""

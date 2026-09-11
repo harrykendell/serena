@@ -89,6 +89,7 @@ function overview(count, { active = true, orchestratorPanels = [] } = {}) {
 }
 
 function selected(expanded = false) {
+  const latest = call(0, true);
   return {
     panel_id: "panel-0",
     session_id: "session-0",
@@ -101,17 +102,24 @@ function selected(expanded = false) {
     tool_count: 1,
     job_count: 0,
     submission_span_seconds: 0,
+    latest_activity: {
+      label: latest.tool_name,
+      detail: latest.detail,
+      scope: latest.scope,
+      status: latest.status,
+      started_at: latest.started_at,
+      finished_at: latest.finished_at,
+    },
     git_additions: 0,
     git_deletions: 0,
     git_ahead_commits: 0,
-    calls: [call(0, true)],
+    calls: [latest],
     jobs: [],
     expanded_call: expanded
       ? {
           call_id: "call-0",
           tool_name: "read_file",
           status: "running",
-          structured_arguments: { relative_path: "file-0.txt" },
           arguments: { relative_path: "file-0.txt" },
           structured_result: null,
           result: null,
@@ -119,6 +127,42 @@ function selected(expanded = false) {
           media: null,
         }
       : null,
+    expanded_job: null,
+  };
+}
+
+
+function selectedMany(count) {
+  const calls = Array.from({ length: count }, (_, index) => call(index, false));
+  const latest = calls.at(-1);
+  return {
+    panel_id: "panel-large",
+    session_id: "session-large",
+    run_id: null,
+    project_name: "serena",
+    session_title: "Large session",
+    started_at: 1000,
+    updated_at: 1000 + count,
+    superseded: false,
+    tool_count: count,
+    job_count: 0,
+    submission_span_seconds: count > 1 ? count - 1 : 0,
+    latest_activity: latest
+      ? {
+          label: latest.tool_name,
+          detail: latest.detail,
+          scope: latest.scope,
+          status: latest.status,
+          started_at: latest.started_at,
+          finished_at: latest.finished_at,
+        }
+      : null,
+    git_additions: 0,
+    git_deletions: 0,
+    git_ahead_commits: 0,
+    calls,
+    jobs: [],
+    expanded_call: null,
     expanded_job: null,
   };
 }
@@ -171,19 +215,8 @@ function orchestratorPanel() {
     started_at: 1000,
     updated_at: 1001,
     active: true,
-    delegates: [
-      {
-        delegate_id: "delegate-0",
-        kind: "chat",
-        project_name: "serena",
-        provider_policy: "chatgpt",
-        active_provider: null,
-        state: "WAITING_FOR_CHAT",
-        created_at: "2026-09-11T18:00:00Z",
-        started_at: null,
-        finished_at: null,
-      },
-    ],
+    delegate_count: 1,
+    active_count: 1,
   };
 }
 
@@ -191,15 +224,35 @@ function selectedOrchestrator(expanded = false) {
   const panel = orchestratorPanel();
   return {
     ...panel,
+    delegates: [
+      {
+        delegate_id: "delegate-0",
+        kind: "explore",
+        project_name: "serena",
+        provider_policy: "chat",
+        active_provider: null,
+        state: "WAITING_FOR_CHAT",
+        created_at: "2026-09-11T18:00:00Z",
+        claim_deadline: null,
+        claimed_at: null,
+        started_at: null,
+        finished_at: null,
+        result_available: false,
+        message: null,
+      },
+    ],
     expanded_delegate: expanded
       ? {
           delegate_id: "delegate-0",
+          project_name: "serena",
+          kind: "explore",
           goal: "Verify the direct Orchestrator dashboard path.",
           state: "WAITING_FOR_CHAT",
-          provider_policy: "chatgpt",
+          provider_policy: "chat",
           active_provider: null,
           error: null,
           provider_metadata: { launch_mode: "manual" },
+          audit: [],
         }
       : null,
   };
@@ -310,6 +363,61 @@ async function overviewRenderMeasurement(count) {
   const elapsedMs = Number(match[1]);
   console.log(`Overview ${count} DOM rebuild: ${elapsedMs.toFixed(3)} ms`);
   return elapsedMs;
+}
+
+
+async function selectedSessionRenderMeasurement(count) {
+  const state = overview(0, { active: false });
+  const snapshot = selectedMany(count);
+  const targetId = `call-${Math.floor(count / 2)}`;
+  const scenario = `
+    const root = document.createElement("div");
+    document.body.append(root);
+    const panel = new window.SerenaActivity.ActivityPanel(root, { initialCollapsed: false });
+    const snapshot = ${JSON.stringify(snapshot)};
+    const initialStarted = performance.now();
+    panel.render(snapshot);
+    const initialMs = performance.now() - initialStarted;
+    panel.list.scrollTop = Math.floor(panel.list.scrollHeight / 2);
+    const scrollBefore = panel.list.scrollTop;
+    const expandStarted = performance.now();
+    panel.setExpandedEntryId(${JSON.stringify(targetId)});
+    const expandMs = performance.now() - expandStarted;
+    const scrollAfterExpand = panel.list.scrollTop;
+    const detailed = {
+      ...snapshot,
+      expanded_call: {
+        call_id: ${JSON.stringify(targetId)},
+        tool_name: "read_file",
+        status: "completed",
+        arguments: { relative_path: "large.txt" },
+        structured_result: { ok: true },
+        result: "{\\"ok\\":true}",
+        error: null,
+        media: null,
+      },
+    };
+    const rerenderStarted = performance.now();
+    panel.render(detailed);
+    const rerenderMs = performance.now() - rerenderStarted;
+    const detailLoaded = Boolean(root.querySelector(".activity-detail-section"));
+    const collapseStarted = performance.now();
+    panel.setExpandedEntryId(null);
+    const collapseMs = performance.now() - collapseStarted;
+    const rowCount = panel.list.querySelectorAll(".activity-row").length;
+    const preservedScroll = Math.abs(scrollAfterExpand - scrollBefore) <= 1;
+    document.getElementById("smoke-marker").textContent = rowCount === ${count} && detailLoaded && preservedScroll
+      ? "SMOKE_METRIC selected-${count}=" + [initialMs, rerenderMs, expandMs, collapseMs].map(value => value.toFixed(3)).join(",")
+      : "SMOKE_FAIL selected-${count} rows=" + rowCount + " detail=" + detailLoaded + " scroll=" + scrollBefore + "/" + scrollAfterExpand;
+  `;
+  const dom = await runChrome(prepareHtml(state, scenario));
+  const match = dom.match(new RegExp(`SMOKE_METRIC selected-${count}=([0-9.]+),([0-9.]+),([0-9.]+),([0-9.]+)`));
+  if (!match) throw new Error(`Selected session ${count} render measurement failed`);
+  const [initialMs, rerenderMs, expandMs, collapseMs] = match.slice(1).map(Number);
+  console.log(
+    `Selected ${count} calls: initial ${initialMs.toFixed(3)} ms; unchanged rerender ${rerenderMs.toFixed(3)} ms; expand ${expandMs.toFixed(3)} ms; collapse ${collapseMs.toFixed(3)} ms`
+  );
+  return { initialMs, rerenderMs, expandMs, collapseMs };
 }
 
 async function selectedSessionScenario() {
@@ -622,6 +730,7 @@ async function serviceWorkerScenario() {
 await overviewRequestScenario(10);
 await overviewRequestScenario(1000);
 await overviewRenderMeasurement(1000);
+await selectedSessionRenderMeasurement(2048);
 await selectedSessionScenario();
 await returnToOverviewScenario();
 await notificationDeepLinkScenario();
