@@ -47,10 +47,12 @@ class _DashboardAgent:
         return _DashboardAgent.get_project_git_metrics(project_name)
 
 
-def test_dashboard_serves_kendell_frontend_and_session_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _configure_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
     monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
-    agent = _DashboardAgent()
+
+
+def _one_execution(agent: _DashboardAgent, *, result: str = "config") -> None:
     agent.execution_store.start_execution(
         execution_id="execution-a",
         session_id="session-a",
@@ -58,10 +60,14 @@ def test_dashboard_serves_kendell_frontend_and_session_api(tmp_path: Path, monke
         tool_name="get_current_config",
         arguments={},
     )
-    agent.execution_store.finish_execution("execution-a", succeeded=True, result="config")
-    dashboard = DashboardServer(
-        agent=agent,
-    )
+    agent.execution_store.finish_execution("execution-a", succeeded=True, result=result)
+
+
+def test_dashboard_serves_shell_overview_and_selected_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_roots(tmp_path, monkeypatch)
+    agent = _DashboardAgent()
+    _one_execution(agent)
+    dashboard = DashboardServer(agent=agent)
     client = dashboard._app.test_client()
 
     redirect = client.get("/dashboard", base_url="https://serena.kendell.uk")
@@ -70,13 +76,9 @@ def test_dashboard_serves_kendell_frontend_and_session_api(tmp_path: Path, monke
     service_worker = client.get("/dashboard/service-worker.js")
     manifest = client.get("/dashboard/manifest.webmanifest")
     versioned_dashboard_script = client.get("/dashboard/dashboard.js?v=test")
-    state = client.get("/dashboard/api/state?include_state=1").get_json()
-    session = client.get("/dashboard/api/session").get_json()
-    serena = client.get("/dashboard/api/serena").get_json()
-    serena_with_state = client.get("/dashboard/api/serena?include_state=1").get_json()
-    serena_widget = client.get("/dashboard/widget/serena")
-    serena_panel_widget = client.get(f"/dashboard/widget/serena/{serena['panels'][0]['panel_id']}")
-    orchestrator = client.get("/dashboard/api/orchestrator").get_json()
+    state = client.get("/dashboard/api/state").get_json()
+    panel_id = state["serena"]["panels"][0]["panel_id"]
+    selected = client.get(f"/dashboard/api/serena/sessions/{panel_id}").get_json()
 
     assert redirect.status_code == 302
     assert redirect.headers["Location"] == "/dashboard/"
@@ -90,35 +92,19 @@ def test_dashboard_serves_kendell_frontend_and_session_api(tmp_path: Path, monke
     assert b"Serena + Orchestrator" in response.data
     assert b"notification-button" in response.data
     assert b'id="jobs-button"' in response.data
-    assert b'id="jobs-dialog"' in response.data
-    assert b"manifest.webmanifest?v=" in response.data
-    assert b"MCP dashboard" in response.data
-    assert b"orchestrator-logo.svg" in response.data
-    assert b"One retained activity panel for each ChatGPT conversation" in response.data
-    assert b"serena-widgets" in response.data
     assert b"dashboard-bootstrap" in response.data
-    assert b"dashboard.js?v=" in response.data
-    assert b"styles.css?v=" in response.data
-    assert b"Orchestrator" in response.data
-    assert b"window.openai" in serena_widget.data
-    assert b"get_activity" in serena_widget.data
-    assert b"get_activity_job_detail" in serena_widget.data
-    assert serena_widget.headers["Cache-Control"] == "private, max-age=3600"
-    assert b"get_activity" in serena_panel_widget.data
-    assert serena_panel_widget.headers["Cache-Control"] == "private, no-store"
-    assert len(serena["panels"]) == 1
-    assert serena_with_state["panels"][0]["initial_state"]["run_id"] == serena["panels"][0]["panel_id"]
-    assert state["serena"]["panels"][0]["panel_id"] == serena["panels"][0]["panel_id"]
+    assert b"serena-widgets" in response.data
+    assert b"orchestrator-widgets" in response.data
+    assert state["session"]["runtime_policy"] == "ChatGPT"
     assert state["jobs"] == {"status": "success", "jobs": [], "running_jobs": 0, "max_concurrent_jobs": 12}
     assert state["orchestrator"] == {"status": "success", "panels": []}
-    assert orchestrator == {"status": "success", "panels": []}
-    assert session["status"] == "success"
-    assert session["runtime_policy"] == "ChatGPT"
+    assert len(state["serena"]["panels"]) == 1
+    assert selected["panel_id"] == panel_id
+    assert [call["call_id"] for call in selected["calls"]] == ["execution-a"]
 
 
 def test_job_notification_link_redirects_to_originating_panel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
-    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
+    _configure_roots(tmp_path, monkeypatch)
     agent = _DashboardAgent()
     job_id = "0123456789abcdef0123456789abcdef"
     agent.execution_store.start_execution(
@@ -147,8 +133,7 @@ def test_job_notification_link_redirects_to_originating_panel(tmp_path: Path, mo
 
 
 def test_dashboard_registers_single_web_push_subscription(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
-    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
+    _configure_roots(tmp_path, monkeypatch)
     dashboard = DashboardServer(agent=_DashboardAgent())
     client = dashboard._app.test_client()
 
@@ -168,34 +153,28 @@ def test_dashboard_registers_single_web_push_subscription(tmp_path: Path, monkey
 
 
 def test_custom_dashboard_can_name_retained_serena_conversation_before_first_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
-    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
-    dashboard = DashboardServer(
-        agent=_DashboardAgent(),
-    )
+    _configure_roots(tmp_path, monkeypatch)
+    dashboard = DashboardServer(agent=_DashboardAgent())
     client = dashboard._app.test_client()
 
     assert dashboard.set_serena_session_name("session-a", "Dashboard naming") == "Dashboard naming"
-    overview = client.get("/dashboard/api/serena").get_json()
+    state = client.get("/dashboard/api/state").get_json()
 
-    assert len(overview["panels"]) == 1
-    assert overview["panels"][0]["display_name"] == "Dashboard naming"
-    panel_id = overview["panels"][0]["panel_id"]
-    state = client.get(f"/dashboard/api/serena/panels/{panel_id}").get_json()
-    assert state["session_title"] == "Dashboard naming"
+    assert len(state["serena"]["panels"]) == 1
+    panel = state["serena"]["panels"][0]
+    assert panel["display_name"] == "Dashboard naming"
+    selected = client.get(f"/dashboard/api/serena/sessions/{panel['panel_id']}").get_json()
+    assert selected["session_title"] == "Dashboard naming"
 
 
-def test_dashboard_revalidates_unchanged_panel_overview_without_response_body(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
-    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
-    dashboard = DashboardServer(
-        agent=_DashboardAgent(),
-    )
+def test_dashboard_revalidates_unchanged_overview_without_response_body(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_roots(tmp_path, monkeypatch)
+    dashboard = DashboardServer(agent=_DashboardAgent())
     dashboard.set_serena_session_name("session-a", "Cached session")
     client = dashboard._app.test_client()
 
-    first = client.get("/dashboard/api/serena")
-    second = client.get("/dashboard/api/serena", headers={"If-None-Match": first.headers["ETag"]})
+    first = client.get("/dashboard/api/state")
+    second = client.get("/dashboard/api/state", headers={"If-None-Match": first.headers["ETag"]})
 
     assert first.status_code == 200
     assert first.headers["Cache-Control"] == "private, no-cache"
@@ -203,9 +182,8 @@ def test_dashboard_revalidates_unchanged_panel_overview_without_response_body(tm
     assert second.data == b""
 
 
-def test_dashboard_bootstraps_inactive_serena_panels_with_compact_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
-    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
+def test_dashboard_overview_is_compact_and_selected_session_is_complete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_roots(tmp_path, monkeypatch)
     agent = _DashboardAgent()
     for task in range(1, 13):
         execution_id = f"execution-{task}"
@@ -218,39 +196,30 @@ def test_dashboard_bootstraps_inactive_serena_panels_with_compact_history(tmp_pa
             started_at=float(task),
         )
         agent.execution_store.finish_execution(execution_id, succeeded=True, result=f"file {task}")
-    dashboard = DashboardServer(
-        agent=agent,
-    )
+    dashboard = DashboardServer(agent=agent)
     client = dashboard._app.test_client()
 
-    panel = client.get("/dashboard/api/serena?include_state=1").get_json()["panels"][0]
-    state = panel["initial_state"]
+    state = client.get("/dashboard/api/state").get_json()
+    summary = state["serena"]["panels"][0]
 
-    assert panel["active"] is False
-    assert state["summary_only"] is True
-    assert state["tool_count"] == 12
-    assert state["submission_span_seconds"] == 11.0
-    assert state["git_additions"] == 17
-    assert state["git_deletions"] == 4
-    assert state["git_ahead_commits"] == 3
-    assert len(state["calls"]) == 1
-    assert state["calls"][-1]["scope"] == "file-12.txt"
+    assert summary["active"] is False
+    assert summary["tool_count"] == 12
+    assert summary["submission_span_seconds"] == 11.0
+    assert summary["git_additions"] == 17
+    assert summary["git_deletions"] == 4
+    assert summary["git_ahead_commits"] == 3
+    assert summary["latest_activity"]["scope"] == "file-12.txt"
 
-    full_state = client.get(f"/dashboard/api/serena/panels/{panel['panel_id']}").get_json()
-    assert full_state["summary_only"] is False
-    assert full_state["submission_span_seconds"] == 11.0
-    assert full_state["git_additions"] == 17
-    assert full_state["git_deletions"] == 4
-    assert full_state["git_ahead_commits"] == 3
-    assert len(full_state["calls"]) == 12
+    selected = client.get(f"/dashboard/api/serena/sessions/{summary['panel_id']}").get_json()
+    assert selected["submission_span_seconds"] == 11.0
+    assert selected["git_additions"] == 17
+    assert selected["git_deletions"] == 4
+    assert selected["git_ahead_commits"] == 3
+    assert len(selected["calls"]) == 12
 
 
-def test_dashboard_selected_session_document_defers_call_body_until_expanded(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
-    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
+def test_dashboard_selected_session_defers_call_body_until_expanded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_roots(tmp_path, monkeypatch)
     agent = _DashboardAgent()
     for index in range(2):
         execution_id = f"execution-{index}"
@@ -261,11 +230,7 @@ def test_dashboard_selected_session_document_defers_call_body_until_expanded(
             tool_name="read_file",
             arguments={"relative_path": f"file-{index}.txt"},
         )
-        agent.execution_store.finish_execution(
-            execution_id,
-            succeeded=True,
-            result=f"retained body {index}",
-        )
+        agent.execution_store.finish_execution(execution_id, succeeded=True, result=f"retained body {index}")
     dashboard = DashboardServer(agent=agent)
     client = dashboard._app.test_client()
     panel_id = agent.execution_store.panel_id_for_session("session-a")
@@ -282,32 +247,26 @@ def test_dashboard_selected_session_document_defers_call_body_until_expanded(
     assert expanded["expanded_job"] is None
 
 
-def test_dashboard_orders_serena_panels_newest_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
-    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
-    dashboard = DashboardServer(
-        agent=_DashboardAgent(),
-    )
-
+def test_dashboard_orders_serena_sessions_newest_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_roots(tmp_path, monkeypatch)
+    dashboard = DashboardServer(agent=_DashboardAgent())
     dashboard.set_serena_session_name("session-a", "First session")
     dashboard.set_serena_session_name("session-b", "Second session")
-    panels = dashboard._app.test_client().get("/dashboard/api/serena").get_json()["panels"]
+
+    panels = dashboard._app.test_client().get("/dashboard/api/state").get_json()["serena"]["panels"]
 
     assert [panel["display_name"] for panel in panels] == ["Second session", "First session"]
 
 
-def test_dashboard_orders_orchestrator_panels_newest_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dashboard_orders_orchestrator_sessions_newest_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_roots(tmp_path, monkeypatch)
     orchestrator_root = tmp_path / "orchestrator-home"
-    monkeypatch.setenv("ORCHESTRATOR_HOME", str(orchestrator_root))
-    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
     archive = OrchestratorDashboardSessionArchive(OrchestratorConfig.from_environment(orchestrator_root))
     archive.set_display_name("session-a", "First session")
     archive.set_display_name("session-b", "Second session")
-    dashboard = DashboardServer(
-        agent=_DashboardAgent(),
-    )
+    dashboard = DashboardServer(agent=_DashboardAgent())
 
-    panels = dashboard._app.test_client().get("/dashboard/api/orchestrator").get_json()["panels"]
+    panels = dashboard._app.test_client().get("/dashboard/api/state").get_json()["orchestrator"]["panels"]
 
     assert [panel["display_name"] for panel in panels] == ["Second session", "First session"]
 
@@ -315,27 +274,24 @@ def test_dashboard_orders_orchestrator_panels_newest_first(tmp_path: Path, monke
 def test_custom_dashboard_shows_named_orchestrator_conversation_before_first_delegate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Retained Orchestrator session metadata creates a named dashboard panel before delegation starts."""
+    _configure_roots(tmp_path, monkeypatch)
     orchestrator_root = tmp_path / "orchestrator-home"
-    monkeypatch.setenv("ORCHESTRATOR_HOME", str(orchestrator_root))
-    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
     config = OrchestratorConfig.from_environment(orchestrator_root)
     OrchestratorDashboardSessionArchive(config).set_display_name("session-a", "Automatic Session Titles")
+    dashboard = DashboardServer(agent=_DashboardAgent())
+    client = dashboard._app.test_client()
 
-    dashboard = DashboardServer(
-        agent=_DashboardAgent(),
-    )
-    overview = dashboard._app.test_client().get("/dashboard/api/orchestrator").get_json()
+    panel = client.get("/dashboard/api/state").get_json()["orchestrator"]["panels"][0]
+    selected = client.get(f"/dashboard/api/orchestrator/sessions/{panel['panel_id']}").get_json()
 
-    assert len(overview["panels"]) == 1
-    panel = overview["panels"][0]
     assert panel["display_name"] == "Automatic Session Titles"
     assert panel["delegates"] == []
+    assert selected["display_name"] == "Automatic Session Titles"
+    assert selected["delegates"] == []
 
 
-def test_retained_serena_panel_preserves_semantic_detail_and_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
-    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
+def test_retained_serena_session_preserves_semantic_detail_scope_and_arguments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_roots(tmp_path, monkeypatch)
     agent = _DashboardAgent()
     agent.execution_store.start_execution(
         execution_id="search-execution",
@@ -344,6 +300,7 @@ def test_retained_serena_panel_preserves_semantic_detail_and_scope(tmp_path: Pat
         tool_name="search_for_pattern",
         arguments={"substring_pattern": "ActivityRunManager.*detail", "relative_path": "src/serena"},
     )
+    agent.execution_store.finish_execution("search-execution", succeeded=True, result="matches")
     agent.execution_store.start_execution(
         execution_id="replace-execution",
         session_id="session-a",
@@ -351,23 +308,20 @@ def test_retained_serena_panel_preserves_semantic_detail_and_scope(tmp_path: Pat
         tool_name="replace_in_files",
         arguments={"needle": "old value", "repl": "new value", "mode": "literal", "relative_path": "src/serena"},
     )
-    dashboard = DashboardServer(
-        agent=agent,
-    )
+    agent.execution_store.finish_execution("replace-execution", succeeded=True, result="changed")
+    dashboard = DashboardServer(agent=agent)
     client = dashboard._app.test_client()
+    panel_id = client.get("/dashboard/api/state").get_json()["serena"]["panels"][0]["panel_id"]
 
-    overview = client.get("/dashboard/api/serena").get_json()
-    panel_id = overview["panels"][0]["panel_id"]
-    panel = client.get(f"/dashboard/api/serena/panels/{panel_id}").get_json()
-
-    calls = {call["tool_name"]: call for call in panel["calls"]}
+    selected = client.get(f"/dashboard/api/serena/sessions/{panel_id}").get_json()
+    calls = {call["tool_name"]: call for call in selected["calls"]}
     assert calls["search_for_pattern"]["detail"] == "ActivityRunManager.*detail"
     assert calls["search_for_pattern"]["scope"] == "src/serena"
     assert calls["replace_in_files"]["detail"] == "old value"
     assert calls["replace_in_files"]["scope"] == "src/serena"
 
-    detail = client.get(f"/dashboard/api/serena/panels/{panel_id}/calls/{calls['replace_in_files']['call_id']}").get_json()
-    assert detail["structured_arguments"] == {
+    expanded = client.get(f"/dashboard/api/serena/sessions/{panel_id}?expanded=replace-execution").get_json()
+    assert expanded["expanded_call"]["structured_arguments"] == {
         "needle": "old value",
         "repl": "new value",
         "mode": "literal",
@@ -375,9 +329,8 @@ def test_retained_serena_panel_preserves_semantic_detail_and_scope(tmp_path: Pat
     }
 
 
-def test_retained_serena_panel_exposes_typed_shell_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
-    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
+def test_retained_serena_session_exposes_typed_shell_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_roots(tmp_path, monkeypatch)
     agent = _DashboardAgent()
     agent.execution_store.start_execution(
         execution_id="shell-execution",
@@ -393,17 +346,16 @@ def test_retained_serena_panel_exposes_typed_shell_result(tmp_path: Path, monkey
     )
     dashboard = DashboardServer(agent=agent)
     client = dashboard._app.test_client()
+    panel_id = client.get("/dashboard/api/state").get_json()["serena"]["panels"][0]["panel_id"]
 
-    panel_id = client.get("/dashboard/api/serena").get_json()["panels"][0]["panel_id"]
-    detail = client.get(f"/dashboard/api/serena/panels/{panel_id}/calls/shell-execution").get_json()
+    expanded = client.get(f"/dashboard/api/serena/sessions/{panel_id}?expanded=shell-execution").get_json()
 
-    assert detail["structured_result"] == {"return_code": 0, "stdout": "hello"}
+    assert expanded["expanded_call"]["structured_result"] == {"return_code": 0, "stdout": "hello"}
 
 
-def test_retained_serena_panel_serves_rendered_media_instead_of_result_repr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
+def test_retained_serena_session_serves_rendered_media(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_roots(tmp_path, monkeypatch)
     serena_home = tmp_path / "serena-home"
-    monkeypatch.setenv("SERENA_HOME", str(serena_home))
     snapshot_root = serena_home / "chat_file_snapshots"
     snapshot_root.mkdir(parents=True, mode=0o700)
     snapshot_root.chmod(0o700)
@@ -429,24 +381,18 @@ def test_retained_serena_panel_serves_rendered_media_instead_of_result_repr(tmp_
             "uri": f"serena-file://export/{token}",
         },
     )
-    restored_dashboard = DashboardServer(
-        agent=_DashboardAgent(),
-    )
+    restored_dashboard = DashboardServer(agent=_DashboardAgent())
     client = restored_dashboard._app.test_client()
-    overview = client.get("/dashboard/api/serena").get_json()
-    panel_id = overview["panels"][0]["panel_id"]
-    panel = client.get(f"/dashboard/api/serena/panels/{panel_id}").get_json()
-    call_id = panel["calls"][0]["call_id"]
-    detail = client.get(f"/dashboard/api/serena/panels/{panel_id}/calls/{call_id}").get_json()
+    panel_id = client.get("/dashboard/api/state").get_json()["serena"]["panels"][0]["panel_id"]
+    expanded = client.get(f"/dashboard/api/serena/sessions/{panel_id}?expanded=render-execution").get_json()
 
-    assert detail["result"] is None
-    assert detail["media"] == {
+    assert expanded["expanded_call"]["result"] is None
+    assert expanded["expanded_call"]["media"] == {
         "type": "image",
         "name": "figure-p1.png",
         "mime_type": "image/png",
-        "url": f"/dashboard/api/serena/panels/{panel_id}/calls/{call_id}/media",
     }
-    response = client.get(detail["media"]["url"])
+    response = client.get(f"/dashboard/api/serena/sessions/{panel_id}/media/render-execution")
     assert response.status_code == 200
     assert response.content_type == "image/png"
     assert response.data == image_bytes
@@ -460,11 +406,9 @@ def test_custom_dashboard_uses_default_project_and_dynamic_languages() -> None:
         memory_manager=memory_manager,
         get_language_server_candidates=lambda: [LanguageServerId.PYTHON, LanguageServerId.HTML],
     )
-    dashboard = DashboardServer(
-        agent=_DashboardAgent(project),
-    )
+    dashboard = DashboardServer(agent=_DashboardAgent(project))
 
-    session = dashboard._app.test_client().get("/dashboard/api/session").get_json()
+    session = dashboard._app.test_client().get("/dashboard/api/state").get_json()["session"]
 
     assert session["languages"] == ["python", "html"]
 
@@ -473,9 +417,7 @@ def test_memory_endpoint_reads_active_project_memory() -> None:
     memory_manager = MagicMock()
     memory_manager.load_memory.return_value = "# Critical info\n\nMemory body"
     project = SimpleNamespace(memory_manager=memory_manager)
-    dashboard = DashboardServer(
-        agent=_DashboardAgent(project),
-    )
+    dashboard = DashboardServer(agent=_DashboardAgent(project))
 
     response = dashboard._app.test_client().get("/dashboard/api/memory?name=critical_info").get_json()
 

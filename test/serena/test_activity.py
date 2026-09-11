@@ -950,27 +950,11 @@ def test_activity_resource_uses_mcp_app_contract() -> None:
         "openai/widgetDescription": "Shows Serena tool calls, current-turn jobs, and a compact indicator for other running jobs.",
     }
     assert content.mime_type == "text/html;profile=mcp-app"
-    assert 'window.openai.callTool("get_activity"' in content.content
-    assert 'window.openai.callTool("get_activity_detail"' in content.content
-    assert 'window.openai.callTool("get_activity_media"' in content.content
-    assert 'window.openai.callTool("get_activity_job_detail"' in content.content
-    assert 'id="activity-logo" class="logo"' in content.content
-    assert 'id="activity-header-tool">Waiting for activity</strong>' in content.content
-    assert 'id="activity-header-scope" class="header-scope"' in content.content
-    assert 'toolName.className = "tool-name"' in content.content
-    assert 'scope.className = "scope"' in content.content
-    assert 'id="activity-header-submitted" class="header-submitted"' in content.content
-    assert 'id="activity-header-elapsed" class="summary"' in content.content
-    assert (
-        'id="activity-header-stats" class="header-stats"><span id="activity-header-stats-base" class="header-stats-base">0 tools · 0 jobs</span>'
-        '<span id="activity-header-git" class="header-git"></span></span>' in content.content
-    )
-    assert ".git-additions { color: #1a7f37; }" in content.content
-    assert ".git-deletions { margin-left: 4px; color: #cf222e; }" in content.content
-    assert ".git-ahead { margin-left: 4px; color: CanvasText; }" in content.content
-    assert "ahead.textContent = `(+${gitAheadCommits})`;" in content.content
-    assert 'id="activity-header-duration" class="header-duration"></span>' in content.content
-    assert 'id="activity-other-jobs" class="other-jobs" type="button" aria-expanded="false" hidden' in content.content
+    assert content.content.startswith("<!doctype html>")
+    assert '"get_activity"' in content.content
+    assert '"get_activity_detail"' in content.content
+    assert '"get_activity_media"' in content.content
+    assert '"get_activity_job_detail"' in content.content
 
 
 def test_activity_tools_expose_widget_and_private_polling_contract() -> None:

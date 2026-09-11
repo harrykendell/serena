@@ -5,13 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from serena.dashboard_activity import DashboardActivityArchive
 from serena.execution_store import ExecutionStore
 from serena.retention import JobRetentionState, SessionRetentionPolicy
 from serena.storage_compression import RetainedTextCompression
 
 
-def test_dashboard_activity_archive_survives_restart_and_pins_file_snapshots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_execution_store_survives_restart_and_pins_file_snapshots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
     now = time.time()
     token = "a" * 64
@@ -36,35 +35,36 @@ def test_dashboard_activity_archive_survives_restart_and_pins_file_snapshots(tmp
         finished_at=now + 1,
     )
 
-    restored = DashboardActivityArchive(ExecutionStore())
+    restored = ExecutionStore()
     sessions = restored.list_sessions()
+    calls = restored.list_session_executions("chat-a")
 
     assert len(sessions) == 1
-    assert sessions[0]["panel_id"] == DashboardActivityArchive.panel_id_for_session("chat-a")
-    assert sessions[0]["calls"][0]["call_id"] == "execution-a"
-    assert sessions[0]["calls"][0]["status"] == "completed"
-    assert sessions[0]["calls"][0]["media"] == {
+    assert sessions[0].panel_id == ExecutionStore.panel_id_for_session("chat-a")
+    assert calls[0].execution_id == "execution-a"
+    assert calls[0].status == "completed"
+    assert calls[0].media == {
         "type": "image",
         "name": "figure.png",
         "mime_type": "image/png",
         "uri": f"serena-file://export/{token}",
     }
     assert restored.retained_file_tokens() == {token}
-    assert DashboardActivityArchive.retained_file_tokens_from_disk() == {token}
+    assert ExecutionStore.retained_file_tokens_from_disk() == {token}
 
 
-def test_dashboard_activity_archive_persists_operator_conversation_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_execution_store_persists_operator_conversation_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
-    archive = DashboardActivityArchive(ExecutionStore())
+    store = ExecutionStore()
 
-    assert archive.set_display_name("chat-a", "  Loading scan analysis  ") == "Loading scan analysis"
-    restored = DashboardActivityArchive(ExecutionStore())
+    assert store.set_session_display_name("chat-a", "  Loading scan analysis  ") == "Loading scan analysis"
+    restored = ExecutionStore()
 
-    assert restored.list_sessions()[0]["session_id"] == "chat-a"
-    assert restored.list_sessions()[0]["display_name"] == "Loading scan analysis"
+    assert restored.list_sessions()[0].session_id == "chat-a"
+    assert restored.list_sessions()[0].display_name == "Loading scan analysis"
 
 
-def test_dashboard_activity_archive_marks_interrupted_calls_terminal_on_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_execution_store_marks_interrupted_calls_terminal_on_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
     store = ExecutionStore()
     store.start_execution(
@@ -75,12 +75,13 @@ def test_dashboard_activity_archive_marks_interrupted_calls_terminal_on_restart(
         arguments={"relative_path": "notes.txt"},
     )
 
-    restored = DashboardActivityArchive(ExecutionStore())
-    call = restored.list_sessions()[0]["calls"][0]
+    restored = ExecutionStore()
+    call = restored.list_session_executions("chat-a")[0]
 
-    assert call["status"] == "failed"
-    assert call["finished_at"] is not None
-    assert "restarted" in call["error"]
+    assert call.status == "failed"
+    assert call.finished_at is not None
+    assert call.error is not None
+    assert "restarted" in call.error
 
 
 def test_execution_retention_evicts_oldest_session_atomically(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

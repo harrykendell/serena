@@ -1,141 +1,678 @@
+"use strict";
+
 const API_PREFIX = "/dashboard/api";
-const ACTIVE_POLL_INTERVAL_MS = 500;
-const IDLE_POLL_INTERVAL_MS = 5000;
+const ACTIVE_POLL_INTERVAL_MS = 2000;
+const IDLE_POLL_INTERVAL_MS = 10000;
 const HIDDEN_POLL_INTERVAL_MS = 60000;
 
-const DASHBOARD_LOAD_ID = Date.now().toString(36);
+const bootstrapNode = document.getElementById("dashboard-bootstrap");
+const dashboardBootstrapState = bootstrapNode ? JSON.parse(bootstrapNode.textContent || "{}") : {};
 const DASHBOARD_ASSET_VERSION = document.documentElement.dataset.assetVersion || "";
-let dashboardBootstrapState = null;
-try {
-  const bootstrapNode = document.getElementById("dashboard-bootstrap");
-  dashboardBootstrapState = bootstrapNode?.textContent ? JSON.parse(bootstrapNode.textContent) : null;
-} catch (_) {
-  dashboardBootstrapState = null;
-}
 
-const sessionWidgetLoaders = new Map();
+let currentRoute = initialRoute();
+let activeOverviewView = currentRoute.kind === "orchestrator" ? "orchestrator" : "serena";
+let currentDocument = currentRoute.kind === "overview" ? dashboardBootstrapState : null;
+let currentEtag = null;
+let routeGeneration = 0;
 let refreshInFlight = false;
+let refreshRequested = false;
 let refreshTimer = null;
-let initialActivityStateLoaded = false;
-let initialActivityViewSelected = false;
-let latestPanelActivity = false;
+let clockTimer = null;
+let latestOverview = dashboardBootstrapState;
+let latestResources = { tools: [], memories: [] };
 let latestJobs = { jobs: [], running_jobs: 0, max_concurrent_jobs: 0 };
-let notificationTarget = (() => {
-  const params = new URLSearchParams(window.location.search);
-  const panelId = params.get("panel");
-  const jobId = params.get("job");
-  return panelId && jobId ? { panelId, jobId } : null;
-})();
+let visibleActivityPanels = [];
+let visibleElapsedNodes = [];
+let selectedSerenaPanel = null;
+let selectedSerenaRoot = null;
+let objectUrls = [];
+let pendingNotificationTarget = currentRoute.notificationTarget;
 
 function byId(id) {
   return document.getElementById(id);
 }
 
-function setText(id, value, fallback = "—") {
-  const elem = byId(id);
-  if (elem) setNodeText(elem, value || value === 0 ? String(value) : fallback);
+function initialRoute() {
+  const params = new URLSearchParams(window.location.search);
+  const panelId = params.get("panel");
+  const orchestratorId = params.get("orchestrator");
+  const jobId = params.get("job");
+  if (panelId) {
+    return {
+      kind: "serena",
+      panelId,
+      expandedEntryId: jobId || null,
+      notificationTarget: jobId ? { panelId, jobId } : null,
+    };
+  }
+  if (orchestratorId) {
+    return { kind: "orchestrator", panelId: orchestratorId, expandedEntryId: null, notificationTarget: null };
+  }
+  return { kind: "overview", notificationTarget: null };
 }
 
-function setNodeText(node, value) {
-  const text = String(value ?? "");
-  if (node.textContent !== text) node.textContent = text;
-}
-
-function makeElement(tag, className, text) {
-  const elem = document.createElement(tag);
-  if (className) elem.className = className;
-  if (text !== undefined) elem.textContent = text;
-  return elem;
+function routePath(route = currentRoute) {
+  if (route.kind === "serena") {
+    const base = `/serena/sessions/${encodeURIComponent(route.panelId)}`;
+    return route.expandedEntryId ? `${base}?expanded=${encodeURIComponent(route.expandedEntryId)}` : base;
+  }
+  if (route.kind === "orchestrator") {
+    const base = `/orchestrator/sessions/${encodeURIComponent(route.panelId)}`;
+    return route.expandedEntryId ? `${base}?expanded=${encodeURIComponent(route.expandedEntryId)}` : base;
+  }
+  return "/state";
 }
 
 function dashboardAssetUrl(name) {
-  return DASHBOARD_ASSET_VERSION ? `${name}?v=${encodeURIComponent(DASHBOARD_ASSET_VERSION)}` : name;
+  return `/dashboard/${name}${DASHBOARD_ASSET_VERSION ? `?v=${encodeURIComponent(DASHBOARD_ASSET_VERSION)}` : ""}`;
 }
 
-function clearAndAppend(parent, children) {
-  parent.replaceChildren(...children);
+function clearObjectUrls() {
+  for (const url of objectUrls) URL.revokeObjectURL(url);
+  objectUrls = [];
 }
 
-function reconcileKeyed(container, items, keyFor, createNode, updateNode) {
-  const existing = new Map();
-  Array.from(container.children).forEach((child) => {
-    if (child.dataset.itemKey) existing.set(child.dataset.itemKey, child);
-  });
-
-  const wanted = new Set();
-  let cursor = container.firstElementChild;
-  items.forEach((item) => {
-    const key = String(keyFor(item));
-    wanted.add(key);
-    let node = existing.get(key);
-    if (!node) {
-      node = createNode(item);
-      node.dataset.itemKey = key;
-    }
-    updateNode(node, item);
-
-    if (node !== cursor) container.insertBefore(node, cursor);
-    cursor = node.nextElementSibling;
-  });
-
-  Array.from(container.children).forEach((child) => {
-    if (!child.dataset.itemKey || !wanted.has(child.dataset.itemKey)) child.remove();
-  });
+function setText(id, value, fallback = "—") {
+  const node = byId(id);
+  if (node) node.textContent = value === null || value === undefined || value === "" ? fallback : String(value);
 }
 
-function activateActivityView(name) {
-  const selected = name === "orchestrator" ? "orchestrator" : "serena";
-  byId("activity-columns").dataset.activeView = selected;
-  document.querySelectorAll("[data-activity-view-tab]").forEach((button) => {
-    const active = button.dataset.activityViewTab === selected;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-selected", String(active));
-    button.tabIndex = active ? 0 : -1;
-  });
+function setConnection(state, label) {
+  const node = byId("connection-state");
+  if (!node) return;
+  node.dataset.state = state;
+  setText("connection-label", label, "Connected");
+  if (state === "connected") {
+    setText("last-update", new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }), "");
+  }
 }
 
-function isTabbedActivityMode() {
-  return byId("activity-columns")?.getBoundingClientRect().width <= 1011;
+function isSerenaActive(documentState) {
+  return [...(documentState?.calls || []), ...(documentState?.jobs || [])]
+    .some(item => String(item?.status || "").toLowerCase() === "running");
 }
 
-function setupActivityViewTabs() {
-  const buttons = Array.from(document.querySelectorAll("[data-activity-view-tab]"));
-  buttons.forEach((button, index) => {
-    button.addEventListener("click", () => activateActivityView(button.dataset.activityViewTab));
-    button.addEventListener("keydown", (event) => {
-      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-      event.preventDefault();
-      const offset = event.key === "ArrowRight" ? 1 : -1;
-      const target = buttons[(index + offset + buttons.length) % buttons.length];
-      target.focus();
-      activateActivityView(target.dataset.activityViewTab);
-    });
-  });
-  activateActivityView("serena");
+function isOrchestratorActive(documentState) {
+  const activeStates = new Set(["WAITING_FOR_CHAT", "QUEUED", "RUNNING_CHAT", "RUNNING_CODEX"]);
+  return Boolean(documentState?.active) || (documentState?.delegates || []).some(item => activeStates.has(String(item?.state || "")));
 }
 
-async function getJson(path) {
-  const response = await fetch(`${API_PREFIX}${path}`, {
-    cache: "no-cache",
-    headers: { Accept: "application/json" },
-  });
+function documentHasActiveWork(documentState = currentDocument) {
+  if (!documentState) return false;
+  if (currentRoute.kind === "serena") return isSerenaActive(documentState);
+  if (currentRoute.kind === "orchestrator") return isOrchestratorActive(documentState);
+  const serenaActive = (documentState?.serena?.panels || []).some(panel => panel.active);
+  const orchestratorActive = (documentState?.orchestrator?.panels || []).some(panel => panel.active);
+  return serenaActive || orchestratorActive || Number(documentState?.jobs?.running_jobs || 0) > 0;
+}
+
+function nextRefreshDelay() {
+  if (document.hidden) return HIDDEN_POLL_INTERVAL_MS;
+  return documentHasActiveWork() ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS;
+}
+
+function scheduleRefresh(delay = nextRefreshDelay()) {
+  if (refreshTimer !== null) clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    void refresh();
+  }, delay);
+}
+
+async function fetchCurrentDocument(path, etag) {
+  const headers = { Accept: "application/json" };
+  if (etag) headers["If-None-Match"] = etag;
+  const response = await fetch(`${API_PREFIX}${path}`, { cache: "no-cache", headers });
+  if (response.status === 304) return { unchanged: true, etag };
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   const data = await response.json();
   if (data?.status === "error") throw new Error(data.message || "Serena API error");
-  return data;
+  return { unchanged: false, etag: response.headers.get("ETag"), data };
+}
+
+async function refresh() {
+  if (refreshInFlight) {
+    refreshRequested = true;
+    return;
+  }
+  if (refreshTimer !== null) {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+
+  refreshInFlight = true;
+  const generation = routeGeneration;
+  const path = routePath();
+  try {
+    const response = await fetchCurrentDocument(path, currentEtag);
+    if (generation !== routeGeneration) return;
+    currentEtag = response.etag || null;
+    if (!response.unchanged) {
+      currentDocument = response.data;
+      if (currentRoute.kind === "overview") latestOverview = response.data;
+      renderCurrentDocument();
+    }
+    setConnection("connected", "Connected");
+  } catch (error) {
+    if (generation === routeGeneration) {
+      console.error("Dashboard refresh failed", error);
+      setConnection("error", "Disconnected");
+    }
+  } finally {
+    refreshInFlight = false;
+    if (generation !== routeGeneration || refreshRequested) {
+      refreshRequested = false;
+      void refresh();
+    } else {
+      scheduleRefresh();
+    }
+  }
+}
+
+function navigate(route, { replace = false } = {}) {
+  currentRoute = { ...route, notificationTarget: null };
+  routeGeneration += 1;
+  currentDocument = null;
+  currentEtag = null;
+  clearObjectUrls();
+
+  const url = new URL(window.location.href);
+  url.search = "";
+  if (currentRoute.kind === "serena") url.searchParams.set("panel", currentRoute.panelId);
+  if (currentRoute.kind === "orchestrator") url.searchParams.set("orchestrator", currentRoute.panelId);
+  if (replace) history.replaceState(null, "", url);
+  else history.pushState(null, "", url);
+
+  if (currentRoute.kind === "serena") activeOverviewView = "serena";
+  if (currentRoute.kind === "orchestrator") activeOverviewView = "orchestrator";
+  applyActivityView();
+  renderLoadingRoute();
+  void refresh();
+}
+
+function returnToOverview() {
+  navigate({ kind: "overview" });
+}
+
+function renderLoadingRoute() {
+  visibleActivityPanels = [];
+  visibleElapsedNodes = [];
+  selectedSerenaPanel = null;
+  selectedSerenaRoot = null;
+  const targetId = currentRoute.kind === "orchestrator" ? "orchestrator-widgets" : "serena-widgets";
+  const target = byId(targetId);
+  if (!target) return;
+  target.replaceChildren();
+  const loading = document.createElement("div");
+  loading.className = "empty-card";
+  loading.textContent = "Loading…";
+  target.append(loading);
+}
+
+function renderCurrentDocument() {
+  clearObjectUrls();
+  visibleElapsedNodes = [];
+  if (currentRoute.kind === "serena") renderSelectedSerena(currentDocument);
+  else if (currentRoute.kind === "orchestrator") renderSelectedOrchestrator(currentDocument);
+  else renderOverview(currentDocument);
+}
+
+function renderOverview(state) {
+  latestOverview = state || {};
+  renderOverviewMetadata(state?.session || {}, state?.jobs || {});
+  renderSerenaOverview(state?.serena?.panels || []);
+  renderOrchestratorOverview(state?.orchestrator?.panels || []);
+  applyActivityView();
+}
+
+function renderOverviewMetadata(session, jobs) {
+  setText("languages", (session.languages || []).join(" · "), "None");
+  setText("runtime-policy", session.runtime_policy, "ChatGPT");
+  setText("version", session.serena_version, "—");
+  const activeTools = session.active_tools || [];
+  const memories = session.available_memories || [];
+  latestResources = { tools: activeTools, memories };
+  latestJobs = jobs || { jobs: [], running_jobs: 0, max_concurrent_jobs: 0 };
+  setText("tool-count", activeTools.length);
+  setText("memories-count", memories.length);
+  setText("running-jobs-count", latestJobs.running_jobs || 0);
+  setText("max-jobs-count", latestJobs.max_concurrent_jobs || 0);
+  byId("tools-button")?.setAttribute("aria-label", `${activeTools.length} active tools`);
+  byId("memories-button")?.setAttribute("aria-label", `${memories.length} memories`);
+  byId("jobs-button")?.setAttribute("aria-label", `${latestJobs.running_jobs || 0} of ${latestJobs.max_concurrent_jobs || 0} Serena jobs running`);
+  if (byId("jobs-dialog")?.open) renderRunningJobs();
+}
+
+function activitySummarySnapshot(panel) {
+  return {
+    ...panel,
+    run_id: null,
+    session_title: panel.display_name || panel.session_title || "Serena",
+  };
+}
+
+function renderSerenaOverview(panels) {
+  const container = byId("serena-widgets");
+  if (!container) return;
+  container.replaceChildren();
+  visibleActivityPanels = [];
+  setText("serena-panel-count", panels.length, "0");
+  setSectionDetail("serena", false);
+
+  if (!panels.length) {
+    container.append(emptyCard("No Serena session activity recorded yet."));
+    return;
+  }
+
+  for (const summary of panels) {
+    const root = document.createElement("div");
+    root.className = "dashboard-activity-card";
+    container.append(root);
+    const panel = new window.SerenaActivity.ActivityPanel(root, {
+      initialCollapsed: true,
+      summaryMode: true,
+      onOpen: () => navigate({ kind: "serena", panelId: summary.panel_id, expandedEntryId: null }),
+    });
+    panel.render(activitySummarySnapshot(summary));
+    visibleActivityPanels.push(panel);
+  }
+}
+
+function selectedBackButton(label) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "activity-back-button";
+  button.textContent = `‹ ${label}`;
+  button.addEventListener("click", returnToOverview);
+  return button;
+}
+
+function renderSelectedSerena(snapshot) {
+  const container = byId("serena-widgets");
+  if (!container || !snapshot) return;
+  setSectionDetail("serena", true, snapshot.session_title || "Serena session");
+  setText("serena-panel-count", "1", "1");
+  applyActivityView("serena");
+
+  if (!selectedSerenaRoot || !selectedSerenaPanel) {
+    container.replaceChildren();
+    container.append(selectedBackButton("All Serena sessions"));
+    selectedSerenaRoot = document.createElement("div");
+    container.append(selectedSerenaRoot);
+    selectedSerenaPanel = new window.SerenaActivity.ActivityPanel(selectedSerenaRoot, {
+      initialCollapsed: false,
+      expandedEntryId: currentRoute.expandedEntryId,
+      onExpandedChange: entryId => {
+        currentRoute = { ...currentRoute, expandedEntryId: entryId || null };
+        routeGeneration += 1;
+        currentEtag = null;
+        renderSelectedSerena({ ...currentDocument, expanded_call: null, expanded_job: null });
+        void refresh();
+      },
+      loadMedia: loadDashboardMedia,
+    });
+  }
+
+  selectedSerenaPanel.setExpandedEntryId(currentRoute.expandedEntryId);
+  selectedSerenaPanel.render(snapshot);
+  visibleActivityPanels = [selectedSerenaPanel];
+  consumeNotificationTarget(snapshot);
+}
+
+async function loadDashboardMedia(callId, media) {
+  const response = await fetch(`${API_PREFIX}/serena/sessions/${encodeURIComponent(currentRoute.panelId)}/media/${encodeURIComponent(callId)}`, {
+    cache: "force-cache",
+  });
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  objectUrls.push(url);
+  return { type: media?.media_type || (blob.type.startsWith("image/") ? "image" : blob.type.startsWith("audio/") ? "audio" : "file"), src: url, name: media?.name };
+}
+
+function setSectionDetail(kind, selected, title = "") {
+  const titleNode = byId(kind === "serena" ? "serena-activity-title" : "orchestrator-title");
+  const noteNode = titleNode?.parentElement?.querySelector(".section-note");
+  if (!titleNode || !noteNode) return;
+  if (kind === "serena") {
+    titleNode.textContent = selected ? title : "Serena";
+    noteNode.textContent = selected ? "Selected retained ChatGPT session" : "Retained ChatGPT sessions";
+  } else {
+    titleNode.textContent = selected ? title : "Orchestrator";
+    noteNode.textContent = selected ? "Selected retained orchestration" : "Retained orchestrations";
+  }
+}
+
+function emptyCard(message) {
+  const node = document.createElement("div");
+  node.className = "empty-card";
+  node.textContent = message;
+  return node;
+}
+
+function delegateTime(value) {
+  const parsed = Date.parse(value || "");
+  if (!Number.isFinite(parsed)) return "";
+  return new Date(parsed).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function delegateIsActive(delegate) {
+  return ["WAITING_FOR_CHAT", "QUEUED", "RUNNING_CHAT", "RUNNING_CODEX"].includes(String(delegate?.state || ""));
+}
+
+function delegateStatusLabel(state) {
+  return String(state || "").toLowerCase().replaceAll("_", " ");
+}
+
+function renderOrchestratorOverview(panels) {
+  const container = byId("orchestrator-widgets");
+  if (!container) return;
+  container.replaceChildren();
+  setText("orchestrator-panel-count", panels.length, "0");
+  setSectionDetail("orchestrator", false);
+  if (!panels.length) {
+    container.append(emptyCard("No orchestration activity recorded yet."));
+    return;
+  }
+
+  for (const panel of panels) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "orchestrator-session-card";
+    const copy = document.createElement("span");
+    copy.className = "orchestrator-session-copy";
+    const title = document.createElement("strong");
+    title.textContent = panel.display_name || "Orchestrator";
+    const summary = document.createElement("span");
+    const delegates = panel.delegates || [];
+    const active = delegates.filter(delegateIsActive).length;
+    summary.textContent = `${delegates.length} ${delegates.length === 1 ? "delegate" : "delegates"}${active ? ` · ${active} active` : ""}`;
+    copy.append(title, summary);
+    const chevron = document.createElement("span");
+    chevron.textContent = "›";
+    chevron.className = "orchestrator-chevron";
+    button.append(copy, chevron);
+    button.addEventListener("click", () => navigate({ kind: "orchestrator", panelId: panel.panel_id, expandedEntryId: null }));
+    container.append(button);
+  }
+}
+
+function renderSelectedOrchestrator(documentState) {
+  const container = byId("orchestrator-widgets");
+  if (!container || !documentState) return;
+  container.replaceChildren();
+  visibleActivityPanels = [];
+  setSectionDetail("orchestrator", true, documentState.display_name || "Orchestrator");
+  setText("orchestrator-panel-count", "1", "1");
+  applyActivityView("orchestrator");
+  container.append(selectedBackButton("All orchestrations"));
+
+  const list = document.createElement("div");
+  list.className = "orchestrator-delegate-list";
+  const delegates = documentState.delegates || [];
+  if (!delegates.length) list.append(emptyCard("No delegates in this orchestration."));
+
+  for (const delegate of delegates) {
+    const row = document.createElement("div");
+    row.className = "orchestrator-delegate-row";
+    row.dataset.active = delegateIsActive(delegate) ? "true" : "false";
+    const main = document.createElement("button");
+    main.type = "button";
+    main.className = "orchestrator-delegate-main";
+    main.setAttribute("aria-expanded", String(currentRoute.expandedEntryId === delegate.delegate_id));
+
+    const status = document.createElement("span");
+    status.className = "orchestrator-status";
+    const copy = document.createElement("span");
+    copy.className = "orchestrator-delegate-copy";
+    const heading = document.createElement("span");
+    heading.className = "orchestrator-delegate-heading";
+    const name = document.createElement("strong");
+    name.textContent = delegate.kind || "delegate";
+    const project = document.createElement("span");
+    project.textContent = delegate.project_name || "";
+    heading.append(name, project);
+    const detail = document.createElement("span");
+    detail.textContent = delegate.active_provider || delegate.provider_policy || delegateStatusLabel(delegate.state);
+    copy.append(heading, detail);
+    const timing = document.createElement("span");
+    timing.className = "orchestrator-delegate-time";
+    const submitted = document.createElement("span");
+    submitted.textContent = delegateTime(delegate.started_at || delegate.created_at);
+    const elapsed = document.createElement("span");
+    const startedAt = Date.parse(delegate.started_at || delegate.created_at || "") / 1000;
+    const finishedAt = Date.parse(delegate.finished_at || "") / 1000;
+    if (Number.isFinite(startedAt)) {
+      if (delegateIsActive(delegate)) visibleElapsedNodes.push({ node: elapsed, startedAt });
+      else if (Number.isFinite(finishedAt)) elapsed.textContent = window.SerenaActivity.formatDuration(finishedAt - startedAt);
+    }
+    timing.append(submitted, elapsed);
+    const chevron = document.createElement("span");
+    chevron.textContent = currentRoute.expandedEntryId === delegate.delegate_id ? "⌄" : "›";
+    main.append(status, copy, timing, chevron);
+    main.addEventListener("click", () => {
+      const next = currentRoute.expandedEntryId === delegate.delegate_id ? null : delegate.delegate_id;
+      currentRoute = { ...currentRoute, expandedEntryId: next };
+      routeGeneration += 1;
+      currentEtag = null;
+      renderSelectedOrchestrator({ ...currentDocument, expanded_delegate: null });
+      void refresh();
+    });
+    row.append(main);
+
+    if (String(delegate.state || "") === "WAITING_FOR_CHAT") {
+      const action = document.createElement("button");
+      action.type = "button";
+      action.className = "orchestrator-copy-prompt";
+      action.textContent = "Copy launch prompt";
+      action.addEventListener("click", async () => {
+        const prompt = `@Orchestrator claim delegate ${delegate.delegate_id} and complete it independently.`;
+        try {
+          await navigator.clipboard.writeText(prompt);
+          action.textContent = "Copied";
+        } catch (_) {
+          action.textContent = prompt;
+        }
+      });
+      row.append(action);
+    }
+
+    if (currentRoute.expandedEntryId === delegate.delegate_id) {
+      row.append(renderDelegateDetail(documentState.expanded_delegate, delegate.delegate_id));
+    }
+    list.append(row);
+  }
+  container.append(list);
+}
+
+function renderDelegateDetail(detail, expectedId) {
+  const container = document.createElement("div");
+  container.className = "orchestrator-delegate-detail";
+  if (!detail || detail.delegate_id !== expectedId) {
+    container.textContent = "Loading…";
+    return container;
+  }
+  const fields = [
+    ["Goal", detail.goal],
+    ["State", delegateStatusLabel(detail.state)],
+    ["Provider", detail.active_provider || detail.provider_policy],
+    ["Error", detail.error],
+  ].filter(([, value]) => value !== null && value !== undefined && value !== "");
+  for (const [label, value] of fields) {
+    const section = document.createElement("section");
+    const heading = document.createElement("h4");
+    heading.textContent = label;
+    const content = document.createElement(typeof value === "string" && value.includes("\n") ? "pre" : "div");
+    content.textContent = String(value);
+    section.append(heading, content);
+    container.append(section);
+  }
+  if (detail.provider_metadata && Object.keys(detail.provider_metadata).length) {
+    const section = document.createElement("section");
+    const heading = document.createElement("h4");
+    heading.textContent = "Provider metadata";
+    section.append(heading, window.SerenaActivity.renderValue(detail.provider_metadata));
+    container.append(section);
+  }
+  return container;
+}
+
+function applyActivityView(forceView = null) {
+  if (forceView) activeOverviewView = forceView;
+  const columns = byId("activity-columns");
+  if (columns) {
+    columns.dataset.activeView = activeOverviewView;
+    columns.dataset.route = currentRoute.kind;
+  }
+  for (const button of document.querySelectorAll("[data-activity-view-tab]")) {
+    const active = button.dataset.activityViewTab === activeOverviewView;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  }
+}
+
+function setupActivityViewTabs() {
+  for (const button of document.querySelectorAll("[data-activity-view-tab]")) {
+    button.addEventListener("click", () => {
+      const view = button.dataset.activityViewTab;
+      if (view !== "serena" && view !== "orchestrator") return;
+      if (currentRoute.kind !== "overview") returnToOverview();
+      activeOverviewView = view;
+      applyActivityView();
+    });
+  }
+}
+
+function consumeNotificationTarget(snapshot) {
+  if (!pendingNotificationTarget || currentRoute.kind !== "serena") return;
+  if (snapshot?.panel_id !== pendingNotificationTarget.panelId) return;
+  const targetId = pendingNotificationTarget.jobId;
+  const found = (snapshot?.jobs || []).some(job => job.job_id === targetId);
+  if (!found) return;
+  pendingNotificationTarget = null;
+  const url = new URL(window.location.href);
+  url.search = "";
+  url.searchParams.set("panel", currentRoute.panelId);
+  history.replaceState(null, "", url);
+  requestAnimationFrame(() => {
+    const row = selectedSerenaRoot?.querySelector(`[data-entry-id="${CSS.escape(targetId)}"]`);
+    row?.scrollIntoView({ block: "center", behavior: "smooth" });
+  });
+}
+
+function renderRunningJobs() {
+  const container = byId("jobs-dialog-content");
+  if (!container) return;
+  container.replaceChildren();
+  const jobs = latestJobs.jobs || [];
+  if (!jobs.length) {
+    container.append(emptyCard("No Serena jobs are currently running."));
+    return;
+  }
+  for (const job of jobs) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "resource-row resource-row-button";
+    const label = document.createElement("strong");
+    label.textContent = job.label || job.job_id;
+    const meta = document.createElement("span");
+    meta.textContent = job.project || job.status || "running";
+    row.append(label, meta);
+    row.addEventListener("click", () => {
+      byId("jobs-dialog")?.close();
+      if (job.panel_id) navigate({ kind: "serena", panelId: job.panel_id, expandedEntryId: job.job_id });
+    });
+    container.append(row);
+  }
+}
+
+function setupJobsDialog() {
+  const dialog = byId("jobs-dialog");
+  byId("jobs-button")?.addEventListener("click", () => {
+    renderRunningJobs();
+    dialog?.showModal();
+  });
+  byId("jobs-dialog-close")?.addEventListener("click", () => dialog?.close());
+  dialog?.addEventListener("click", event => {
+    if (event.target === dialog) dialog.close();
+  });
+}
+
+function openResourceDialog(kind) {
+  const dialog = byId("resource-dialog");
+  const title = byId("resource-dialog-title");
+  const container = byId("resource-dialog-content");
+  if (!dialog || !title || !container) return;
+  const values = kind === "tools" ? latestResources.tools : latestResources.memories;
+  title.textContent = kind === "tools" ? "Active tools" : "Memories";
+  container.replaceChildren();
+  if (!values.length) container.append(emptyCard(kind === "tools" ? "No active tools." : "No memories."));
+  for (const value of values) {
+    const button = document.createElement(kind === "memories" ? "button" : "div");
+    if (kind === "memories") {
+      button.type = "button";
+      button.className = "resource-row resource-row-button";
+      button.addEventListener("click", () => {
+        dialog.close();
+        void openMemory(value);
+      });
+    } else {
+      button.className = "resource-row";
+    }
+    button.textContent = value;
+    container.append(button);
+  }
+  dialog.showModal();
+}
+
+function setupResourceDialog() {
+  const dialog = byId("resource-dialog");
+  byId("tools-button")?.addEventListener("click", () => openResourceDialog("tools"));
+  byId("memories-button")?.addEventListener("click", () => openResourceDialog("memories"));
+  byId("resource-dialog-close")?.addEventListener("click", () => dialog?.close());
+  dialog?.addEventListener("click", event => {
+    if (event.target === dialog) dialog.close();
+  });
+}
+
+async function openMemory(name) {
+  const dialog = byId("memory-dialog");
+  const title = byId("memory-dialog-title");
+  const content = byId("memory-dialog-content");
+  if (!dialog || !title || !content) return;
+  title.textContent = name;
+  content.textContent = "Loading…";
+  dialog.showModal();
+  try {
+    const response = await fetch(`${API_PREFIX}/memory?name=${encodeURIComponent(name)}`, { cache: "no-cache" });
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    const data = await response.json();
+    if (data.status === "error") throw new Error(data.message || "Could not read memory");
+    content.textContent = data.content || "";
+  } catch (error) {
+    content.textContent = error instanceof Error ? error.message : "Could not read memory";
+  }
+}
+
+function setupMemoryDialog() {
+  const dialog = byId("memory-dialog");
+  byId("memory-dialog-close")?.addEventListener("click", () => dialog?.close());
+  dialog?.addEventListener("click", event => {
+    if (event.target === dialog) dialog.close();
+  });
 }
 
 function decodeBase64Url(value) {
-  const padding = "=".repeat((4 - (value.length % 4)) % 4);
-  const base64 = (value + padding).replace(/-/g, "+").replace(/_/g, "/");
-  const binary = window.atob(base64);
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  const padding = "=".repeat((4 - value.length % 4) % 4);
+  const binary = atob((value + padding).replaceAll("-", "+").replaceAll("_", "/"));
+  return Uint8Array.from(binary, character => character.charCodeAt(0));
 }
 
 function setNotificationButtonState(button, state) {
   button.dataset.state = state;
   const enabled = state === "enabled";
-  button.setAttribute("aria-pressed", enabled ? "true" : "false");
+  button.setAttribute("aria-pressed", String(enabled));
   const label = enabled
     ? "Job notifications enabled"
     : state === "denied"
@@ -152,12 +689,10 @@ async function setupPushNotifications() {
     button.hidden = true;
     return;
   }
-
   try {
     const registration = await navigator.serviceWorker.register(dashboardAssetUrl("service-worker.js"), { scope: "/dashboard/" });
     const existing = await registration.pushManager.getSubscription();
     setNotificationButtonState(button, existing ? "enabled" : Notification.permission === "denied" ? "denied" : "available");
-
     button.addEventListener("click", async () => {
       if (button.disabled || button.getAttribute("aria-pressed") === "true") return;
       button.disabled = true;
@@ -167,8 +702,9 @@ async function setupPushNotifications() {
           setNotificationButtonState(button, permission === "denied" ? "denied" : "available");
           return;
         }
-
-        const config = await getJson("/push/config");
+        const configResponse = await fetch(`${API_PREFIX}/push/config`, { cache: "no-cache" });
+        if (!configResponse.ok) throw new Error(`${configResponse.status} ${configResponse.statusText}`);
+        const config = await configResponse.json();
         let subscription = await registration.pushManager.getSubscription();
         if (!subscription) {
           subscription = await registration.pushManager.subscribe({
@@ -176,7 +712,6 @@ async function setupPushNotifications() {
             applicationServerKey: decodeBase64Url(config.public_key),
           });
         }
-
         const response = await fetch(`${API_PREFIX}/push/subscribe`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Accept: "application/json" },
@@ -197,687 +732,53 @@ async function setupPushNotifications() {
   }
 }
 
-let latestResources = { tools: [], memories: [] };
-let memoryRequestGeneration = 0;
-
-async function openMemory(memoryName) {
-  const dialog = byId("memory-dialog");
-  const title = byId("memory-dialog-title");
-  const content = byId("memory-dialog-content");
-  const generation = ++memoryRequestGeneration;
-
-  title.textContent = memoryName;
-  content.textContent = "Loading…";
-  if (!dialog.open) dialog.showModal();
-
-  try {
-    const memory = await getJson(`/memory?name=${encodeURIComponent(memoryName)}`);
-    if (generation !== memoryRequestGeneration) return;
-    title.textContent = memory.memory_name || memoryName;
-    content.textContent = memory.content || "";
-    content.scrollTop = 0;
-  } catch (error) {
-    if (generation !== memoryRequestGeneration) return;
-    content.textContent = `Could not load memory: ${error.message}`;
-  }
+function tickVisibleActivity() {
+  const now = Date.now() / 1000;
+  for (const panel of visibleActivityPanels) panel.tick(now);
+  for (const item of visibleElapsedNodes) item.node.textContent = window.SerenaActivity.formatDuration(now - item.startedAt);
 }
 
-function openResourceDialog(kind) {
-  const dialog = byId("resource-dialog");
-  const title = byId("resource-dialog-title");
-  const content = byId("resource-dialog-content");
-  const values = latestResources[kind] || [];
-  const isMemories = kind === "memories";
-
-  title.textContent = isMemories ? "Memories" : "Active tools";
-  const children = values.map((value) => {
-    if (!isMemories) return makeElement("span", "chip", value);
-
-    const button = makeElement("button", "chip memory-chip", value);
-    button.type = "button";
-    button.addEventListener("click", () => {
-      dialog.close();
-      openMemory(value);
-    });
-    return button;
-  });
-  if (!children.length) children.push(makeElement("span", "empty", isMemories ? "No memories available" : "No active tools"));
-  clearAndAppend(content, children);
-  if (!dialog.open) dialog.showModal();
+function startClock() {
+  if (clockTimer !== null) clearInterval(clockTimer);
+  clockTimer = setInterval(tickVisibleActivity, 1000);
 }
 
-function setupResourceDialog() {
-  const dialog = byId("resource-dialog");
-  byId("tools-button").addEventListener("click", () => openResourceDialog("tools"));
-  byId("memories-button").addEventListener("click", () => openResourceDialog("memories"));
-  byId("resource-dialog-close").addEventListener("click", () => dialog.close());
-  dialog.addEventListener("click", (event) => {
-    if (event.target === dialog) dialog.close();
-  });
+function handleVisibilityChange() {
+  scheduleRefresh(document.hidden ? HIDDEN_POLL_INTERVAL_MS : 0);
 }
 
-function renderRunningJobs() {
-  const jobs = (latestJobs.jobs || []).filter((job) => job.status === "running");
-  const content = byId("jobs-dialog-content");
-  setText("jobs-dialog-title", `Running jobs (${jobs.length}/${latestJobs.max_concurrent_jobs || 0})`);
-
-  if (jobs.length === 0) {
-    clearAndAppend(content, [makeElement("div", "jobs-empty", "No running jobs.")]);
-    return;
-  }
-
-  const rows = jobs.map((job) => {
-    const row = makeElement("div", "running-job");
-    row.append(makeElement("div", "running-job-title", job.label || "Background job"));
-
-    const details = [];
-    if (job.project) details.push(job.project);
-    if (Number.isFinite(Number(job.elapsed_seconds))) details.push(formatDuration(Number(job.elapsed_seconds)));
-    if (Number(job.process_count) > 0) details.push(`${job.process_count} process${Number(job.process_count) === 1 ? "" : "es"}`);
-    row.append(makeElement("div", "running-job-detail", details.join(" · ") || job.job_id));
-    return row;
-  });
-  clearAndAppend(content, rows);
+function handlePopState() {
+  const route = initialRoute();
+  currentRoute = route;
+  pendingNotificationTarget = route.notificationTarget;
+  routeGeneration += 1;
+  currentDocument = route.kind === "overview" ? latestOverview : null;
+  currentEtag = null;
+  if (route.kind === "serena") activeOverviewView = "serena";
+  applyActivityView();
+  if (currentDocument) renderCurrentDocument();
+  else renderLoadingRoute();
+  void refresh();
 }
 
-function setupJobsDialog() {
-  const dialog = byId("jobs-dialog");
-  byId("jobs-button").addEventListener("click", () => {
-    renderRunningJobs();
-    dialog.showModal();
-  });
-  byId("jobs-dialog-close").addEventListener("click", () => dialog.close());
-  dialog.addEventListener("click", (event) => {
-    if (event.target === dialog) dialog.close();
-  });
-}
-
-function setupMemoryDialog() {
-  const dialog = byId("memory-dialog");
-  byId("memory-dialog-close").addEventListener("click", () => dialog.close());
-  dialog.addEventListener("click", (event) => {
-    if (event.target === dialog) dialog.close();
-  });
-}
-
-function renderOverview(session, jobs) {
-  setText("languages", (session.languages || []).join(" · "), "None");
-  setText("runtime-policy", session.runtime_policy, "ChatGPT");
-  setText("version", session.serena_version, "—");
-
-  const activeTools = session.active_tools || [];
-  const memories = session.available_memories || [];
-  latestResources = { tools: activeTools, memories };
-  latestJobs = jobs || { jobs: [], running_jobs: 0, max_concurrent_jobs: 0 };
-
-  setText("tool-count", activeTools.length);
-  setText("memories-count", memories.length);
-  setText("running-jobs-count", latestJobs.running_jobs || 0);
-  setText("max-jobs-count", latestJobs.max_concurrent_jobs || 0);
-  byId("tools-button").setAttribute("aria-label", `${activeTools.length} active tools`);
-  byId("memories-button").setAttribute("aria-label", `${memories.length} memories`);
-  byId("jobs-button").setAttribute(
-    "aria-label",
-    `${latestJobs.running_jobs || 0} of ${latestJobs.max_concurrent_jobs || 0} Serena jobs running`,
-  );
-
-  if (byId("jobs-dialog").open) renderRunningJobs();
-}
-
-function formatEpochClock(timestamp) {
-  if (!Number.isFinite(timestamp)) return "—";
-  return new Date(timestamp * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-function formatEpochDate(timestamp) {
-  if (!Number.isFinite(timestamp)) return "—";
-  return new Date(timestamp * 1000).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
-}
-
-function formatDuration(seconds) {
-  if (seconds === null || seconds === undefined) return "—";
-  const boundedSeconds = Math.max(0, seconds);
-  if (boundedSeconds < 10) return `${boundedSeconds.toFixed(1)}s`;
-
-  const roundedSeconds = Math.round(boundedSeconds);
-  if (roundedSeconds < 120) return `${roundedSeconds}s`;
-  if (roundedSeconds < 3600) {
-    const minutes = Math.floor(roundedSeconds / 60);
-    return `${minutes}m ${String(roundedSeconds % 60).padStart(2, "0")}s`;
-  }
-
-  const roundedMinutes = Math.round(boundedSeconds / 60);
-  const hours = Math.floor(roundedMinutes / 60);
-  return `${hours}h ${String(roundedMinutes % 60).padStart(2, "0")}m`;
-}
-
-function setConnection(state, label) {
-  const connection = byId("connection-state");
-  connection.dataset.state = state;
-  setText("connection-label", label);
-}
-
-function updateSessionWidgetHeading(entry, panel) {
-  let heading = entry.querySelector(".activity-widget-heading");
-  if (!panel.display_name) {
-    heading?.remove();
-    return;
-  }
-
-  if (!heading) {
-    heading = makeElement("div", "activity-widget-heading");
-    heading.append(
-      makeElement("span", "activity-widget-title"),
-      makeElement("span", "activity-widget-date"),
-    );
-    entry.prepend(heading);
-  }
-
-  heading.querySelector(".activity-widget-title").textContent = panel.display_name;
-  const date = heading.querySelector(".activity-widget-date");
-  const dateText = formatEpochDate(panel.started_at);
-  date.textContent = dateText;
-  date.hidden = dateText === "—";
-}
-
-class SessionWidgetLoader {
-  constructor(kind) {
-    this.sourceUrl = `/dashboard/widget/${kind}?load=${DASHBOARD_LOAD_ID}`;
-    this.documentUrlPromise = null;
-    this.mounts = new WeakMap();
-    this.queue = [];
-    this.loadingFrame = null;
-    this.loadingTimeout = null;
-    this.observer = "IntersectionObserver" in window
-      ? new IntersectionObserver(entries => {
-          for (const entry of entries) {
-            if (!entry.isIntersecting) continue;
-            this.observer.unobserve(entry.target);
-            this.deferMount(entry.target);
-          }
-        }, { rootMargin: "800px 0px" })
-      : null;
-  }
-
-  prepare(shell, mountFrame, active) {
-    this.mounts.set(shell, mountFrame);
-    if (active || !this.observer) {
-      this.deferMount(shell, active);
-      return;
-    }
-    this.observer.observe(shell);
-  }
-
-  prioritize(shell) {
-    this.observer?.unobserve(shell);
-    this.deferMount(shell, true);
-  }
-
-  deferMount(shell, priority = false) {
-    if (shell.dataset.widgetMounted === "true" || shell.dataset.widgetMountPending === "true") return;
-    shell.dataset.widgetMountPending = "true";
-    requestAnimationFrame(() => {
-      window.setTimeout(() => {
-        delete shell.dataset.widgetMountPending;
-        this.mount(shell, priority);
-      }, 0);
-    });
-  }
-
-  mount(shell, priority = false) {
-    if (!shell.isConnected || shell.dataset.widgetMounted === "true") return;
-    const mountFrame = this.mounts.get(shell);
-    if (!mountFrame) return;
-    shell.dataset.widgetMounted = "true";
-    const frame = mountFrame();
-    this.enqueue(frame, priority);
-  }
-
-  enqueue(frame, priority = false) {
-    if (frame.dataset.widgetStarted === "true" || frame.dataset.widgetQueued === "true") return;
-    frame.dataset.widgetQueued = "true";
-    if (priority) this.queue.unshift(frame);
-    else this.queue.push(frame);
-    this.drain();
-  }
-
-  complete(frame) {
-    if (this.loadingFrame !== frame) return;
-    window.clearTimeout(this.loadingTimeout);
-    this.loadingFrame = null;
-    this.loadingTimeout = null;
-    this.drain();
-  }
-
-  documentUrl() {
-    if (!this.documentUrlPromise) {
-      this.documentUrlPromise = fetch(this.sourceUrl, { cache: "force-cache" })
-        .then(response => {
-          if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-          return response.text();
-        })
-        .then(html => URL.createObjectURL(new Blob([html], { type: "text/html" })))
-        .catch(() => this.sourceUrl);
-    }
-    return this.documentUrlPromise;
-  }
-
-  drain() {
-    if (this.loadingFrame) return;
-
-    let frame = this.queue.shift();
-    while (frame && !frame.isConnected) frame = this.queue.shift();
-    if (!frame) return;
-
-    delete frame.dataset.widgetQueued;
-    frame.dataset.widgetStarted = "true";
-    this.loadingFrame = frame;
-    this.documentUrl().then(url => {
-      if (!frame.isConnected) {
-        this.complete(frame);
-        return;
-      }
-      frame.src = url;
-      this.loadingTimeout = window.setTimeout(() => {
-        if (this.loadingFrame !== frame) return;
-        this.loadingFrame = null;
-        this.loadingTimeout = null;
-        this.drain();
-      }, 5000);
-    });
-  }
-}
-
-function sessionWidgetLoader(kind) {
-  let loader = sessionWidgetLoaders.get(kind);
-  if (!loader) {
-    loader = new SessionWidgetLoader(kind);
-    sessionWidgetLoaders.set(kind, loader);
-  }
-  return loader;
-}
-
-function sessionWidgetBootstrap(panel, kind) {
-  const toolOutput = kind === "serena"
-    ? panel.initial_state
-    : {
-        run_id: panel.panel_id,
-        started_at: panel.started_at || 0,
-        superseded: false,
-        delegates: panel.delegates || [],
-      };
-  return {
-    panel_id: panel.panel_id,
-    active: Boolean(panel.active),
-    revision: panel.revision || "",
-    tool_output: toolOutput || null,
-  };
-}
-
-function sessionPreviewStatus(status) {
-  if (status === "running") return "●";
-  if (status === "failed" || status === "timed_out" || status === "FAILED") return "!";
-  if (status === "cancelled") return "×";
-  if (status === "queued" || status === "waiting") return "○";
-  return "✓";
-}
-
-function sessionPreviewElapsed(entry, now) {
-  const started = Number(entry.started_at ?? entry.submitted_at);
-  if (!Number.isFinite(started)) return "";
-  const finished = Number(entry.finished_at);
-  const end = Number.isFinite(finished) ? finished : now;
-  return formatDuration(Math.max(0, end - started));
-}
-
-function sessionPreviewSubmissionSpan(state) {
-  if (Number.isFinite(state?.submission_span_seconds)) return formatDuration(state.submission_span_seconds);
-
-  const submitted = (state?.calls || [])
-    .map(call => Number(call.submitted_at ?? call.started_at))
-    .filter(Number.isFinite);
-  if (submitted.length === 0) return "";
-  return formatDuration(Math.max(...submitted) - Math.min(...submitted));
-}
-
-function serenaPreviewEntries(state) {
-  if (!state) return [];
-  const currentJobIds = new Set((state.jobs || []).filter(job => job.current_turn !== false).map(job => job.job_id));
-  const calls = (state.calls || [])
-    .filter(call => !(call.tool_name === "start_job" && call.job_id && currentJobIds.has(call.job_id)))
-    .map(call => ({ ...call, kind: "tool" }));
-  const jobs = (state.jobs || []).filter(job => job.current_turn !== false).map(job => ({
-    kind: "job",
-    job_id: job.job_id,
-    tool_name: "start_job",
-    scope: job.project || "",
-    detail: job.label || "background job",
-    status: job.status || "completed",
-    submitted_at: job.started_at,
-    started_at: job.started_at,
-    finished_at: job.finished_at,
-  }));
-  const entries = [...calls, ...jobs];
-  const running = entries.filter(entry => entry.status === "running").sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
-  const terminal = entries.filter(entry => entry.status !== "running").sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
-  return [...running, ...terminal];
-}
-
-function serenaPreviewExpanded(state) {
-  if (typeof state?.initial_expanded === "boolean") return state.initial_expanded;
-  const entries = [...(state?.calls || []), ...(state?.jobs || [])];
-  if (!entries.length) return false;
-  if (entries.some(entry => entry.status === "running")) return true;
-  const timestamps = entries
-    .map(entry => Number(entry.finished_at ?? entry.started_at ?? entry.submitted_at))
-    .filter(Number.isFinite);
-  const latest = timestamps.length ? Math.max(...timestamps) : null;
-  return latest !== null && Date.now() / 1000 - latest <= 5 * 60;
-}
-
-function orchestratorPreviewEntries(panel) {
-  const delegates = panel.delegates || [];
-  return delegates.map(delegate => ({
-    tool_name: delegate.kind || "delegate",
-    scope: delegate.project_name || delegate.active_provider || "",
-    detail: delegate.active_provider || delegate.provider_policy || "",
-    status: String(delegate.state || "completed").toLowerCase(),
-    started_at: Date.parse(delegate.started_at || delegate.created_at || "") / 1000,
-    finished_at: delegate.finished_at ? Date.parse(delegate.finished_at) / 1000 : null,
-  })).sort((a, b) => {
-    const ar = a.status === "running" || a.status === "claimed";
-    const br = b.status === "running" || b.status === "claimed";
-    if (ar !== br) return ar ? -1 : 1;
-    return (b.started_at || 0) - (a.started_at || 0);
-  });
-}
-
-function sessionPreviewModel(panel, kind) {
-  if (kind === "serena") {
-    const state = panel.initial_state || null;
-    const toolCount = Number.isFinite(state?.tool_count) ? state.tool_count : (state?.calls || []).length;
-    const jobCount = Number.isFinite(state?.job_count) ? state.job_count : (state?.jobs || []).length;
-    return {
-      label: "Serena",
-      icon: dashboardAssetUrl("serena-logo.svg"),
-      stats: `${toolCount} tool${toolCount === 1 ? "" : "s"} · ${jobCount} job${jobCount === 1 ? "" : "s"} · ${state?.project_name || panel.project_name || "no project"}`,
-      status: sessionPreviewSubmissionSpan(state),
-      statusClass: "",
-      expanded: serenaPreviewExpanded(state),
-      entries: serenaPreviewEntries(state),
-    };
-  }
-
-  const delegates = panel.delegates || [];
-  const entries = orchestratorPreviewEntries(panel);
-  const running = entries.filter(entry => ["running", "claimed", "pending"].includes(entry.status)).length;
-  const failed = entries.filter(entry => entry.status === "failed").length;
-  return {
-    label: "Orchestrator",
-    icon: dashboardAssetUrl("orchestrator-logo.svg"),
-    stats: `${delegates.length} delegate${delegates.length === 1 ? "" : "s"}`,
-    status: running ? `${running} running` : failed ? `${failed} failed` : delegates.length ? "Complete" : "Idle",
-    statusClass: running ? "running" : failed ? "failed" : "",
-    expanded: Boolean(panel.active) || Date.now() / 1000 - Number(panel.updated_at || 0) <= 5 * 60,
-    entries,
-  };
-}
-
-function createSessionWidgetPreview(panel, kind) {
-  const model = sessionPreviewModel(panel, kind);
-  const preview = makeElement("div", `activity-widget-preview ${model.expanded ? "expanded" : "collapsed"}`);
-  const header = makeElement("div", "activity-widget-preview-header");
-  const title = makeElement("div", "activity-widget-preview-title");
-  const icon = document.createElement("img");
-  icon.className = "activity-widget-preview-logo";
-  icon.src = model.icon;
-  icon.alt = "";
-  const overview = makeElement("div", "activity-widget-preview-overview");
-  overview.append(makeElement("strong", "", model.label), makeElement("span", "activity-widget-preview-stats", model.stats));
-  title.append(icon, overview);
-  const meta = makeElement("span", `activity-widget-preview-status ${model.statusClass}`, model.status);
-  header.append(title, meta, makeElement("span", `activity-widget-preview-chevron ${model.expanded ? "" : "collapsed"}`, "⌄"));
-  preview.append(header);
-
-  if (model.expanded) {
-    const body = makeElement("div", "activity-widget-preview-body");
-    const now = Date.now() / 1000;
-    for (const entry of model.entries.slice(0, 6)) {
-      const row = makeElement("div", `activity-widget-preview-row ${entry.status || "completed"}`);
-      row.append(
-        makeElement("span", "activity-widget-preview-row-status", sessionPreviewStatus(entry.status)),
-        makeElement("strong", "activity-widget-preview-row-tool", entry.tool_name || "activity"),
-        makeElement("span", "activity-widget-preview-row-scope", entry.scope || ""),
-        makeElement("span", "activity-widget-preview-row-submitted", formatEpochClock(Number(entry.submitted_at ?? entry.started_at))),
-        makeElement("span", "activity-widget-preview-row-detail", entry.detail || ""),
-        makeElement("span", "activity-widget-preview-row-elapsed", sessionPreviewElapsed(entry, now)),
-      );
-      body.append(row);
-    }
-    preview.append(body);
-  }
-  return preview;
-}
-
-function renderSessionWidgets(containerId, countId, panels, kind) {
-  const container = byId(containerId);
-  const loader = sessionWidgetLoader(kind);
-  const orderedPanels = [...panels].sort((left, right) => {
-    const leftStarted = Number(left.started_at) || 0;
-    const rightStarted = Number(right.started_at) || 0;
-    if (leftStarted !== rightStarted) return rightStarted - leftStarted;
-    return String(right.panel_id || "").localeCompare(String(left.panel_id || ""));
-  });
-  setText(countId, orderedPanels.length, "0");
-  if (!orderedPanels.length) {
-    const label = kind === "serena" ? "No Serena session activity recorded yet." : "No orchestration activity recorded yet.";
-    if (!container.querySelector(".empty-card")) clearAndAppend(container, [makeElement("div", "empty-card", label)]);
-    return;
-  }
-
-  reconcileKeyed(
-    container,
-    orderedPanels,
-    panel => panel.panel_id,
-    panel => {
-      const entry = makeElement("div", "activity-widget-entry");
-      updateSessionWidgetHeading(entry, panel);
-
-      const shell = makeElement("div", `activity-widget-shell ${panel.active ? "active-session" : "retained-session"}`);
-      const preview = createSessionWidgetPreview(panel, kind);
-      shell.append(preview);
-      entry.append(shell);
-
-      const mountFrame = () => {
-        const existing = shell.querySelector(".activity-widget-frame");
-        if (existing) return existing;
-        const frame = document.createElement("iframe");
-        frame.className = "activity-widget-frame";
-        frame.loading = "eager";
-        frame.title = kind === "serena" ? "Serena session activity" : "Orchestrator activity";
-        frame.addEventListener("load", () => {
-          if (frame.dataset.widgetStarted !== "true") return;
-          frame.dataset.loaded = "true";
-          const previewHeight = Math.ceil(preview.getBoundingClientRect().height);
-          if (previewHeight > 0) frame.style.height = `${previewHeight}px`;
-          frame.contentWindow?.postMessage(
-            { type: "serena-dashboard-bootstrap", bootstrap: sessionWidgetBootstrap(panel, kind) },
-            location.origin,
-          );
-          loader.complete(frame);
-        });
-        frame.addEventListener("error", () => {
-          if (frame.dataset.widgetStarted !== "true") return;
-          frame.dataset.loaded = "true";
-          loader.complete(frame);
-        });
-        shell.append(frame);
-        return frame;
-      };
-
-      loader.prepare(shell, mountFrame, Boolean(panel.active));
-      return entry;
-    },
-    (entry, panel) => {
-      const shell = entry.querySelector(".activity-widget-shell");
-      if (shell) {
-        shell.classList.toggle("active-session", Boolean(panel.active));
-        shell.classList.toggle("retained-session", !panel.active);
-      }
-      const frame = entry.querySelector(".activity-widget-frame");
-      if (frame?.dataset.loaded === "true" && frame.contentWindow) {
-        frame.contentWindow.postMessage(
-          {
-            type: "serena-dashboard-panel",
-            panel_id: panel.panel_id,
-            active: Boolean(panel.active),
-            revision: panel.revision || "",
-          },
-          location.origin,
-        );
-      } else if (shell && panel.active) {
-        loader.prioritize(shell);
-      }
-
-      updateSessionWidgetHeading(entry, panel);
-    },
-  );
-}
-
-
-function consumeNotificationTarget() {
-  if (!notificationTarget) return;
-  const url = new URL(window.location.href);
-  url.searchParams.delete("panel");
-  url.searchParams.delete("job");
-  window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
-  notificationTarget = null;
-}
-
-function sendNotificationJobFocus(frame, panelId) {
-  if (!notificationTarget || notificationTarget.panelId !== panelId || !frame?.contentWindow) return;
-  const target = notificationTarget;
-  frame.contentWindow.postMessage(
-    {
-      type: "serena-dashboard-focus-job",
-      panel_id: panelId,
-      job_id: target.jobId,
-    },
-    location.origin,
-  );
-  consumeNotificationTarget();
-}
-
-function focusNotificationJob(panels) {
-  if (!notificationTarget) return;
-  if (!(panels || []).some(panel => panel.panel_id === notificationTarget.panelId)) return;
-
-  activateActivityView("serena");
-  const entry = Array.from(byId("serena-widgets").children)
-    .find(candidate => candidate.dataset.itemKey === notificationTarget.panelId);
-  if (!entry) return;
-
-  const shell = entry.querySelector(".activity-widget-shell");
-  if (shell) sessionWidgetLoader("serena").prioritize(shell);
-  requestAnimationFrame(() => entry.scrollIntoView({ block: "center" }));
-
-  const frame = entry.querySelector(".activity-widget-frame");
-  if (frame?.classList.contains("ready")) sendNotificationJobFocus(frame, notificationTarget.panelId);
-}
-
-window.addEventListener("message", event => {
-  if (event.origin !== location.origin) return;
-  const frame = Array.from(document.querySelectorAll(".activity-widget-frame")).find(candidate => candidate.contentWindow === event.source);
-  if (!frame) return;
-  if (event.data?.type === "serena-dashboard-widget-ready") {
-    const preview = frame.parentElement?.querySelector(".activity-widget-preview");
-    if (preview) preview.hidden = true;
-    requestAnimationFrame(() => {
-      frame.classList.add("ready");
-      sendNotificationJobFocus(frame, String(event.data.panel_id || ""));
-    });
-    return;
-  }
-  if (event.data?.type !== "serena-activity-height") return;
-  const height = Math.max(42, Math.min(720, Number(event.data.height) || 42));
-  frame.style.height = `${height}px`;
-});
-
-function nextRefreshDelay() {
-  if (document.hidden) return HIDDEN_POLL_INTERVAL_MS;
-  return latestPanelActivity ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS;
-}
-
-function scheduleRefresh(delay = nextRefreshDelay()) {
-  window.clearTimeout(refreshTimer);
-  refreshTimer = window.setTimeout(refresh, delay);
-}
-
-async function refresh() {
-  if (refreshInFlight) return;
-  refreshInFlight = true;
-
-  let session;
-  let jobs;
-  let serena;
-  let orchestrator;
-  try {
-    let state;
-    if (!initialActivityStateLoaded && dashboardBootstrapState) {
-      state = dashboardBootstrapState;
-      dashboardBootstrapState = null;
-    } else {
-      state = await getJson(initialActivityStateLoaded ? "/state" : "/state?include_state=1");
-    }
-    session = state.session;
-    jobs = state.jobs;
-    serena = state.serena;
-    orchestrator = state.orchestrator;
-  } catch (error) {
-    console.error("Dashboard data refresh failed", error);
-    setConnection("error", "Disconnected");
-    refreshInFlight = false;
-    scheduleRefresh();
-    return;
-  }
-
-  setConnection("live", "Live");
-  setText("last-update", new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
-  try {
-    renderOverview(session, jobs);
-    renderSessionWidgets("serena-widgets", "serena-panel-count", serena.panels || [], "serena");
-    renderSessionWidgets("orchestrator-widgets", "orchestrator-panel-count", orchestrator.panels || [], "orchestrator");
-    latestPanelActivity = [...(serena.panels || []), ...(orchestrator.panels || [])].some(panel => panel.active);
-    initialActivityStateLoaded = true;
-
-    if (!initialActivityViewSelected) {
-      const orchestratorActive = (orchestrator.panels || []).some(panel => panel.active);
-      if (notificationTarget) activateActivityView("serena");
-      else if (isTabbedActivityMode() && orchestratorActive) activateActivityView("orchestrator");
-      initialActivityViewSelected = true;
-    }
-    focusNotificationJob(serena.panels || []);
-  } catch (error) {
-    console.error("Dashboard render failed", error);
-    setConnection("error", "UI error");
-  } finally {
-    refreshInFlight = false;
-    scheduleRefresh();
-  }
-}
-
-document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) {
-    refresh();
-  } else {
-    scheduleRefresh();
-  }
-});
-window.addEventListener("focus", () => refresh(), { passive: true });
-
-setupResourceDialog();
-setupJobsDialog();
-setupMemoryDialog();
 setupActivityViewTabs();
-setupPushNotifications();
-refresh();
+setupJobsDialog();
+setupResourceDialog();
+setupMemoryDialog();
+void setupPushNotifications();
+byId("connection-state")?.setAttribute("data-state", "connected");
+setText("connection-label", "Connected", "Connected");
+applyActivityView();
+startClock();
+
+document.addEventListener("visibilitychange", handleVisibilityChange, { passive: true });
+window.addEventListener("focus", () => scheduleRefresh(0), { passive: true });
+window.addEventListener("popstate", handlePopState, { passive: true });
+
+if (currentDocument) {
+  renderCurrentDocument();
+  scheduleRefresh();
+} else {
+  renderLoadingRoute();
+  void refresh();
+}
