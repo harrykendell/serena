@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from flask import Flask, Response, abort, request
+from flask import Flask, Response, abort, redirect, request
 from mcp.types import ResourceLink
 from pydantic import AnyUrl
 
@@ -23,6 +23,7 @@ from serena.dashboard_activity import DashboardActivityArchive, DashboardActivit
 from serena.dashboard_widgets import orchestrator_dashboard_widget_html, serena_dashboard_widget_html
 from serena.git_metrics import GitLineMetrics, GitMetricsSource
 from serena.jobs import JobManager, JobStatus
+from serena.push_notifications import WebPushNotifier
 from serena.tools.media_tools import read_result_file_link
 
 if TYPE_CHECKING:
@@ -49,20 +50,17 @@ class DashboardSessionOverview:
         self._agent = agent
 
     def get_session(self) -> dict[str, Any]:
-        """Returns compact session metadata for the custom dashboard."""
+        """Returns compact runtime metadata for the custom dashboard."""
         project = self._agent.get_default_project()
         if project is None:
-            project_info = {"name": None, "path": None}
             languages: list[str] = []
             memories: list[str] = []
         else:
-            project_info = {"name": project.project_name, "path": str(project.project_root)}
             languages = [language.value for language in project.get_language_server_candidates()]
             memories = project.memory_manager.list_memories().get_full_list()
 
         return {
             "status": "success",
-            "active_project": project_info,
             "languages": languages,
             "runtime_policy": "ChatGPT",
             "serena_version": self._agent.version,
@@ -97,6 +95,11 @@ class DashboardJobOverview:
 
     def __init__(self, job_manager: JobManager):
         self._job_manager = job_manager
+
+    @property
+    def max_concurrent_jobs(self) -> int:
+        """:return: hard global concurrency limit for durable Serena jobs."""
+        return self._job_manager.max_concurrent_jobs
 
     def get_jobs(self) -> dict[str, Any]:
         """Returns running jobs followed by retained terminal jobs with lightweight telemetry."""
@@ -221,6 +224,23 @@ class DashboardSerenaActivityOverview:
             panels.append(panel)
         panels.sort(key=lambda item: (float(item.get("started_at") or 0.0), str(item["panel_id"])), reverse=True)
         return {"status": "success", "panels": panels}
+
+    def get_running_jobs(self) -> dict[str, Any]:
+        """Returns the current global running-job summary for the dashboard metadata panel."""
+        running = [item for item in self._jobs_by_id().values() if item.get("status") == "running"]
+        return {
+            "status": "success",
+            "jobs": running,
+            "running_jobs": len(running),
+            "max_concurrent_jobs": self._job_overview.max_concurrent_jobs,
+        }
+
+    def panel_id_for_job(self, job_id: str) -> str | None:
+        """:return: retained dashboard panel containing ``job_id``, when one exists."""
+        for summary in self._archive.list_session_summaries():
+            if job_id in summary.job_ids:
+                return summary.panel_id
+        return None
 
     def get_panel(self, panel_id: str, changed_since: float | None = None) -> dict[str, Any]:
         """Returns one retained Serena session, optionally restricted to changes after ``changed_since``."""
@@ -605,6 +625,7 @@ class CustomDashboard:
             git_metrics_source=agent,
         )
         self._orchestrator_overview = DashboardOrchestratorOverview()
+        self._push_notifier = WebPushNotifier()
         self._register_routes(app)
 
     def set_serena_session_name(self, session_id: str, display_name: str) -> str:
@@ -613,10 +634,12 @@ class CustomDashboard:
 
     def dashboard_state(self, *, include_state: bool = False) -> dict[str, Any]:
         """Returns the complete dashboard state payload for API and first-paint bootstrap use."""
+        serena = self._serena_activity_overview.get_panels(include_state=include_state)
         return {
             "status": "success",
             "session": self._session_overview.get_session(),
-            "serena": self._serena_activity_overview.get_panels(include_state=include_state),
+            "jobs": self._serena_activity_overview.get_running_jobs(),
+            "serena": serena,
             "orchestrator": self._orchestrator_overview.get_panels(),
         }
 
@@ -625,10 +648,19 @@ class CustomDashboard:
         index_path = self.static_dir / "index.html"
         html = index_path.read_text(encoding="utf-8")
 
-        asset_paths = [self.static_dir / name for name in ("dashboard.js", "styles.css", "serena-logo.svg", "orchestrator-logo.svg")]
+        assets = (
+            "dashboard.js",
+            "styles.css",
+            "service-worker.js",
+            "manifest.webmanifest",
+            "serena-logo.svg",
+            "orchestrator-logo.svg",
+            "serena-icon-128.png",
+        )
+        asset_paths = [self.static_dir / name for name in assets]
         revision_input = "\x1f".join(f"{path.name}:{path.stat().st_mtime_ns}:{path.stat().st_size}" for path in asset_paths)
         asset_version = hashlib.blake2s(revision_input.encode("utf-8"), digest_size=6).hexdigest()
-        for asset in ("dashboard.js", "styles.css", "serena-logo.svg", "orchestrator-logo.svg"):
+        for asset in assets:
             html = html.replace(f'"{asset}"', f'"{asset}?v={asset_version}"')
         html = html.replace('<html lang="en">', f'<html lang="en" data-asset-version="{asset_version}">', 1)
 
@@ -655,6 +687,13 @@ class CustomDashboard:
     def _register_routes(self, app: Flask) -> None:
         """Registers all dashboard APIs under the dashboard URL namespace."""
 
+        @app.route("/dashboard/job/<job_id>", methods=["GET"])
+        def open_serena_job(job_id: str) -> Response:
+            panel_id = self._serena_activity_overview.panel_id_for_job(job_id)
+            if panel_id is None:
+                return redirect("/dashboard/")  # type: ignore[return-value]
+            return redirect(f"/dashboard/?panel={panel_id}&job={job_id}")  # type: ignore[return-value]
+
         @app.route("/dashboard/api/state", methods=["GET"])
         def get_dashboard_state() -> Response:
             include_state = request.args.get("include_state") == "1"
@@ -663,6 +702,21 @@ class CustomDashboard:
         @app.route("/dashboard/api/session", methods=["GET"])
         def get_session() -> Response:
             return self._conditional_json_response(app, self._session_overview.get_session())
+
+        @app.route("/dashboard/api/push/config", methods=["GET"])
+        def get_push_config() -> dict[str, str]:
+            return {"public_key": self._push_notifier.public_key}
+
+        @app.route("/dashboard/api/push/subscribe", methods=["POST"])
+        def subscribe_to_push() -> dict[str, str]:
+            payload = request.get_json(silent=True)
+            if payload is None:
+                abort(400)
+            try:
+                self._push_notifier.save_subscription(payload)
+            except (TypeError, ValueError):
+                abort(400)
+            return {"status": "success"}
 
         @app.route("/dashboard/api/memory", methods=["GET"])
         def get_custom_memory() -> dict[str, Any]:

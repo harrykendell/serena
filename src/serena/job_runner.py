@@ -6,6 +6,7 @@ import argparse
 import os
 import signal
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from types import FrameType
@@ -110,13 +111,22 @@ def run_job(state_file: Path, command_file: Path) -> int:
         status = JobStatus.FAILED
         status_message = f"Job runner failed: {e.__class__.__name__}: {e}"
 
-    store.update(
+    terminal_record = store.update(
         record.job_id,
         status=status,
         finished_at=datetime.now(UTC).isoformat(),
         return_code=return_code,
         status_message=status_message,
     )
+
+    # notify only after terminal state is durable; push delivery must never alter the job result
+    try:
+        from serena.push_notifications import WebPushNotifier
+
+        WebPushNotifier().send_job_finished(terminal_record)
+    except Exception as e:
+        print(f"Serena job notification failed: {e.__class__.__name__}: {e}", file=sys.stderr)
+
     return return_code
 
 

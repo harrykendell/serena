@@ -144,6 +144,10 @@ def serena_dashboard_widget_html(panel_id: str | None = None, initial_state: dic
       applyDashboardBootstrap(event.data.bootstrap);
       return;
     }}
+    if (event.data?.type === "serena-dashboard-focus-job" && event.data.panel_id === panelId) {{
+      window.dispatchEvent(new CustomEvent("serena:focus-job", {{ detail: {{ job_id: String(event.data.job_id || "") }} }}));
+      return;
+    }}
     if (event.data?.type !== "serena-dashboard-panel" || event.data.panel_id !== panelId) return;
     live = Boolean(event.data.active);
     announcedRevision = String(event.data.revision || announcedRevision);

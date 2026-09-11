@@ -67,6 +67,8 @@ def test_dashboard_serves_kendell_frontend_and_session_api(tmp_path: Path, monke
     redirect = client.get("/dashboard", base_url="https://serena.kendell.uk")
     response = client.get("/dashboard/")
     dashboard_script = client.get("/dashboard/dashboard.js")
+    service_worker = client.get("/dashboard/service-worker.js")
+    manifest = client.get("/dashboard/manifest.webmanifest")
     versioned_dashboard_script = client.get("/dashboard/dashboard.js?v=test")
     state = client.get("/dashboard/api/state?include_state=1").get_json()
     session = client.get("/dashboard/api/session").get_json()
@@ -82,8 +84,14 @@ def test_dashboard_serves_kendell_frontend_and_session_api(tmp_path: Path, monke
     assert response.headers["Cache-Control"] == "private, no-store"
     assert dashboard_script.status_code == 200
     assert dashboard_script.headers["Cache-Control"] == "private, no-cache"
+    assert service_worker.status_code == 200
+    assert manifest.status_code == 200
     assert versioned_dashboard_script.headers["Cache-Control"] == "private, max-age=31536000, immutable"
     assert b"Serena + Orchestrator" in response.data
+    assert b"notification-button" in response.data
+    assert b'id="jobs-button"' in response.data
+    assert b'id="jobs-dialog"' in response.data
+    assert b"manifest.webmanifest?v=" in response.data
     assert b"MCP dashboard" in response.data
     assert b"orchestrator-logo.svg" in response.data
     assert b"One retained activity panel for each ChatGPT conversation" in response.data
@@ -101,10 +109,62 @@ def test_dashboard_serves_kendell_frontend_and_session_api(tmp_path: Path, monke
     assert len(serena["panels"]) == 1
     assert serena_with_state["panels"][0]["initial_state"]["run_id"] == serena["panels"][0]["panel_id"]
     assert state["serena"]["panels"][0]["panel_id"] == serena["panels"][0]["panel_id"]
+    assert state["jobs"] == {"status": "success", "jobs": [], "running_jobs": 0, "max_concurrent_jobs": 12}
     assert state["orchestrator"] == {"status": "success", "panels": []}
     assert orchestrator == {"status": "success", "panels": []}
     assert session["status"] == "success"
     assert session["runtime_policy"] == "ChatGPT"
+
+
+def test_job_notification_link_redirects_to_originating_panel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
+    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
+    agent = _DashboardAgent()
+    job_id = "0123456789abcdef0123456789abcdef"
+    agent.execution_store.start_execution(
+        execution_id="execution-job",
+        session_id="session-a",
+        project_name="thesis",
+        tool_name="start_job",
+        arguments="{}",
+    )
+    agent.execution_store.finish_execution(
+        "execution-job",
+        succeeded=True,
+        result="started",
+        durable_job_id=job_id,
+        durable_job_label="T07 validation",
+    )
+    dashboard = DashboardServer(agent=agent)
+    client = dashboard._app.test_client()
+
+    response = client.get(f"/dashboard/job/{job_id}")
+    panel_id = agent.execution_store.panel_id_for_session("session-a")
+
+    assert response.status_code == 302
+    assert response.headers["Location"] == f"/dashboard/?panel={panel_id}&job={job_id}"
+    assert client.get("/dashboard/job/ffffffffffffffffffffffffffffffff").headers["Location"] == "/dashboard/"
+
+
+def test_dashboard_registers_single_web_push_subscription(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ORCHESTRATOR_HOME", str(tmp_path / "orchestrator-home"))
+    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
+    dashboard = DashboardServer(agent=_DashboardAgent())
+    client = dashboard._app.test_client()
+
+    config = client.get("/dashboard/api/push/config").get_json()
+    response = client.post(
+        "/dashboard/api/push/subscribe",
+        json={
+            "endpoint": "https://push.example.invalid/subscription",
+            "keys": {"p256dh": "public-key", "auth": "auth-secret"},
+        },
+    )
+
+    assert isinstance(config["public_key"], str)
+    assert config["public_key"].startswith("B")
+    assert response.status_code == 200
+    assert response.get_json() == {"status": "success"}
 
 
 def test_custom_dashboard_can_name_retained_serena_conversation_before_first_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -369,7 +429,6 @@ def test_custom_dashboard_uses_default_project_and_dynamic_languages() -> None:
 
     session = dashboard._app.test_client().get("/dashboard/api/session").get_json()
 
-    assert session["active_project"] == {"name": "project-a", "path": "/tmp/project-a"}
     assert session["languages"] == ["python", "html"]
 
 

@@ -1982,6 +1982,24 @@ def activity_widget_html() -> str:
     timer = setTimeout(poll, delay);
   }
 
+  async function focusJob(jobId) {
+    if (!jobId) return;
+    initialViewResolved = true;
+    if (state?.summary_only) await hydrateFullActivity();
+    if (root.classList.contains("collapsed")) setCollapsed(false);
+    if (state?.run_id) render(state);
+
+    const key = `job:${jobId}`;
+    if (!(state?.jobs || []).some(job => job.job_id === jobId)) return;
+    expandedRows.add(key);
+    if (state?.run_id) render(state);
+
+    const row = rowsByKey.get(key);
+    if (!row) return;
+    void loadJobDetail(row);
+    requestAnimationFrame(() => row.scrollIntoView({ block: "center", behavior: "smooth" }));
+  }
+
   function acceptGlobals(event) {
     const next = event?.detail?.globals?.toolOutput;
     if (!next?.run_id) return;
@@ -1990,6 +2008,9 @@ def activity_widget_html() -> str:
     if (next.superseded && !hasRunningPanelActivity(next)) retire();
   }
   window.addEventListener("openai:set_globals", acceptGlobals, { passive: true });
+  window.addEventListener("serena:focus-job", event => {
+    void focusJob(String(event?.detail?.job_id || ""));
+  });
 
   if (state?.run_id) {
     render(state);

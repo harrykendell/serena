@@ -1,0 +1,16 @@
+{
+  "name": "Serena Dashboard",
+  "short_name": "Serena",
+  "start_url": "/dashboard/",
+  "scope": "/dashboard/",
+  "display": "standalone",
+  "background_color": "#10161d",
+  "theme_color": "#10161d",
+  "icons": [
+    {
+      "src": "serena-icon-128.png",
+      "sizes": "128x128",
+      "type": "image/png"
+    }
+  ]
+}

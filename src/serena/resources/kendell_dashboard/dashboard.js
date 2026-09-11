@@ -19,6 +19,13 @@ let refreshTimer = null;
 let initialActivityStateLoaded = false;
 let initialActivityViewSelected = false;
 let latestPanelActivity = false;
+let latestJobs = { jobs: [], running_jobs: 0, max_concurrent_jobs: 0 };
+let notificationTarget = (() => {
+  const params = new URLSearchParams(window.location.search);
+  const panelId = params.get("panel");
+  const jobId = params.get("job");
+  return panelId && jobId ? { panelId, jobId } : null;
+})();
 
 function byId(id) {
   return document.getElementById(id);
@@ -118,6 +125,78 @@ async function getJson(path) {
   return data;
 }
 
+function decodeBase64Url(value) {
+  const padding = "=".repeat((4 - (value.length % 4)) % 4);
+  const base64 = (value + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const binary = window.atob(base64);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+function setNotificationButtonState(button, state) {
+  button.dataset.state = state;
+  const enabled = state === "enabled";
+  button.setAttribute("aria-pressed", enabled ? "true" : "false");
+  const label = enabled
+    ? "Job notifications enabled"
+    : state === "denied"
+      ? "Job notifications blocked by browser settings"
+      : "Enable job notifications";
+  button.setAttribute("aria-label", label);
+  button.title = label;
+}
+
+async function setupPushNotifications() {
+  const button = byId("notification-button");
+  if (!button) return;
+  if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+    button.hidden = true;
+    return;
+  }
+
+  try {
+    const registration = await navigator.serviceWorker.register(dashboardAssetUrl("service-worker.js"), { scope: "/dashboard/" });
+    const existing = await registration.pushManager.getSubscription();
+    setNotificationButtonState(button, existing ? "enabled" : Notification.permission === "denied" ? "denied" : "available");
+
+    button.addEventListener("click", async () => {
+      if (button.disabled || button.getAttribute("aria-pressed") === "true") return;
+      button.disabled = true;
+      try {
+        const permission = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
+        if (permission !== "granted") {
+          setNotificationButtonState(button, permission === "denied" ? "denied" : "available");
+          return;
+        }
+
+        const config = await getJson("/push/config");
+        let subscription = await registration.pushManager.getSubscription();
+        if (!subscription) {
+          subscription = await registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: decodeBase64Url(config.public_key),
+          });
+        }
+
+        const response = await fetch(`${API_PREFIX}/push/subscribe`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify(subscription.toJSON()),
+        });
+        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+        setNotificationButtonState(button, "enabled");
+      } catch (error) {
+        console.error("Could not enable job notifications", error);
+        setNotificationButtonState(button, "available");
+      } finally {
+        button.disabled = false;
+      }
+    });
+  } catch (error) {
+    console.error("Web Push setup failed", error);
+    button.hidden = true;
+  }
+}
+
 let latestResources = { tools: [], memories: [] };
 let memoryRequestGeneration = 0;
 
@@ -177,6 +256,42 @@ function setupResourceDialog() {
   });
 }
 
+function renderRunningJobs() {
+  const jobs = (latestJobs.jobs || []).filter((job) => job.status === "running");
+  const content = byId("jobs-dialog-content");
+  setText("jobs-dialog-title", `Running jobs (${jobs.length}/${latestJobs.max_concurrent_jobs || 0})`);
+
+  if (jobs.length === 0) {
+    clearAndAppend(content, [makeElement("div", "jobs-empty", "No running jobs.")]);
+    return;
+  }
+
+  const rows = jobs.map((job) => {
+    const row = makeElement("div", "running-job");
+    row.append(makeElement("div", "running-job-title", job.label || "Background job"));
+
+    const details = [];
+    if (job.project) details.push(job.project);
+    if (Number.isFinite(Number(job.elapsed_seconds))) details.push(formatDuration(Number(job.elapsed_seconds)));
+    if (Number(job.process_count) > 0) details.push(`${job.process_count} process${Number(job.process_count) === 1 ? "" : "es"}`);
+    row.append(makeElement("div", "running-job-detail", details.join(" · ") || job.job_id));
+    return row;
+  });
+  clearAndAppend(content, rows);
+}
+
+function setupJobsDialog() {
+  const dialog = byId("jobs-dialog");
+  byId("jobs-button").addEventListener("click", () => {
+    renderRunningJobs();
+    dialog.showModal();
+  });
+  byId("jobs-dialog-close").addEventListener("click", () => dialog.close());
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) dialog.close();
+  });
+}
+
 function setupMemoryDialog() {
   const dialog = byId("memory-dialog");
   byId("memory-dialog-close").addEventListener("click", () => dialog.close());
@@ -185,10 +300,7 @@ function setupMemoryDialog() {
   });
 }
 
-function renderOverview(session) {
-  const project = session.active_project || {};
-  setText("project-name", project.name, "No active project");
-  setText("project-path", project.path, "—");
+function renderOverview(session, jobs) {
   setText("languages", (session.languages || []).join(" · "), "None");
   setText("runtime-policy", session.runtime_policy, "ChatGPT");
   setText("version", session.serena_version, "—");
@@ -196,11 +308,20 @@ function renderOverview(session) {
   const activeTools = session.active_tools || [];
   const memories = session.available_memories || [];
   latestResources = { tools: activeTools, memories };
+  latestJobs = jobs || { jobs: [], running_jobs: 0, max_concurrent_jobs: 0 };
 
   setText("tool-count", activeTools.length);
   setText("memories-count", memories.length);
+  setText("running-jobs-count", latestJobs.running_jobs || 0);
+  setText("max-jobs-count", latestJobs.max_concurrent_jobs || 0);
   byId("tools-button").setAttribute("aria-label", `${activeTools.length} active tools`);
   byId("memories-button").setAttribute("aria-label", `${memories.length} memories`);
+  byId("jobs-button").setAttribute(
+    "aria-label",
+    `${latestJobs.running_jobs || 0} of ${latestJobs.max_concurrent_jobs || 0} Serena jobs running`,
+  );
+
+  if (byId("jobs-dialog").open) renderRunningJobs();
 }
 
 function formatEpochClock(timestamp) {
@@ -623,6 +744,47 @@ function renderSessionWidgets(containerId, countId, panels, kind) {
   );
 }
 
+
+function consumeNotificationTarget() {
+  if (!notificationTarget) return;
+  const url = new URL(window.location.href);
+  url.searchParams.delete("panel");
+  url.searchParams.delete("job");
+  window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  notificationTarget = null;
+}
+
+function sendNotificationJobFocus(frame, panelId) {
+  if (!notificationTarget || notificationTarget.panelId !== panelId || !frame?.contentWindow) return;
+  const target = notificationTarget;
+  frame.contentWindow.postMessage(
+    {
+      type: "serena-dashboard-focus-job",
+      panel_id: panelId,
+      job_id: target.jobId,
+    },
+    location.origin,
+  );
+  consumeNotificationTarget();
+}
+
+function focusNotificationJob(panels) {
+  if (!notificationTarget) return;
+  if (!(panels || []).some(panel => panel.panel_id === notificationTarget.panelId)) return;
+
+  activateActivityView("serena");
+  const entry = Array.from(byId("serena-widgets").children)
+    .find(candidate => candidate.dataset.itemKey === notificationTarget.panelId);
+  if (!entry) return;
+
+  const shell = entry.querySelector(".activity-widget-shell");
+  if (shell) sessionWidgetLoader("serena").prioritize(shell);
+  requestAnimationFrame(() => entry.scrollIntoView({ block: "center" }));
+
+  const frame = entry.querySelector(".activity-widget-frame");
+  if (frame?.classList.contains("ready")) sendNotificationJobFocus(frame, notificationTarget.panelId);
+}
+
 window.addEventListener("message", event => {
   if (event.origin !== location.origin) return;
   const frame = Array.from(document.querySelectorAll(".activity-widget-frame")).find(candidate => candidate.contentWindow === event.source);
@@ -630,7 +792,10 @@ window.addEventListener("message", event => {
   if (event.data?.type === "serena-dashboard-widget-ready") {
     const preview = frame.parentElement?.querySelector(".activity-widget-preview");
     if (preview) preview.hidden = true;
-    requestAnimationFrame(() => frame.classList.add("ready"));
+    requestAnimationFrame(() => {
+      frame.classList.add("ready");
+      sendNotificationJobFocus(frame, String(event.data.panel_id || ""));
+    });
     return;
   }
   if (event.data?.type !== "serena-activity-height") return;
@@ -653,6 +818,7 @@ async function refresh() {
   refreshInFlight = true;
 
   let session;
+  let jobs;
   let serena;
   let orchestrator;
   try {
@@ -664,6 +830,7 @@ async function refresh() {
       state = await getJson(initialActivityStateLoaded ? "/state" : "/state?include_state=1");
     }
     session = state.session;
+    jobs = state.jobs;
     serena = state.serena;
     orchestrator = state.orchestrator;
   } catch (error) {
@@ -677,7 +844,7 @@ async function refresh() {
   setConnection("live", "Live");
   setText("last-update", new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
   try {
-    renderOverview(session);
+    renderOverview(session, jobs);
     renderSessionWidgets("serena-widgets", "serena-panel-count", serena.panels || [], "serena");
     renderSessionWidgets("orchestrator-widgets", "orchestrator-panel-count", orchestrator.panels || [], "orchestrator");
     latestPanelActivity = [...(serena.panels || []), ...(orchestrator.panels || [])].some(panel => panel.active);
@@ -685,9 +852,11 @@ async function refresh() {
 
     if (!initialActivityViewSelected) {
       const orchestratorActive = (orchestrator.panels || []).some(panel => panel.active);
-      if (isTabbedActivityMode() && orchestratorActive) activateActivityView("orchestrator");
+      if (notificationTarget) activateActivityView("serena");
+      else if (isTabbedActivityMode() && orchestratorActive) activateActivityView("orchestrator");
       initialActivityViewSelected = true;
     }
+    focusNotificationJob(serena.panels || []);
   } catch (error) {
     console.error("Dashboard render failed", error);
     setConnection("error", "UI error");
@@ -707,6 +876,8 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("focus", () => refresh(), { passive: true });
 
 setupResourceDialog();
+setupJobsDialog();
 setupMemoryDialog();
 setupActivityViewTabs();
+setupPushNotifications();
 refresh();

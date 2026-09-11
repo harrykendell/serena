@@ -509,7 +509,12 @@ def test_job_status_wait_validation(tmp_path: Path) -> None:
         status_tool.apply(wait_for=1)
 
 
-def test_runner_records_terminal_exit_status_and_consumes_command(tmp_path: Path) -> None:
+def test_runner_records_terminal_exit_status_and_consumes_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    notified = []
+    monkeypatch.setattr(
+        "serena.push_notifications.WebPushNotifier.send_job_finished",
+        lambda self, record: notified.append(record) or True,
+    )
     store = JobStore(tmp_path / "jobs")
     job_id = "0123456789abcdef0123456789abcdef"
     record = JobRecord(
@@ -531,4 +536,5 @@ def test_runner_records_terminal_exit_status_and_consumes_command(tmp_path: Path
     assert finished.status is JobStatus.FAILED
     assert finished.return_code == 3
     assert finished.finished_at is not None
+    assert notified == [finished]
     assert not command_file.exists()
