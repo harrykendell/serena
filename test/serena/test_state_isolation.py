@@ -27,8 +27,8 @@ def test_default_persistence_uses_suite_owned_state() -> None:
     store = ExecutionStore()
     session_id = f"f01-test-isolation-session-{os.getpid()}"
     store.set_session_display_name(session_id, "F01 isolation check")
-    state_path = serena_home / "execution_store" / "state.json"
+    state_path = serena_home / "execution_store" / "state.sqlite3"
 
     assert state_path.is_file()
-    real_state_path = real_serena_home / "execution_store" / "state.json"
+    real_state_path = real_serena_home / "execution_store" / "state.sqlite3"
     assert state_path.resolve() != real_state_path.resolve()

@@ -1,3 +1,4 @@
+import json
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -348,6 +349,35 @@ def test_terminal_job_listing_is_ordered_by_finish_time(tmp_path: Path) -> None:
     listed = manager.list_jobs(limit=20)
 
     assert [record.label for record in listed] == ["finished later", "finished earlier"]
+
+
+def test_job_store_imports_legacy_json_once(tmp_path: Path) -> None:
+    root = tmp_path / "jobs"
+    root.mkdir()
+    job_id = "0123456789abcdef0123456789abcdef"
+    legacy_path = root / f"{job_id}.json"
+    record = JobRecord(
+        job_id=job_id,
+        unit_name=f"serena-job-{job_id}.service",
+        project_root=str(tmp_path),
+        cwd=str(tmp_path),
+        status=JobStatus.COMPLETED,
+        created_at="2026-09-11T12:00:00+00:00",
+        session_id="session-a",
+        project_name="serena",
+        label="Legacy job",
+        finished_at="2026-09-11T12:01:00+00:00",
+        return_code=0,
+    )
+    legacy_path.write_text(json.dumps(record.to_dict()), encoding="utf-8")
+
+    store = JobStore(root)
+
+    assert store.read(job_id) == record
+    assert (root / "state.sqlite3").is_file()
+    assert not legacy_path.exists()
+    assert (root / f"{job_id}.json.migrated").is_file()
+    assert JobStore(root).read(job_id) == record
 
 
 def test_timeout_is_reported_as_distinct_terminal_state(tmp_path: Path) -> None:

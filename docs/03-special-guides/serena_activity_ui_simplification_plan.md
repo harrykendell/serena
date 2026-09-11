@@ -1,6 +1,6 @@
 # Serena Activity UI Simplification and Dashboard Rebuild Plan
 
-Status: ACTIVE — U00–U04 COMPLETE; U05–U07 PLANNED (2026-09-11)
+Status: ACTIVE — U00–U05 COMPLETE; U06–U07 PLANNED (2026-09-11)
 
 Baseline: `3435c894` (`Show current Git metrics in Serena activity`) plus the original mixed working tree. U00 preserved that pre-existing work as `a0c6a541` (backend performance fixes), `94818381` (dashboard notifications/PWA/deep links), and `04ef9b6e` (validation fixes for the preserved backend work), then recorded the measurable rebuild baseline in `docs/03-special-guides/serena_activity_ui_simplification_u00_baseline.md`.
 
@@ -879,7 +879,7 @@ Add scale measurements that directly target the reason for the change:
 - query 0 running jobs with 100, 1,000 and 5,000 terminal jobs present and require indexed behaviour rather than O(all jobs) JSON decoding;
 - measure database size separately from latency; a modest increase in disk bytes is acceptable in exchange for eliminating repeated whole-history serialization/compression.
 
-Checkpoint: execution and job lifecycle persistence is transactional, indexed and local to changed records; compressed whole-state JSON is no longer the normal storage engine.
+Checkpoint (complete 2026-09-11): execution and job lifecycle persistence is transactional, indexed and local to changed records; compressed whole-state JSON is no longer the normal storage engine. Evidence: `docs/03-special-guides/serena_activity_ui_simplification_u05_checkpoint.md`.
 
 ### U06 — Remove avoidable transport and renderer work
 

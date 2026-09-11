@@ -7,7 +7,6 @@ import pytest
 
 from serena.execution_store import ExecutionStore
 from serena.retention import JobRetentionState, SessionRetentionPolicy
-from serena.storage_compression import RetainedTextCompression
 
 
 def test_execution_store_survives_restart_and_pins_file_snapshots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -266,6 +265,7 @@ def test_execution_store_rejects_pre_v2_state(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="requires schema version 2 or 3"):
         ExecutionStore(root)
+    assert not (root / "state.sqlite3").exists()
 
 
 def test_execution_store_migrates_v2_arguments_and_drops_run_job_mirrors(tmp_path: Path) -> None:
@@ -320,14 +320,9 @@ def test_execution_store_migrates_v2_arguments_and_drops_run_job_mirrors(tmp_pat
 
     assert store.get_execution("execution-a").arguments == {"relative_path": "notes.txt"}
     assert store.get_activity_run("run-a").execution_ids == ["execution-a"]
-    rewritten = json.loads(RetainedTextCompression.read_text(state_path))
-    assert rewritten["version"] == 3
-    assert rewritten["executions"]["execution-a"]["arguments"] == {"relative_path": "notes.txt"}
-    assert set(rewritten["activity_runs"]["run-a"]) == {
-        "run_id",
-        "session_id",
-        "project_name",
-        "started_at",
-        "superseded",
-        "execution_ids",
-    }
+    assert not state_path.exists()
+    assert (root / "state.json.migrated").is_file()
+    assert (root / "state.sqlite3").is_file()
+    restored = ExecutionStore(root)
+    assert restored.get_execution("execution-a").arguments == {"relative_path": "notes.txt"}
+    assert restored.get_activity_run("run-a").execution_ids == ["execution-a"]

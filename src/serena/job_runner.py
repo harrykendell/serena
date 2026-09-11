@@ -70,7 +70,9 @@ def _terminate_job_processes(process: subprocess.Popen[str], job_id: str) -> Non
 def run_job(state_file: Path, command_file: Path) -> int:
     """Run a stored command and persist its natural terminal status before exiting."""
     store = JobStore(state_file.parent)
-    record = store.read(state_file.stem)
+    command_name = command_file.name
+    job_id = command_name[1 : -len(".command")] if command_name.startswith(".") and command_name.endswith(".command") else state_file.stem
+    record = store.read(job_id)
     process: subprocess.Popen[str] | None = None
 
     def handle_termination(signum: int, frame: FrameType | None) -> None:

@@ -4,13 +4,13 @@ import ast
 import json
 import os
 import re
-import tempfile
+import sqlite3
 import threading
 import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -104,25 +104,18 @@ class SessionExecutionSummary:
     latest_execution: ExecutionSummaryRecord | None
 
 
-@dataclass
-class _SessionExecutionIndex:
-    """Rebuildable execution identifiers and derived facts for one retained session."""
-
-    execution_ids: list[str] = field(default_factory=list)
-    running_execution_count: int = 0
-    durable_job_ids: set[str] = field(default_factory=set)
-    first_execution_started_at: float | None = None
-    latest_execution_started_at: float | None = None
-    latest_execution_id: str | None = None
-
-
 class ExecutionStore:
-    """Owns persistent Serena session, execution and activity-panel state.
+    """Owns indexed persistent Serena session, execution and activity-panel state.
 
-    The store is the single persistence boundary for model-visible tool execution state. Legacy
-    activity/dashboard JSON files are imported once and removed only after the canonical state has
-    been written successfully.
+    The store is the single persistence boundary for model-visible tool execution state. Normal
+    operation reads and mutates SQLite rows directly; the legacy JSON/zstd state is imported only
+    when no SQLite database exists yet.
     """
+
+    _DATABASE_SCHEMA_VERSION = 1
+    _DATABASE_FILENAME = "state.sqlite3"
+    _LEGACY_FILENAME = "state.json"
+    _BUSY_TIMEOUT_MS = 5_000
 
     def __init__(
         self,
@@ -132,26 +125,42 @@ class ExecutionStore:
     ) -> None:
         use_default_root = root is None
         self._root = root or self._default_root()
-        self._state_path = self._root / "state.json"
+        self._database_path = self._root / self._DATABASE_FILENAME
+        self._legacy_state_path = self._root / self._LEGACY_FILENAME
         self._retention = retention
         self._lock = threading.RLock()
-        self._sessions: dict[str, SessionRecord] = {}
-        self._executions: dict[str, ExecutionRecord] = {}
-        self._activity_runs: dict[str, ActivityPanelRun] = {}
-        self._current_run_by_session: dict[str, str] = {}
+        self._transaction_depth = 0
         self._running_job_sessions: dict[str, str] = {}
-        self._session_execution_index: dict[str, _SessionExecutionIndex] = {}
-        self._panel_session_index: dict[str, str] = {}
-        self._job_session_index: dict[str, str] = {}
-        self._save_batch_depth = 0
-        self._save_pending = False
+        self._pending_artifact_cleanup: set[tuple[str, str]] = set()
 
-        migrated = self._load()
+        # validate legacy input before creating the authoritative database
+        legacy_payload = None
+        if not self._database_path.exists() and self._legacy_state_path.is_file():
+            legacy_payload = self._read_legacy_state()
+
+        # configure one process-local connection behind the store lock
+        self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(self._root, 0o700)
+        self._connection = sqlite3.connect(
+            self._database_path,
+            timeout=self._BUSY_TIMEOUT_MS / 1_000,
+            isolation_level=None,
+            check_same_thread=False,
+        )
+        self._connection.row_factory = sqlite3.Row
+        self._configure_database()
+        self._create_schema()
+
+        if legacy_payload is not None:
+            try:
+                self._import_legacy_state(legacy_payload)
+                self._mark_legacy_migrated()
+            except Exception:
+                self._connection.close()
+                self._discard_failed_database()
+                raise
+
         self._interrupt_stale_state()
-        self._rebuild_session_execution_index()
-        pruned = self._prune()
-        if migrated or pruned:
-            self._save()
         if use_default_root:
             self._cleanup_unreferenced_artifacts()
 
@@ -170,12 +179,20 @@ class ExecutionStore:
         return uuid.uuid5(uuid.NAMESPACE_URL, f"serena-dashboard:{session_id}").hex[:16]
 
     def panel_id_for_job(self, job_id: str) -> str | None:
-        """Returns the retained dashboard panel owning ``job_id`` from the rebuildable index."""
+        """Returns the retained dashboard panel owning ``job_id``."""
         with self._lock:
-            session_id = self._job_session_index.get(job_id)
-            if session_id is None or session_id not in self._sessions:
-                return None
-            return self.panel_id_for_session(session_id)
+            row = self._connection.execute(
+                """
+                SELECT sessions.panel_id
+                FROM executions
+                JOIN sessions ON sessions.session_id = executions.session_id
+                WHERE executions.durable_job_id = ?
+                ORDER BY executions.started_at DESC, executions.execution_id DESC
+                LIMIT 1
+                """,
+                (job_id,),
+            ).fetchone()
+            return str(row["panel_id"]) if row is not None else None
 
     @staticmethod
     def compact_arguments(value: dict[str, Any]) -> dict[str, Any]:
@@ -200,27 +217,49 @@ class ExecutionStore:
         arguments: dict[str, Any],
         started_at: float | None = None,
     ) -> ExecutionRecord:
-        """Creates one running execution record before dispatch leaves the MCP event loop."""
-        now = started_at or time.time()
-        with self._lock:
+        """Creates one running execution record in a row-local transaction."""
+        now = started_at if started_at is not None else time.time()
+        record = ExecutionRecord(
+            execution_id=execution_id,
+            session_id=session_id,
+            project_name=project_name,
+            tool_name=tool_name,
+            arguments=self.compact_arguments(arguments),
+            started_at=now,
+        )
+        with self._transaction():
+            # expire old ownership before a reused session identifier can refresh it
             self._prune()
-            session = self._ensure_session(session_id, now)
-            if project_name:
-                session.project_name = project_name
-            session.updated_at = now
-            record = ExecutionRecord(
-                execution_id=execution_id,
-                session_id=session_id,
-                project_name=project_name,
-                tool_name=tool_name,
-                arguments=self.compact_arguments(arguments),
-                started_at=now,
+            self._ensure_session(session_id, now)
+            self._connection.execute(
+                """
+                UPDATE sessions
+                SET project_name = CASE WHEN ? <> '' THEN ? ELSE project_name END,
+                    updated_at = ?
+                WHERE session_id = ?
+                """,
+                (project_name, project_name, now, session_id),
             )
-            self._executions[execution_id] = record
-            self._index_execution_start(record)
-            self._prune()
-            self._save()
-            return record
+            self._connection.execute(
+                """
+                INSERT INTO executions (
+                    execution_id, session_id, project_name, tool_name, arguments_json, started_at,
+                    status, finished_at, request_finished_at, request_error, result, error,
+                    retained_output_id, retained_output_chars, media_json, durable_job_id,
+                    durable_job_label
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+                """,
+                (
+                    record.execution_id,
+                    record.session_id,
+                    record.project_name,
+                    record.tool_name,
+                    self._dump_json(record.arguments),
+                    record.started_at,
+                    record.status,
+                ),
+            )
+        return record
 
     def mark_request_abandoned(
         self,
@@ -230,18 +269,36 @@ class ExecutionStore:
         request_finished_at: float | None = None,
     ) -> None:
         """Records that a model-visible request ended while its worker is still running."""
-        now = request_finished_at or time.time()
-        with self._lock:
-            record = self._executions.get(execution_id)
-            if record is None or record.status not in {"running", "queued"}:
+        now = request_finished_at if request_finished_at is not None else time.time()
+        with self._transaction():
+            row = self._connection.execute(
+                """
+                SELECT session_id
+                FROM executions
+                WHERE execution_id = ?
+                  AND status IN ('running', 'queued')
+                  AND request_finished_at IS NULL
+                """,
+                (execution_id,),
+            ).fetchone()
+            if row is None:
                 return
-            if record.request_finished_at is not None:
-                return
-            record.request_finished_at = now
-            record.request_error = error
-            session = self._ensure_session(record.session_id, record.started_at)
-            session.updated_at = max(session.updated_at, now)
-            self._save()
+            self._connection.execute(
+                """
+                UPDATE executions
+                SET request_finished_at = ?, request_error = ?
+                WHERE execution_id = ?
+                """,
+                (now, error, execution_id),
+            )
+            self._connection.execute(
+                """
+                UPDATE sessions
+                SET updated_at = MAX(updated_at, ?)
+                WHERE session_id = ?
+                """,
+                (now, str(row["session_id"])),
+            )
 
     def finish_execution(
         self,
@@ -259,105 +316,196 @@ class ExecutionStore:
         finished_at: float | None = None,
     ) -> None:
         """Marks one execution terminal after its underlying worker has actually stopped."""
-        now = finished_at or time.time()
-        with self._lock:
-            record = self._executions.get(execution_id)
-            if record is None:
+        now = finished_at if finished_at is not None else time.time()
+        with self._transaction():
+            row = self._connection.execute(
+                """
+                SELECT session_id, project_name, request_finished_at, request_error
+                FROM executions
+                WHERE execution_id = ?
+                """,
+                (execution_id,),
+            ).fetchone()
+            if row is None:
                 return
-            was_running = record.status in {"running", "queued"}
-            # finalize worker lifecycle without erasing an earlier request timeout/cancellation
-            record.status = "completed" if succeeded else "failed"
-            record.finished_at = now
-            if record.request_finished_at is None:
-                record.request_finished_at = now
-            if record.request_error is None:
-                record.request_error = error
-            record.result = result if media is None else None
-            record.error = record.request_error or error
-            record.retained_output_id = retained_output_id
-            record.retained_output_chars = retained_output_chars
-            record.media = media
-            record.durable_job_id = durable_job_id
-            record.durable_job_label = durable_job_label
-            if project_name is not None:
-                record.project_name = project_name
 
-            session = self._ensure_session(record.session_id, record.started_at)
-            if record.project_name:
-                session.project_name = record.project_name
-            session.updated_at = now
-            self._index_execution_finish(record, was_running=was_running)
+            # preserve an earlier request timeout/cancellation while finalising the worker lifecycle
+            request_error = str(row["request_error"]) if row["request_error"] is not None else error
+            effective_project = project_name if project_name is not None else str(row["project_name"])
+            stored_result = result if media is None else None
+            self._connection.execute(
+                """
+                UPDATE executions
+                SET status = ?,
+                    finished_at = ?,
+                    request_finished_at = COALESCE(request_finished_at, ?),
+                    request_error = COALESCE(request_error, ?),
+                    result = ?,
+                    error = ?,
+                    retained_output_id = ?,
+                    retained_output_chars = ?,
+                    media_json = ?,
+                    durable_job_id = ?,
+                    durable_job_label = ?,
+                    project_name = ?
+                WHERE execution_id = ?
+                """,
+                (
+                    "completed" if succeeded else "failed",
+                    now,
+                    now,
+                    error,
+                    stored_result,
+                    request_error,
+                    retained_output_id,
+                    retained_output_chars,
+                    self._dump_json(media) if media is not None else None,
+                    durable_job_id,
+                    durable_job_label,
+                    effective_project,
+                    execution_id,
+                ),
+            )
+            self._replace_execution_resources(
+                execution_id,
+                result=stored_result,
+                media=media,
+                retained_output_id=retained_output_id,
+            )
+            self._connection.execute(
+                """
+                UPDATE sessions
+                SET project_name = CASE WHEN ? <> '' THEN ? ELSE project_name END,
+                    updated_at = ?
+                WHERE session_id = ?
+                """,
+                (effective_project, effective_project, now, str(row["session_id"])),
+            )
             self._prune()
-            self._save()
 
     def get_execution(self, execution_id: str) -> ExecutionRecord | None:
         """Returns one execution record if retained."""
         with self._lock:
-            record = self._executions.get(execution_id)
-            return ExecutionRecord(**asdict(record)) if record is not None else None
+            row = self._connection.execute("SELECT * FROM executions WHERE execution_id = ?", (execution_id,)).fetchone()
+            return self._execution_from_row(row) if row is not None else None
 
     def get_execution_summary(self, execution_id: str) -> ExecutionSummaryRecord | None:
-        """Returns bounded row metadata for one retained execution without copying its result body."""
+        """Returns bounded row metadata for one retained execution without loading its result body."""
         with self._lock:
-            record = self._executions.get(execution_id)
-            return self._execution_summary_record(record) if record is not None else None
+            row = self._connection.execute(
+                """
+                SELECT execution_id, session_id, project_name, tool_name, arguments_json, started_at,
+                       status, finished_at, durable_job_id, durable_job_label
+                FROM executions
+                WHERE execution_id = ?
+                """,
+                (execution_id,),
+            ).fetchone()
+            return self._execution_summary_from_row(row) if row is not None else None
 
     def list_executions(self, *, newest_first: bool = True, limit: int | None = None) -> list[ExecutionRecord]:
         """Returns retained executions ordered by submission time."""
+        direction = "DESC" if newest_first else "ASC"
+        sql = f"SELECT * FROM executions ORDER BY started_at {direction}, execution_id {direction}"
+        params: tuple[object, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
         with self._lock:
-            records = sorted(self._executions.values(), key=lambda item: item.started_at, reverse=newest_first)
-            if limit is not None:
-                records = records[:limit]
-            return [ExecutionRecord(**asdict(record)) for record in records]
+            return [self._execution_from_row(row) for row in self._connection.execute(sql, params).fetchall()]
 
     def list_session_executions(self, session_id: str) -> list[ExecutionRecord]:
         """Returns executions belonging to one session from oldest to newest."""
         with self._lock:
-            index = self._session_execution_index.get(session_id)
-            if index is None:
-                return []
-            return [
-                ExecutionRecord(**asdict(record))
-                for execution_id in index.execution_ids
-                if (record := self._executions.get(execution_id)) is not None
-            ]
+            rows = self._connection.execute(
+                """
+                SELECT *
+                FROM executions
+                WHERE session_id = ?
+                ORDER BY started_at ASC, execution_id ASC
+                """,
+                (session_id,),
+            ).fetchall()
+            return [self._execution_from_row(row) for row in rows]
 
     def list_session_execution_items(self, session_id: str) -> list[ExecutionSummaryRecord]:
         """Returns bounded execution rows for one session from oldest to newest."""
         with self._lock:
-            index = self._session_execution_index.get(session_id)
-            if index is None:
-                return []
-            return [
-                self._execution_summary_record(record)
-                for execution_id in index.execution_ids
-                if (record := self._executions.get(execution_id)) is not None
-            ]
+            rows = self._connection.execute(
+                """
+                SELECT execution_id, session_id, project_name, tool_name, arguments_json, started_at,
+                       status, finished_at, durable_job_id, durable_job_label
+                FROM executions
+                WHERE session_id = ?
+                ORDER BY started_at ASC, execution_id ASC
+                """,
+                (session_id,),
+            ).fetchall()
+            return [self._execution_summary_from_row(row) for row in rows]
 
     def list_session_execution_summaries(self) -> list[SessionExecutionSummary]:
-        """Returns lightweight retained-session facts without expanding execution payloads."""
+        """Returns compact retained-session facts with set-based SQL aggregation."""
         with self._lock:
-            summaries: list[SessionExecutionSummary] = []
-            for session in self._sessions.values():
-                index = self._session_execution_index.get(session.session_id, _SessionExecutionIndex())
-                latest_record = self._executions.get(index.latest_execution_id) if index.latest_execution_id is not None else None
-                summaries.append(
-                    SessionExecutionSummary(
-                        session_id=session.session_id,
-                        panel_id=session.panel_id,
-                        display_name=session.display_name,
-                        project_name=session.project_name,
-                        created_at=session.created_at,
-                        updated_at=session.updated_at,
-                        execution_count=len(index.execution_ids),
-                        running_execution_count=index.running_execution_count,
-                        durable_job_count=len(index.durable_job_ids),
-                        first_execution_started_at=index.first_execution_started_at,
-                        latest_execution_started_at=index.latest_execution_started_at,
-                        latest_execution=self._execution_summary_record(latest_record) if latest_record is not None else None,
-                    )
+            aggregate_rows = self._connection.execute(
+                """
+                SELECT
+                    sessions.session_id,
+                    sessions.panel_id,
+                    sessions.display_name,
+                    sessions.project_name,
+                    sessions.created_at,
+                    sessions.updated_at,
+                    COUNT(executions.execution_id) AS execution_count,
+                    COALESCE(SUM(CASE WHEN executions.status IN ('running', 'queued') THEN 1 ELSE 0 END), 0)
+                        AS running_execution_count,
+                    COUNT(DISTINCT executions.durable_job_id) AS durable_job_count,
+                    MIN(executions.started_at) AS first_execution_started_at,
+                    MAX(executions.started_at) AS latest_execution_started_at
+                FROM sessions
+                LEFT JOIN executions ON executions.session_id = sessions.session_id
+                GROUP BY sessions.session_id
+                """
+            ).fetchall()
+            latest_rows = self._connection.execute(
+                """
+                SELECT execution_id, session_id, project_name, tool_name, arguments_json, started_at,
+                       status, finished_at, durable_job_id, durable_job_label
+                FROM (
+                    SELECT
+                        execution_id, session_id, project_name, tool_name, arguments_json, started_at,
+                        status, finished_at, durable_job_id, durable_job_label,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY session_id
+                            ORDER BY started_at DESC, execution_id DESC
+                        ) AS row_number
+                    FROM executions
                 )
-            return summaries
+                WHERE row_number = 1
+                """
+            ).fetchall()
+            latest = {str(row["session_id"]): self._execution_summary_from_row(row) for row in latest_rows}
+
+            return [
+                SessionExecutionSummary(
+                    session_id=str(row["session_id"]),
+                    panel_id=str(row["panel_id"]),
+                    display_name=str(row["display_name"]),
+                    project_name=str(row["project_name"]),
+                    created_at=float(row["created_at"]),
+                    updated_at=float(row["updated_at"]),
+                    execution_count=int(row["execution_count"]),
+                    running_execution_count=int(row["running_execution_count"]),
+                    durable_job_count=int(row["durable_job_count"]),
+                    first_execution_started_at=(
+                        float(row["first_execution_started_at"]) if row["first_execution_started_at"] is not None else None
+                    ),
+                    latest_execution_started_at=(
+                        float(row["latest_execution_started_at"]) if row["latest_execution_started_at"] is not None else None
+                    ),
+                    latest_execution=latest.get(str(row["session_id"])),
+                )
+                for row in aggregate_rows
+            ]
 
     def set_session_display_name(self, session_id: str, display_name: str) -> str:
         """Sets the normalized operator-facing conversation title."""
@@ -366,187 +514,282 @@ class ExecutionStore:
             raise ValueError("Conversation names must not be empty")
         if len(normalized) > 80:
             raise ValueError("Conversation names must be at most 80 characters")
-        with self._lock:
-            session = self._ensure_session(session_id, time.time())
-            session.display_name = normalized
-            session.updated_at = time.time()
-            self._save()
+        now = time.time()
+        with self._transaction():
+            self._ensure_session(session_id, now)
+            self._connection.execute(
+                "UPDATE sessions SET display_name = ?, updated_at = ? WHERE session_id = ?",
+                (normalized, now, session_id),
+            )
         return normalized
 
     def update_session_project(self, session_id: str, project_name: str) -> None:
         """Updates the latest project identity associated with one session."""
         if not project_name:
             return
-        with self._lock:
-            session = self._ensure_session(session_id, time.time())
-            session.project_name = project_name
-            session.updated_at = time.time()
-            self._save()
+        now = time.time()
+        with self._transaction():
+            self._ensure_session(session_id, now)
+            self._connection.execute(
+                "UPDATE sessions SET project_name = ?, updated_at = ? WHERE session_id = ?",
+                (project_name, now, session_id),
+            )
 
     def list_sessions(self) -> list[SessionRecord]:
         """Returns retained sessions from newest to oldest update time."""
         with self._lock:
-            sessions = sorted(self._sessions.values(), key=lambda item: item.updated_at, reverse=True)
-            return [SessionRecord(**asdict(session)) for session in sessions]
+            rows = self._connection.execute("SELECT * FROM sessions ORDER BY updated_at DESC, created_at DESC, session_id DESC").fetchall()
+            return [self._session_from_row(row) for row in rows]
 
     def get_session_by_panel_id(self, panel_id: str) -> SessionRecord | None:
         """Returns one retained session by its dashboard panel identifier."""
         with self._lock:
-            session_id = self._panel_session_index.get(panel_id)
-            session = self._sessions.get(session_id) if session_id is not None else None
-            return SessionRecord(**asdict(session)) if session is not None else None
+            row = self._connection.execute("SELECT * FROM sessions WHERE panel_id = ?", (panel_id,)).fetchone()
+            return self._session_from_row(row) if row is not None else None
 
     def start_activity_run(self, session_id: str, project_name: str) -> ActivityPanelRun:
-        """Starts a panel run and carries any currently running executions from its predecessor."""
+        """Starts a panel run and carries live executions from its predecessor."""
         now = time.time()
-        with self._lock:
+        run_id = uuid.uuid4().hex
+        with self._transaction():
             self._prune()
-            previous_id = self._current_run_by_session.get(session_id)
+            previous = self._connection.execute(
+                """
+                SELECT run_id
+                FROM activity_runs
+                WHERE session_id = ? AND superseded = 0
+                ORDER BY started_at DESC, run_id DESC
+                LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
             continuing: list[str] = []
-            if previous_id is not None and (previous := self._activity_runs.get(previous_id)) is not None:
-                previous.superseded = True
+            if previous is not None:
+                previous_id = str(previous["run_id"])
                 continuing = [
-                    execution_id
-                    for execution_id in previous.execution_ids
-                    if (record := self._executions.get(execution_id)) is not None and record.status in {"running", "queued"}
+                    str(row["execution_id"])
+                    for row in self._connection.execute(
+                        """
+                        SELECT activity_run_executions.execution_id
+                        FROM activity_run_executions
+                        JOIN executions ON executions.execution_id = activity_run_executions.execution_id
+                        WHERE activity_run_executions.run_id = ?
+                          AND executions.status IN ('running', 'queued')
+                        ORDER BY activity_run_executions.position ASC
+                        """,
+                        (previous_id,),
+                    ).fetchall()
                 ]
-            run = ActivityPanelRun(
-                run_id=uuid.uuid4().hex,
-                session_id=session_id,
-                project_name=project_name,
-                started_at=now,
-                execution_ids=continuing,
-            )
-            self._activity_runs[run.run_id] = run
-            self._current_run_by_session[session_id] = run.run_id
+                self._connection.execute(
+                    "UPDATE activity_runs SET superseded = 1 WHERE run_id = ?",
+                    (previous_id,),
+                )
+
             self._ensure_session(session_id, now)
-            self._save()
-            return ActivityPanelRun(**asdict(run))
+            self._connection.execute(
+                """
+                INSERT INTO activity_runs (run_id, session_id, project_name, started_at, superseded)
+                VALUES (?, ?, ?, ?, 0)
+                """,
+                (run_id, session_id, project_name, now),
+            )
+            self._connection.executemany(
+                """
+                INSERT INTO activity_run_executions (run_id, execution_id, position)
+                VALUES (?, ?, ?)
+                """,
+                [(run_id, execution_id, position) for position, execution_id in enumerate(continuing)],
+            )
+
+        return ActivityPanelRun(
+            run_id=run_id,
+            session_id=session_id,
+            project_name=project_name,
+            started_at=now,
+            execution_ids=continuing,
+        )
 
     def append_execution_to_current_run(self, session_id: str, execution_id: str, *, project_name: str = "") -> None:
         """Adds one execution identifier to the active panel run for ``session_id`` if present."""
-        with self._lock:
-            run_id = self._current_run_by_session.get(session_id)
-            run = self._activity_runs.get(run_id) if run_id is not None else None
+        with self._transaction():
+            run = self._connection.execute(
+                """
+                SELECT run_id
+                FROM activity_runs
+                WHERE session_id = ? AND superseded = 0
+                ORDER BY started_at DESC, run_id DESC
+                LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
             if run is None:
                 return
-            if execution_id not in run.execution_ids:
-                run.execution_ids.append(execution_id)
+            run_id = str(run["run_id"])
+            position_row = self._connection.execute(
+                "SELECT COALESCE(MAX(position), -1) + 1 AS next_position FROM activity_run_executions WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            next_position = int(position_row["next_position"]) if position_row is not None else 0
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO activity_run_executions (run_id, execution_id, position)
+                VALUES (?, ?, ?)
+                """,
+                (run_id, execution_id, next_position),
+            )
             if project_name:
-                run.project_name = project_name
-            self._save()
+                self._connection.execute(
+                    "UPDATE activity_runs SET project_name = ? WHERE run_id = ?",
+                    (project_name, run_id),
+                )
 
     def update_activity_run_project(self, session_id: str, project_name: str) -> None:
         """Updates the active panel run's project label."""
         if not project_name:
             return
-        with self._lock:
-            run_id = self._current_run_by_session.get(session_id)
-            run = self._activity_runs.get(run_id) if run_id is not None else None
-            if run is not None:
-                run.project_name = project_name
-                self._save()
+        with self._transaction():
+            self._connection.execute(
+                """
+                UPDATE activity_runs
+                SET project_name = ?
+                WHERE run_id = (
+                    SELECT run_id
+                    FROM activity_runs
+                    WHERE session_id = ? AND superseded = 0
+                    ORDER BY started_at DESC, run_id DESC
+                    LIMIT 1
+                )
+                """,
+                (project_name, session_id),
+            )
 
     def get_activity_run(self, run_id: str) -> ActivityPanelRun | None:
         """Returns one retained activity-panel run."""
         with self._lock:
-            run = self._activity_runs.get(run_id)
-            return ActivityPanelRun(**asdict(run)) if run is not None else None
+            row = self._connection.execute("SELECT * FROM activity_runs WHERE run_id = ?", (run_id,)).fetchone()
+            return self._activity_run_from_row(row) if row is not None else None
 
     def get_current_activity_run(self, session_id: str) -> ActivityPanelRun | None:
         """Returns the active activity-panel run for one session."""
         with self._lock:
-            run_id = self._current_run_by_session.get(session_id)
-            run = self._activity_runs.get(run_id) if run_id is not None else None
-            return ActivityPanelRun(**asdict(run)) if run is not None else None
+            row = self._connection.execute(
+                """
+                SELECT *
+                FROM activity_runs
+                WHERE session_id = ? AND superseded = 0
+                ORDER BY started_at DESC, run_id DESC
+                LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
+            return self._activity_run_from_row(row) if row is not None else None
 
     def list_activity_runs(self) -> list[ActivityPanelRun]:
         """Returns retained activity-panel runs from oldest to newest."""
         with self._lock:
-            runs = sorted(self._activity_runs.values(), key=lambda item: item.started_at)
-            return [ActivityPanelRun(**asdict(run)) for run in runs]
+            rows = self._connection.execute("SELECT * FROM activity_runs ORDER BY started_at ASC, run_id ASC").fetchall()
+            membership_rows = self._connection.execute(
+                """
+                SELECT run_id, execution_id
+                FROM activity_run_executions
+                ORDER BY run_id ASC, position ASC
+                """
+            ).fetchall()
+            membership: dict[str, list[str]] = {}
+            for item in membership_rows:
+                membership.setdefault(str(item["run_id"]), []).append(str(item["execution_id"]))
+            return [
+                ActivityPanelRun(
+                    run_id=str(row["run_id"]),
+                    session_id=str(row["session_id"]),
+                    project_name=str(row["project_name"]),
+                    started_at=float(row["started_at"]),
+                    superseded=bool(row["superseded"]),
+                    execution_ids=membership.get(str(row["run_id"]), []),
+                )
+                for row in rows
+            ]
 
     def maintain_retention(self) -> bool:
         """Runs deterministic retention pruning outside ordinary read paths."""
-        with self._lock:
-            changed = self._prune()
-            if changed:
-                self._save()
-            return changed
+        with self._transaction():
+            return self._prune()
 
     def sync_job_retention(self, jobs: list[JobRetentionState]) -> set[str]:
-        """Synchronize durable-job lifecycle facts with retained session ownership.
-
-        Terminal job completion extends the owning session's retention window and running jobs
-        protect their owning sessions from later eviction. Retention pruning itself is owned by
-        lifecycle mutations and :meth:`maintain_retention`, not this synchronization read.
-        """
-        with self._lock:
+        """Synchronizes durable-job lifecycle facts with retained session ownership."""
+        with self._transaction():
             running_job_sessions: dict[str, str] = {}
-            persistence_changed = False
             for job in jobs:
-                session_id = job.session_id or self._job_session_index.get(job.job_id)
+                session_id = job.session_id
+                if session_id is None:
+                    row = self._connection.execute(
+                        """
+                        SELECT session_id
+                        FROM executions
+                        WHERE durable_job_id = ?
+                        ORDER BY started_at DESC, execution_id DESC
+                        LIMIT 1
+                        """,
+                        (job.job_id,),
+                    ).fetchone()
+                    session_id = str(row["session_id"]) if row is not None else None
                 if session_id is None:
                     continue
                 if job.is_running:
                     running_job_sessions[job.job_id] = session_id
-                if job.finished_at is not None and (session := self._sessions.get(session_id)) is not None:
-                    updated_at = max(session.updated_at, job.finished_at)
-                    if updated_at != session.updated_at:
-                        session.updated_at = updated_at
-                        persistence_changed = True
-
+                if job.finished_at is not None:
+                    self._connection.execute(
+                        """
+                        UPDATE sessions
+                        SET updated_at = MAX(updated_at, ?)
+                        WHERE session_id = ?
+                        """,
+                        (job.finished_at, session_id),
+                    )
             self._running_job_sessions = running_job_sessions
-            if persistence_changed:
-                self._save()
-
-            return {job_id for job_id, session_id in self._job_session_index.items() if session_id in self._sessions}
+            rows = self._connection.execute(
+                """
+                SELECT DISTINCT executions.durable_job_id
+                FROM executions
+                JOIN sessions ON sessions.session_id = executions.session_id
+                WHERE executions.durable_job_id IS NOT NULL
+                """
+            ).fetchall()
+            retained_job_ids = {str(row["durable_job_id"]) for row in rows}
+            retained_sessions = {str(row["session_id"]) for row in self._connection.execute("SELECT session_id FROM sessions").fetchall()}
+            retained_job_ids.update(job.job_id for job in jobs if job.session_id is not None and job.session_id in retained_sessions)
+            return retained_job_ids
 
     def retained_file_tokens(self) -> set[str]:
-        """Returns snapshot tokens referenced by retained execution media/results."""
+        """Returns snapshot tokens referenced by retained executions."""
         with self._lock:
-            tokens: set[str] = set()
-            for record in self._executions.values():
-                if record.media is not None:
-                    uri = record.media.get("uri", "")
-                    tokens.update(_FILE_RESOURCE_RE.findall(uri))
-                if record.result:
-                    tokens.update(_FILE_RESOURCE_RE.findall(record.result))
-            return tokens
+            rows = self._connection.execute("SELECT DISTINCT resource_id FROM retained_resources WHERE kind = 'snapshot'").fetchall()
+            return {str(row["resource_id"]) for row in rows}
 
     @classmethod
     def retained_file_tokens_from_disk(cls) -> set[str]:
         """Returns snapshot tokens from canonical persisted state without constructing runtime services."""
-        path = cls._default_root() / "state.json"
-        try:
-            payload = json.loads(RetainedTextCompression.read_text(path))
-        except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
-            return set()
-        tokens: set[str] = set()
-        executions = payload.get("executions", {}) if isinstance(payload, dict) else {}
-        if isinstance(executions, dict):
-            for execution in executions.values():
-                if not isinstance(execution, dict):
-                    continue
-                media = execution.get("media")
-                if isinstance(media, dict):
-                    tokens.update(_FILE_RESOURCE_RE.findall(str(media.get("uri") or "")))
-                tokens.update(_FILE_RESOURCE_RE.findall(str(execution.get("result") or "")))
-        return tokens
+        sqlite_tokens = cls._retained_resource_ids_from_database("snapshot")
+        if sqlite_tokens is not None:
+            return sqlite_tokens
+        return cls._retained_file_tokens_from_legacy_state()
 
     def retained_output_ids(self) -> set[str]:
         """Returns pageable-output identifiers referenced by retained executions."""
         with self._lock:
-            return {record.retained_output_id for record in self._executions.values() if record.retained_output_id is not None}
+            rows = self._connection.execute("SELECT DISTINCT resource_id FROM retained_resources WHERE kind = 'output'").fetchall()
+            return {str(row["resource_id"]) for row in rows}
 
     @classmethod
     def retained_output_ids_from_disk(cls) -> set[str]:
-        """Returns pageable-output identifiers referenced by canonical persisted state."""
-        path = cls._default_root() / "state.json"
+        """Returns pageable-output identifiers from canonical persisted state."""
+        sqlite_ids = cls._retained_resource_ids_from_database("output")
+        if sqlite_ids is not None:
+            return sqlite_ids
+        path = cls._default_root() / cls._LEGACY_FILENAME
         try:
-            with path.open("r", encoding="utf-8") as stream:
-                payload = json.load(stream)
-        except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError, ValueError):
+            payload = json.loads(RetainedTextCompression.read_text(path))
+        except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
             return set()
         executions = payload.get("executions", {}) if isinstance(payload, dict) else {}
         if not isinstance(executions, dict):
@@ -557,94 +800,226 @@ class ExecutionStore:
             if isinstance(execution, dict) and execution.get("retained_output_id")
         }
 
+    @contextmanager
+    def batch_updates(self) -> Iterator[None]:
+        """Groups execution-store mutations in one real SQLite transaction."""
+        with self._transaction():
+            yield
+
+    @contextmanager
+    def _transaction(self) -> Iterator[None]:
+        """Serializes connection use and commits only at the outer mutation boundary."""
+        with self._lock:
+            outermost = self._transaction_depth == 0
+            if outermost:
+                self._connection.execute("BEGIN IMMEDIATE")
+                self._pending_artifact_cleanup.clear()
+            self._transaction_depth += 1
+            try:
+                yield
+            except Exception:
+                self._transaction_depth -= 1
+                if outermost:
+                    self._connection.rollback()
+                    self._pending_artifact_cleanup.clear()
+                raise
+            else:
+                self._transaction_depth -= 1
+                if outermost:
+                    self._connection.commit()
+                    pending = set(self._pending_artifact_cleanup)
+                    self._pending_artifact_cleanup.clear()
+                    self._cleanup_candidate_artifacts(pending)
+
+    def _discard_failed_database(self) -> None:
+        """Removes a newly-created database whose one-time legacy import did not complete."""
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(self._database_path) + suffix).unlink(missing_ok=True)
+
+    def _configure_database(self) -> None:
+        """Configures SQLite for the single-process, multi-threaded Serena service."""
+        self._connection.execute("PRAGMA journal_mode=WAL")
+        self._connection.execute("PRAGMA synchronous=NORMAL")
+        self._connection.execute("PRAGMA foreign_keys=ON")
+        self._connection.execute(f"PRAGMA busy_timeout={self._BUSY_TIMEOUT_MS}")
+
+    def _create_schema(self) -> None:
+        """Creates the normalized execution/activity schema and access-path indexes."""
+        self._connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_id TEXT PRIMARY KEY,
+                panel_id TEXT NOT NULL UNIQUE,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                display_name TEXT NOT NULL DEFAULT '',
+                project_name TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS executions (
+                execution_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                project_name TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                arguments_json TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                status TEXT NOT NULL,
+                finished_at REAL,
+                request_finished_at REAL,
+                request_error TEXT,
+                result TEXT,
+                error TEXT,
+                retained_output_id TEXT,
+                retained_output_chars INTEGER,
+                media_json TEXT,
+                durable_job_id TEXT,
+                durable_job_label TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS activity_runs (
+                run_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                project_name TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                superseded INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS activity_run_executions (
+                run_id TEXT NOT NULL REFERENCES activity_runs(run_id) ON DELETE CASCADE,
+                execution_id TEXT NOT NULL REFERENCES executions(execution_id) ON DELETE CASCADE,
+                position INTEGER NOT NULL,
+                PRIMARY KEY (run_id, execution_id),
+                UNIQUE (run_id, position)
+            );
+
+            CREATE TABLE IF NOT EXISTS retained_resources (
+                execution_id TEXT NOT NULL REFERENCES executions(execution_id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (execution_id, kind, resource_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sessions_updated_at
+                ON sessions(updated_at, created_at, session_id);
+            CREATE INDEX IF NOT EXISTS idx_executions_session_order
+                ON executions(session_id, started_at, execution_id);
+            CREATE INDEX IF NOT EXISTS idx_executions_status_session
+                ON executions(status, session_id);
+            CREATE INDEX IF NOT EXISTS idx_executions_durable_job
+                ON executions(durable_job_id, session_id, started_at);
+            CREATE INDEX IF NOT EXISTS idx_activity_runs_session_current
+                ON activity_runs(session_id, superseded, started_at, run_id);
+            CREATE INDEX IF NOT EXISTS idx_activity_run_membership
+                ON activity_run_executions(run_id, position);
+            CREATE INDEX IF NOT EXISTS idx_retained_resources_kind_id
+                ON retained_resources(kind, resource_id);
+            """
+        )
+        self._connection.execute(f"PRAGMA user_version={self._DATABASE_SCHEMA_VERSION}")
+
     def _ensure_session(self, session_id: str, timestamp: float) -> SessionRecord:
-        session = self._sessions.get(session_id)
-        if session is None:
-            session = SessionRecord(
-                session_id=session_id,
-                panel_id=self.panel_id_for_session(session_id),
-                created_at=timestamp,
-                updated_at=timestamp,
-            )
-            self._sessions[session_id] = session
-            self._panel_session_index[session.panel_id] = session_id
-        return session
+        """Creates one session if absent and returns its canonical metadata."""
+        self._connection.execute(
+            """
+            INSERT OR IGNORE INTO sessions (
+                session_id, panel_id, created_at, updated_at, display_name, project_name
+            ) VALUES (?, ?, ?, ?, '', '')
+            """,
+            (session_id, self.panel_id_for_session(session_id), timestamp, timestamp),
+        )
+        row = self._connection.execute("SELECT * FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
+        if row is None:
+            raise RuntimeError(f"Failed to create Serena session {session_id!r}")
+        return self._session_from_row(row)
 
     def _interrupt_stale_state(self) -> None:
-        """Marks executions and panel runs left live by a previous Serena process as historical."""
+        """Marks execution and panel state left live by a previous Serena process as historical."""
         now = time.time()
-        changed = False
-        with self._lock:
-            for record in self._executions.values():
-                if record.status not in {"running", "queued"}:
-                    continue
-                record.status = "failed"
-                record.finished_at = record.finished_at or now
-                record.request_finished_at = record.request_finished_at or now
-                record.request_error = record.request_error or "Serena restarted before this tool call reached a terminal state."
-                record.error = record.error or record.request_error
-                session = self._sessions.get(record.session_id)
-                if session is not None:
-                    session.updated_at = max(session.updated_at, record.finished_at)
-                changed = True
-            for run in self._activity_runs.values():
-                if run.superseded:
-                    continue
-                run.superseded = True
-                changed = True
-            self._current_run_by_session.clear()
-            if changed:
-                self._save()
+        message = "Serena restarted before this tool call reached a terminal state."
+        with self._transaction():
+            self._connection.execute(
+                """
+                UPDATE sessions
+                SET updated_at = MAX(updated_at, ?)
+                WHERE session_id IN (
+                    SELECT DISTINCT session_id
+                    FROM executions
+                    WHERE status IN ('running', 'queued')
+                )
+                """,
+                (now,),
+            )
+            self._connection.execute(
+                """
+                UPDATE executions
+                SET status = 'failed',
+                    finished_at = COALESCE(finished_at, ?),
+                    request_finished_at = COALESCE(request_finished_at, ?),
+                    request_error = COALESCE(request_error, ?),
+                    error = COALESCE(error, request_error, ?)
+                WHERE status IN ('running', 'queued')
+                """,
+                (now, now, message, message),
+            )
+            self._connection.execute("UPDATE activity_runs SET superseded = 1 WHERE superseded = 0")
 
-    def _load(self) -> bool:
-        """Loads canonical state and reports whether an on-disk schema migration occurred."""
-        if not self._state_path.is_file():
-            return False
+    def _read_legacy_state(self) -> dict[str, Any]:
+        """Loads and validates the one supported JSON/zstd cutover input."""
         try:
-            payload = json.loads(RetainedTextCompression.read_text(self._state_path))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
-            return False
+            payload = json.loads(RetainedTextCompression.read_text(self._legacy_state_path))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as error:
+            raise RuntimeError(f"Could not read legacy Serena execution state: {error}") from error
         if not isinstance(payload, dict):
-            return False
-
+            raise RuntimeError("Legacy Serena execution state must be a JSON object")
         version = payload.get("version")
         if version not in {_MIN_MIGRATABLE_STATE_VERSION, _STATE_VERSION}:
             raise RuntimeError(
                 f"Unsupported Serena execution-store schema version {version!r}; Serena requires schema version "
                 f"{_MIN_MIGRATABLE_STATE_VERSION} or {_STATE_VERSION}."
             )
-        migrated = version != _STATE_VERSION
+        return cast(dict[str, Any], payload)
 
-        sessions = payload.get("sessions", {})
-        executions = payload.get("executions", {})
-        activity_runs = payload.get("activity_runs", {})
-        if isinstance(sessions, dict):
-            for session_id, item in sessions.items():
-                if isinstance(item, dict):
-                    try:
-                        self._sessions[str(session_id)] = SessionRecord(**item)
-                    except (TypeError, ValueError):
-                        continue
-        if isinstance(executions, dict):
-            for execution_id, item in executions.items():
+    def _import_legacy_state(self, payload: dict[str, Any]) -> None:
+        """Imports validated legacy state exactly once into normalized SQLite rows."""
+        sessions: dict[str, SessionRecord] = {}
+        executions: dict[str, ExecutionRecord] = {}
+        runs: dict[str, ActivityPanelRun] = {}
+
+        raw_sessions = payload.get("sessions", {})
+        if isinstance(raw_sessions, dict):
+            for session_id, item in raw_sessions.items():
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    record = SessionRecord(**item)
+                except (TypeError, ValueError):
+                    continue
+                sessions[str(session_id)] = record
+
+        raw_executions = payload.get("executions", {})
+        if isinstance(raw_executions, dict):
+            for execution_id, item in raw_executions.items():
                 if not isinstance(item, dict):
                     continue
                 normalized = dict(item)
                 arguments = normalized.get("arguments", {})
                 if isinstance(arguments, str):
                     normalized["arguments"] = self._migrate_arguments(arguments)
-                    migrated = True
                 elif isinstance(arguments, dict):
                     normalized["arguments"] = self.compact_arguments(cast(dict[str, Any], arguments))
                 else:
                     normalized["arguments"] = {}
-                    migrated = True
                 try:
-                    self._executions[str(execution_id)] = ExecutionRecord(**normalized)
+                    record = ExecutionRecord(**normalized)
                 except (TypeError, ValueError):
                     continue
-        if isinstance(activity_runs, dict):
-            for run_id, item in activity_runs.items():
+                if record.session_id in sessions:
+                    executions[str(execution_id)] = record
+
+        raw_runs = payload.get("activity_runs", {})
+        if isinstance(raw_runs, dict):
+            for run_id, item in raw_runs.items():
                 if not isinstance(item, dict):
                     continue
                 normalized = {
@@ -652,18 +1027,139 @@ class ExecutionStore:
                     for key, value in item.items()
                     if key in {"run_id", "session_id", "project_name", "started_at", "superseded", "execution_ids"}
                 }
-                if len(normalized) != len(item):
-                    migrated = True
                 try:
                     run = ActivityPanelRun(**normalized)
                 except (TypeError, ValueError):
                     continue
-                self._activity_runs[str(run_id)] = run
-                if not run.superseded:
-                    current = self._current_run_by_session.get(run.session_id)
-                    if current is None or self._activity_runs[current].started_at < run.started_at:
-                        self._current_run_by_session[run.session_id] = run.run_id
-        return migrated
+                if run.session_id in sessions:
+                    runs[str(run_id)] = run
+
+        # reject conflicting durable-job ownership before any imported row can commit
+        job_owners: dict[str, str] = {}
+        for record in executions.values():
+            if record.durable_job_id is None:
+                continue
+            previous = job_owners.setdefault(record.durable_job_id, record.session_id)
+            if previous != record.session_id:
+                raise RuntimeError(f"Legacy durable job {record.durable_job_id!r} belongs to multiple sessions")
+
+        expected_memberships: set[tuple[str, str]] = set()
+        expected_resources: set[tuple[str, str, str]] = set()
+        with self._transaction():
+            self._connection.executemany(
+                """
+                INSERT INTO sessions (
+                    session_id, panel_id, created_at, updated_at, display_name, project_name
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        record.session_id,
+                        record.panel_id,
+                        record.created_at,
+                        record.updated_at,
+                        record.display_name,
+                        record.project_name,
+                    )
+                    for record in sessions.values()
+                ],
+            )
+            self._connection.executemany(
+                """
+                INSERT INTO executions (
+                    execution_id, session_id, project_name, tool_name, arguments_json, started_at,
+                    status, finished_at, request_finished_at, request_error, result, error,
+                    retained_output_id, retained_output_chars, media_json, durable_job_id,
+                    durable_job_label
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [self._execution_values(record) for record in executions.values()],
+            )
+            for record in executions.values():
+                resources = self._resource_entries(
+                    result=record.result,
+                    media=record.media,
+                    retained_output_id=record.retained_output_id,
+                )
+                expected_resources.update((record.execution_id, kind, resource_id) for kind, resource_id, _ in resources)
+                self._connection.executemany(
+                    """
+                    INSERT INTO retained_resources (execution_id, kind, resource_id, size_bytes)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    [(record.execution_id, kind, resource_id, size_bytes) for kind, resource_id, size_bytes in resources],
+                )
+
+            for run in runs.values():
+                self._connection.execute(
+                    """
+                    INSERT INTO activity_runs (run_id, session_id, project_name, started_at, superseded)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (run.run_id, run.session_id, run.project_name, run.started_at, int(run.superseded)),
+                )
+                position = 0
+                for execution_id in run.execution_ids:
+                    execution = executions.get(execution_id)
+                    if execution is None or execution.session_id != run.session_id:
+                        continue
+                    self._connection.execute(
+                        """
+                        INSERT OR IGNORE INTO activity_run_executions (run_id, execution_id, position)
+                        VALUES (?, ?, ?)
+                        """,
+                        (run.run_id, execution_id, position),
+                    )
+                    expected_memberships.add((run.run_id, execution_id))
+                    position += 1
+
+            self._verify_legacy_import(
+                session_count=len(sessions),
+                execution_count=len(executions),
+                run_count=len(runs),
+                membership_count=len(expected_memberships),
+                resource_count=len(expected_resources),
+            )
+
+    def _verify_legacy_import(
+        self,
+        *,
+        session_count: int,
+        execution_count: int,
+        run_count: int,
+        membership_count: int,
+        resource_count: int,
+    ) -> None:
+        """Verifies the canonical counts and ownership invariants of one cutover transaction."""
+        expected = {
+            "sessions": session_count,
+            "executions": execution_count,
+            "activity_runs": run_count,
+            "activity_run_executions": membership_count,
+            "retained_resources": resource_count,
+        }
+        for table, expected_count in expected.items():
+            row = self._connection.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
+            actual_count = int(row["count"]) if row is not None else -1
+            if actual_count != expected_count:
+                raise RuntimeError(f"Legacy Serena migration validation failed for {table}: expected {expected_count}, got {actual_count}")
+        conflict = self._connection.execute(
+            """
+            SELECT durable_job_id
+            FROM executions
+            WHERE durable_job_id IS NOT NULL
+            GROUP BY durable_job_id
+            HAVING COUNT(DISTINCT session_id) > 1
+            LIMIT 1
+            """
+        ).fetchone()
+        if conflict is not None:
+            raise RuntimeError(f"Legacy durable job {conflict['durable_job_id']!r} belongs to multiple sessions")
+
+    def _mark_legacy_migrated(self) -> None:
+        """Renames the legacy state only after the SQLite import transaction has committed."""
+        target = self._legacy_state_path.with_name(self._legacy_state_path.name + ".migrated")
+        os.replace(self._legacy_state_path, target)
 
     @classmethod
     def _migrate_arguments(cls, serialized: str) -> dict[str, Any]:
@@ -687,172 +1183,251 @@ class ExecutionStore:
             pass
         return {"_legacy_arguments": StructuredOutputCompactor.truncate_text(serialized, 7_900)}
 
-    def _rebuild_session_execution_index(self) -> None:
-        """Rebuilds non-authoritative retained-session, panel and durable-job lookup indexes."""
-        self._session_execution_index = {session_id: _SessionExecutionIndex() for session_id in self._sessions}
-        self._panel_session_index = {session.panel_id: session.session_id for session in self._sessions.values()}
-        self._job_session_index = {}
-        records = sorted(self._executions.values(), key=lambda record: (record.started_at, record.execution_id))
-        for record in records:
-            if record.session_id not in self._sessions:
-                continue
-            self._index_execution_start(record)
-            if record.status not in {"running", "queued"}:
-                index = self._session_execution_index[record.session_id]
-                index.running_execution_count = max(0, index.running_execution_count - 1)
-            if record.durable_job_id is not None:
-                self._index_durable_job(record.session_id, record.durable_job_id)
-
-    def _index_durable_job(self, session_id: str, job_id: str) -> None:
-        """Indexes unique durable-job ownership for one retained session."""
-        previous_session_id = self._job_session_index.get(job_id)
-        if previous_session_id == session_id:
-            return
-        if previous_session_id is not None:
-            previous_index = self._session_execution_index.get(previous_session_id)
-            if previous_index is not None:
-                previous_index.durable_job_ids.discard(job_id)
-        self._session_execution_index.setdefault(session_id, _SessionExecutionIndex()).durable_job_ids.add(job_id)
-        self._job_session_index[job_id] = session_id
+    @staticmethod
+    def _dump_json(value: object) -> str:
+        """Serializes one structured database field at the persistence boundary."""
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
     @staticmethod
-    def _execution_summary_record(record: ExecutionRecord) -> ExecutionSummaryRecord:
-        """Projects one canonical execution to bounded activity-row metadata."""
-        return ExecutionSummaryRecord(
-            execution_id=record.execution_id,
-            session_id=record.session_id,
-            project_name=record.project_name,
-            tool_name=record.tool_name,
-            arguments=dict(record.arguments),
-            started_at=record.started_at,
-            status=record.status,
-            finished_at=record.finished_at,
-            durable_job_id=record.durable_job_id,
-            durable_job_label=record.durable_job_label,
+    def _load_json_object(value: str | None) -> dict[str, Any]:
+        """Deserializes one persisted JSON object."""
+        if not value:
+            return {}
+        parsed = json.loads(value)
+        return cast(dict[str, Any], parsed) if isinstance(parsed, dict) else {}
+
+    @classmethod
+    def _execution_from_row(cls, row: sqlite3.Row) -> ExecutionRecord:
+        """Projects one SQLite row to the canonical execution dataclass."""
+        media = cls._load_json_object(str(row["media_json"])) if row["media_json"] is not None else None
+        return ExecutionRecord(
+            execution_id=str(row["execution_id"]),
+            session_id=str(row["session_id"]),
+            project_name=str(row["project_name"]),
+            tool_name=str(row["tool_name"]),
+            arguments=cls._load_json_object(str(row["arguments_json"])),
+            started_at=float(row["started_at"]),
+            status=str(row["status"]),
+            finished_at=float(row["finished_at"]) if row["finished_at"] is not None else None,
+            request_finished_at=float(row["request_finished_at"]) if row["request_finished_at"] is not None else None,
+            request_error=str(row["request_error"]) if row["request_error"] is not None else None,
+            result=str(row["result"]) if row["result"] is not None else None,
+            error=str(row["error"]) if row["error"] is not None else None,
+            retained_output_id=str(row["retained_output_id"]) if row["retained_output_id"] is not None else None,
+            retained_output_chars=int(row["retained_output_chars"]) if row["retained_output_chars"] is not None else None,
+            media=cast(dict[str, str] | None, media),
+            durable_job_id=str(row["durable_job_id"]) if row["durable_job_id"] is not None else None,
+            durable_job_label=str(row["durable_job_label"]) if row["durable_job_label"] is not None else None,
         )
 
-    def _index_execution_start(self, record: ExecutionRecord) -> None:
-        """Adds one execution to the rebuildable session index."""
-        index = self._session_execution_index.setdefault(record.session_id, _SessionExecutionIndex())
-        if record.execution_id in index.execution_ids:
-            return
-        index.execution_ids.append(record.execution_id)
-        if record.status in {"running", "queued"}:
-            index.running_execution_count += 1
-        if index.first_execution_started_at is None:
-            index.first_execution_started_at = record.started_at
-        if index.latest_execution_started_at is None or record.started_at >= index.latest_execution_started_at:
-            index.latest_execution_started_at = record.started_at
-            index.latest_execution_id = record.execution_id
+    @classmethod
+    def _execution_summary_from_row(cls, row: sqlite3.Row) -> ExecutionSummaryRecord:
+        """Projects one SQLite row to bounded activity-row metadata."""
+        return ExecutionSummaryRecord(
+            execution_id=str(row["execution_id"]),
+            session_id=str(row["session_id"]),
+            project_name=str(row["project_name"]),
+            tool_name=str(row["tool_name"]),
+            arguments=cls._load_json_object(str(row["arguments_json"])),
+            started_at=float(row["started_at"]),
+            status=str(row["status"]),
+            finished_at=float(row["finished_at"]) if row["finished_at"] is not None else None,
+            durable_job_id=str(row["durable_job_id"]) if row["durable_job_id"] is not None else None,
+            durable_job_label=str(row["durable_job_label"]) if row["durable_job_label"] is not None else None,
+        )
 
-    def _index_execution_finish(self, record: ExecutionRecord, *, was_running: bool) -> None:
-        """Updates mutable counts and durable-job ownership after one execution becomes terminal."""
-        index = self._session_execution_index.setdefault(record.session_id, _SessionExecutionIndex())
-        if record.execution_id not in index.execution_ids:
-            self._index_execution_start(record)
-        if was_running:
-            index.running_execution_count = max(0, index.running_execution_count - 1)
-        if record.durable_job_id is not None:
-            self._index_durable_job(record.session_id, record.durable_job_id)
+    @staticmethod
+    def _session_from_row(row: sqlite3.Row) -> SessionRecord:
+        """Projects one SQLite row to retained session metadata."""
+        return SessionRecord(
+            session_id=str(row["session_id"]),
+            panel_id=str(row["panel_id"]),
+            created_at=float(row["created_at"]),
+            updated_at=float(row["updated_at"]),
+            display_name=str(row["display_name"]),
+            project_name=str(row["project_name"]),
+        )
 
-    @contextmanager
-    def batch_updates(self) -> Iterator[None]:
-        """Persists a group of execution-store mutations with one final state write."""
-        with self._lock:
-            self._save_batch_depth += 1
-            try:
-                yield
-            finally:
-                self._save_batch_depth -= 1
-                if self._save_batch_depth == 0 and self._save_pending:
-                    self._save_pending = False
-                    self._write_state()
+    def _activity_run_from_row(self, row: sqlite3.Row) -> ActivityPanelRun:
+        """Projects one SQLite row plus ordered membership to an activity run."""
+        execution_ids = [
+            str(item["execution_id"])
+            for item in self._connection.execute(
+                """
+                SELECT execution_id
+                FROM activity_run_executions
+                WHERE run_id = ?
+                ORDER BY position ASC
+                """,
+                (str(row["run_id"]),),
+            ).fetchall()
+        ]
+        return ActivityPanelRun(
+            run_id=str(row["run_id"]),
+            session_id=str(row["session_id"]),
+            project_name=str(row["project_name"]),
+            started_at=float(row["started_at"]),
+            superseded=bool(row["superseded"]),
+            execution_ids=execution_ids,
+        )
 
-    def _save(self) -> None:
-        """Persists state immediately unless an enclosing update batch defers the write."""
-        if self._save_batch_depth > 0:
-            self._save_pending = True
-            return
-        self._write_state()
+    @classmethod
+    def _execution_values(cls, record: ExecutionRecord) -> tuple[object, ...]:
+        """Returns one execution's ordered SQLite column values."""
+        return (
+            record.execution_id,
+            record.session_id,
+            record.project_name,
+            record.tool_name,
+            cls._dump_json(record.arguments),
+            record.started_at,
+            record.status,
+            record.finished_at,
+            record.request_finished_at,
+            record.request_error,
+            record.result,
+            record.error,
+            record.retained_output_id,
+            record.retained_output_chars,
+            cls._dump_json(record.media) if record.media is not None else None,
+            record.durable_job_id,
+            record.durable_job_label,
+        )
 
-    def _write_state(self) -> None:
-        """Writes the complete retained execution state atomically."""
-        self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        payload = {
-            "version": _STATE_VERSION,
-            "sessions": {key: asdict(value) for key, value in self._sessions.items()},
-            "executions": {key: asdict(value) for key, value in self._executions.items()},
-            "activity_runs": {key: asdict(value) for key, value in self._activity_runs.items()},
-        }
-        fd, temporary_name = tempfile.mkstemp(prefix=".state.", suffix=".tmp", dir=self._root)
-        temporary_path = Path(temporary_name)
+    def _replace_execution_resources(
+        self,
+        execution_id: str,
+        *,
+        result: str | None,
+        media: dict[str, str] | None,
+        retained_output_id: str | None,
+    ) -> None:
+        """Replaces explicit retained-artifact references owned by one execution."""
+        self._connection.execute("DELETE FROM retained_resources WHERE execution_id = ?", (execution_id,))
+        entries = self._resource_entries(result=result, media=media, retained_output_id=retained_output_id)
+        self._connection.executemany(
+            """
+            INSERT INTO retained_resources (execution_id, kind, resource_id, size_bytes)
+            VALUES (?, ?, ?, ?)
+            """,
+            [(execution_id, kind, resource_id, size_bytes) for kind, resource_id, size_bytes in entries],
+        )
+
+    def _resource_entries(
+        self,
+        *,
+        result: str | None,
+        media: dict[str, str] | None,
+        retained_output_id: str | None,
+    ) -> list[tuple[str, str, int]]:
+        """Extracts explicit retained resources once when execution output is persisted."""
+        resources: set[tuple[str, str]] = set()
+        if media is not None:
+            resources.update(("snapshot", token) for token in _FILE_RESOURCE_RE.findall(media.get("uri", "")))
+        if result:
+            resources.update(("snapshot", token) for token in _FILE_RESOURCE_RE.findall(result))
+        if retained_output_id is not None:
+            resources.add(("output", retained_output_id))
+        return [(kind, resource_id, self._resource_size(kind, resource_id)) for kind, resource_id in sorted(resources)]
+
+    def _resource_size(self, kind: str, resource_id: str) -> int:
+        """Returns current on-disk bytes for one retained resource, or zero if unavailable."""
+        if kind == "snapshot":
+            path = self._serena_home() / "chat_file_snapshots" / resource_id
+        elif kind == "output":
+            path = self._serena_home() / "tool_outputs" / f"{resource_id}.txt"
+        else:
+            return 0
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(payload, stream, ensure_ascii=False, separators=(",", ":"))
-                stream.write("\n")
-            os.chmod(temporary_path, 0o600)
-            RetainedTextCompression.compress_file(temporary_path)
-            os.replace(temporary_path, self._state_path)
-        finally:
-            temporary_path.unlink(missing_ok=True)
+            return path.stat().st_size
+        except FileNotFoundError:
+            return 0
+
+    @classmethod
+    def _retained_resource_ids_from_database(cls, kind: str) -> set[str] | None:
+        """Reads retained resource identifiers directly from the authoritative SQLite database."""
+        path = cls._default_root() / cls._DATABASE_FILENAME
+        if not path.is_file():
+            return None
+        try:
+            connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            try:
+                rows = connection.execute(
+                    "SELECT DISTINCT resource_id FROM retained_resources WHERE kind = ?",
+                    (kind,),
+                ).fetchall()
+            finally:
+                connection.close()
+        except sqlite3.DatabaseError:
+            return set()
+        return {str(row[0]) for row in rows}
+
+    @classmethod
+    def _retained_file_tokens_from_legacy_state(cls) -> set[str]:
+        """Reads legacy snapshot references during the one-release cutover window."""
+        path = cls._default_root() / cls._LEGACY_FILENAME
+        try:
+            payload = json.loads(RetainedTextCompression.read_text(path))
+        except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+            return set()
+        tokens: set[str] = set()
+        executions = payload.get("executions", {}) if isinstance(payload, dict) else {}
+        if isinstance(executions, dict):
+            for execution in executions.values():
+                if not isinstance(execution, dict):
+                    continue
+                media = execution.get("media")
+                if isinstance(media, dict):
+                    tokens.update(_FILE_RESOURCE_RE.findall(str(media.get("uri") or "")))
+                tokens.update(_FILE_RESOURCE_RE.findall(str(execution.get("result") or "")))
+        return tokens
 
     def _drop_session(self, session_id: str) -> bool:
-        """Drops one retained session and its now-unowned artifact blobs atomically."""
-        owned_snapshot_tokens: set[str] = set()
-        owned_output_ids: set[str] = set()
-        for record in self._executions.values():
-            if record.session_id != session_id:
-                continue
-            if record.media is not None:
-                owned_snapshot_tokens.update(_FILE_RESOURCE_RE.findall(record.media.get("uri", "")))
-            if record.result:
-                owned_snapshot_tokens.update(_FILE_RESOURCE_RE.findall(record.result))
-            if record.retained_output_id is not None:
-                owned_output_ids.add(record.retained_output_id)
-
-        session = self._sessions.pop(session_id, None)
-        changed = session is not None
-        for execution_id in [execution_id for execution_id, record in self._executions.items() if record.session_id == session_id]:
-            self._executions.pop(execution_id, None)
-            changed = True
-        for run_id in [run_id for run_id, run in self._activity_runs.items() if run.session_id == session_id]:
-            self._activity_runs.pop(run_id, None)
-            changed = True
-        self._current_run_by_session.pop(session_id, None)
-        self._session_execution_index.pop(session_id, None)
-        if session is not None:
-            self._panel_session_index.pop(session.panel_id, None)
-        for job_id, owning_session_id in list(self._job_session_index.items()):
-            if owning_session_id == session_id:
-                self._job_session_index.pop(job_id, None)
-
-        # remove immutable blobs only when no retained session still references them
-        retained_snapshot_tokens = self.retained_file_tokens()
-        retained_output_ids = self.retained_output_ids()
-        serena_home = self._serena_home()
-        for token in owned_snapshot_tokens - retained_snapshot_tokens:
-            (serena_home / "chat_file_snapshots" / token).unlink(missing_ok=True)
-        for output_id in owned_output_ids - retained_output_ids:
-            (serena_home / "tool_outputs" / f"{output_id}.txt").unlink(missing_ok=True)
-        return changed
+        """Drops one retained session with cascading execution/run/resource deletion."""
+        resources = {
+            (str(row["kind"]), str(row["resource_id"]))
+            for row in self._connection.execute(
+                """
+                SELECT retained_resources.kind, retained_resources.resource_id
+                FROM retained_resources
+                JOIN executions ON executions.execution_id = retained_resources.execution_id
+                WHERE executions.session_id = ?
+                """,
+                (session_id,),
+            ).fetchall()
+        }
+        cursor = self._connection.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+        if cursor.rowcount:
+            self._pending_artifact_cleanup.update(resources)
+            for job_id, owner in list(self._running_job_sessions.items()):
+                if owner == session_id:
+                    self._running_job_sessions.pop(job_id, None)
+            return True
+        return False
 
     def _protected_session_ids(self) -> set[str]:
-        """Returns sessions that cannot be evicted while tools or durable jobs are still running."""
-        protected = {record.session_id for record in self._executions.values() if record.status in {"running", "queued"}}
+        """Returns sessions that cannot be evicted while tools or durable jobs are running."""
+        rows = self._connection.execute("SELECT DISTINCT session_id FROM executions WHERE status IN ('running', 'queued')").fetchall()
+        protected = {str(row["session_id"]) for row in rows}
         protected.update(self._running_job_sessions.values())
         return protected
 
-    def _sessions_with_dangling_execution_references(self) -> set[str]:
-        """Returns sessions whose activity runs reference executions outside their retained index."""
-        retained_by_session = {session_id: set(index.execution_ids) for session_id, index in self._session_execution_index.items()}
-        dangling: set[str] = set()
-        for run in self._activity_runs.values():
-            retained_ids = retained_by_session.get(run.session_id)
-            if retained_ids is None:
+    def _cleanup_candidate_artifacts(self, candidates: set[tuple[str, str]]) -> None:
+        """Deletes newly-unreferenced blobs after the owning SQL transaction commits."""
+        for kind, resource_id in candidates:
+            retained = self._connection.execute(
+                "SELECT 1 FROM retained_resources WHERE kind = ? AND resource_id = ? LIMIT 1",
+                (kind, resource_id),
+            ).fetchone()
+            if retained is not None:
                 continue
-            if any(execution_id not in retained_ids for execution_id in run.execution_ids):
-                dangling.add(run.session_id)
-        return dangling
+            if kind == "snapshot":
+                path = self._serena_home() / "chat_file_snapshots" / resource_id
+            elif kind == "output":
+                path = self._serena_home() / "tool_outputs" / f"{resource_id}.txt"
+            else:
+                continue
+            path.unlink(missing_ok=True)
 
     def _cleanup_unreferenced_artifacts(self) -> None:
         """Deletes crash-orphaned artifact blobs not referenced by retained sessions."""
@@ -874,63 +1449,51 @@ class ExecutionStore:
                     path.unlink(missing_ok=True)
 
     def _retained_artifact_bytes(self) -> int:
-        """Returns on-disk bytes referenced by retained sessions, counting shared blobs once."""
-        serena_home = self._serena_home()
-        snapshot_root = serena_home / "chat_file_snapshots"
-        output_root = serena_home / "tool_outputs"
-        total = 0
-
-        for token in self.retained_file_tokens():
-            try:
-                total += (snapshot_root / token).stat().st_size
-            except FileNotFoundError:
-                pass
-        for output_id in self.retained_output_ids():
-            try:
-                total += (output_root / f"{output_id}.txt").stat().st_size
-            except FileNotFoundError:
-                pass
-        return total
+        """Returns indexed retained artifact bytes, counting shared blobs once."""
+        row = self._connection.execute(
+            """
+            SELECT COALESCE(SUM(size_bytes), 0) AS total_bytes
+            FROM (
+                SELECT kind, resource_id, MAX(size_bytes) AS size_bytes
+                FROM retained_resources
+                GROUP BY kind, resource_id
+            )
+            """
+        ).fetchone()
+        return int(row["total_bytes"]) if row is not None else 0
 
     def _prune(self) -> bool:
-        """Prunes retained work only by complete inactive session ownership units."""
+        """Prunes complete inactive sessions through indexed/set-based queries."""
         changed = False
-
-        # discard orphaned state that cannot be represented as a complete dashboard session
-        for execution_id, record in list(self._executions.items()):
-            if record.session_id not in self._sessions:
-                self._executions.pop(execution_id, None)
-                changed = True
-        for run_id, run in list(self._activity_runs.items()):
-            if run.session_id not in self._sessions:
-                self._activity_runs.pop(run_id, None)
-                changed = True
-        for session_id, run_id in list(self._current_run_by_session.items()):
-            if session_id not in self._sessions or run_id not in self._activity_runs:
-                self._current_run_by_session.pop(session_id, None)
-                changed = True
-
-        # remove incomplete historical panels atomically rather than exposing partial state
         protected = self._protected_session_ids()
-        for session_id in self._sessions_with_dangling_execution_references() - protected:
-            changed = self._drop_session(session_id) or changed
+        cutoff = time.time() - self._retention.max_age.total_seconds()
+        exclusion = ""
+        params: list[object] = [cutoff]
+        if protected:
+            placeholders = ",".join("?" for _ in protected)
+            exclusion = f" AND session_id NOT IN ({placeholders})"
+            params.extend(sorted(protected))
+        expired = self._connection.execute(
+            f"SELECT session_id FROM sessions WHERE updated_at <= ?{exclusion} ORDER BY updated_at ASC",
+            tuple(params),
+        ).fetchall()
+        for row in expired:
+            changed = self._drop_session(str(row["session_id"])) or changed
 
-        # expire inactive sessions after the configured retention period
-        now = time.time()
-        for session in sorted(self._sessions.values(), key=lambda item: item.updated_at):
-            if session.session_id in protected:
-                continue
-            if self._retention.is_expired(session.updated_at, now):
-                changed = self._drop_session(session.session_id) or changed
-
-        # emergency capacity guard: evict the oldest inactive sessions whole
-        retained_bytes = self._retained_artifact_bytes()
-        while retained_bytes > self._retention.max_artifact_bytes:
-            candidates = [session for session in self._sessions.values() if session.session_id not in protected]
-            if not candidates:
+        # enforce the emergency artifact budget by evicting oldest unprotected sessions whole
+        while self._retained_artifact_bytes() > self._retention.max_artifact_bytes:
+            protected = self._protected_session_ids()
+            exclusion = ""
+            params = []
+            if protected:
+                placeholders = ",".join("?" for _ in protected)
+                exclusion = f" WHERE session_id NOT IN ({placeholders})"
+                params.extend(sorted(protected))
+            row = self._connection.execute(
+                f"SELECT session_id FROM sessions{exclusion} ORDER BY updated_at ASC, created_at ASC, session_id ASC LIMIT 1",
+                tuple(params),
+            ).fetchone()
+            if row is None:
                 break
-            oldest = min(candidates, key=lambda session: (session.updated_at, session.created_at, session.session_id))
-            changed = self._drop_session(oldest.session_id) or changed
-            retained_bytes = self._retained_artifact_bytes()
-
+            changed = self._drop_session(str(row["session_id"])) or changed
         return changed

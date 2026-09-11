@@ -6,9 +6,10 @@ import json
 import os
 import re
 import signal
+import sqlite3
 import subprocess
 import sys
-import tempfile
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
@@ -745,7 +746,10 @@ class SystemdJobBackend(JobBackend):
 
 
 class JobStore:
-    """Atomic persistent storage for job metadata."""
+    """Indexed SQLite storage for durable-job metadata."""
+
+    _DATABASE_FILENAME = "state.sqlite3"
+    _BUSY_TIMEOUT_MS = 5_000
 
     def __init__(self, root: Path | None = None):
         if root is None:
@@ -754,15 +758,34 @@ class JobStore:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.root, 0o700)
         self._start_lock = FileLock(self.root / ".start.lock")
+        self._lock = threading.RLock()
+        self._database_path = self.root / self._DATABASE_FILENAME
+        database_existed = self._database_path.exists()
+        self._connection = sqlite3.connect(
+            self._database_path,
+            timeout=self._BUSY_TIMEOUT_MS / 1_000,
+            isolation_level=None,
+            check_same_thread=False,
+        )
+        self._connection.row_factory = sqlite3.Row
+        self._configure_database()
+        self._create_schema()
+        if not database_existed:
+            try:
+                self._import_legacy_records()
+            except Exception:
+                self._connection.close()
+                self._discard_failed_database()
+                raise
 
     def start_lock(self) -> FileLock:
         """:return: process-safe lock serialising concurrency-limit checks and job creation."""
         return self._start_lock
 
     def state_file(self, job_id: str) -> Path:
-        """:return: validated metadata path for ``job_id``."""
+        """:return: stable runner locator for ``job_id`` within this store root."""
         self.validate_job_id(job_id)
-        return self.root / f"{job_id}.json"
+        return self._database_path
 
     def create_command_file(self, job_id: str, command: str) -> Path:
         """Persist ``command`` in a private one-shot file consumed by the runner."""
@@ -786,66 +809,112 @@ class JobStore:
 
     def cleanup_orphan_command_files(self) -> None:
         """Remove command files that no longer belong to a running persisted job."""
-        records = {record.job_id: record for record in self.list_records()}
+        running = {record.job_id for record in self.list_running_records()}
         for path in self.root.glob(".*.command"):
             job_id = path.name[1 : -len(".command")]
             try:
                 self.validate_job_id(job_id)
             except UserFacingError:
                 continue
-            record = records.get(job_id)
-            if record is None or record.status.is_terminal:
+            if job_id not in running:
                 path.unlink(missing_ok=True)
 
     def create(self, record: JobRecord) -> None:
         """Persist a newly-created job, rejecting duplicate IDs."""
-        path = self.state_file(record.job_id)
-        if path.exists():
-            raise ValueError(f"Job {record.job_id!r} already exists")
-        self._write_atomic(path, record)
+        with self._lock:
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO jobs (
+                        job_id, unit_name, project_root, cwd, status, created_at, session_id,
+                        project_name, label, timeout_seconds, process_group_id, finished_at,
+                        return_code, status_message
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    self._record_values(record),
+                )
+            except sqlite3.IntegrityError as error:
+                raise ValueError(f"Job {record.job_id!r} already exists") from error
 
     def read(self, job_id: str) -> JobRecord:
-        """Read one persisted job."""
-        path = self.state_file(job_id)
-        if not path.exists():
+        """Read one persisted job by primary key."""
+        self.validate_job_id(job_id)
+        with self._lock:
+            row = self._connection.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        if row is None:
             raise UserFacingError(f"Unknown job ID {job_id!r}")
-        with path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            raise ValueError(f"Invalid state for job {job_id!r}")
-        return JobRecord.from_dict(data)
+        return self._record_from_row(row)
 
     def update(self, job_id: str, **changes: object) -> JobRecord:
         """Atomically update fields on one job record."""
-        path = self.state_file(job_id)
-        with FileLock(str(path) + ".lock"):
-            record = self.read(job_id)
-            updated = replace(record, **changes)
-            self._write_atomic(path, updated)
-            return updated
+        self.validate_job_id(job_id)
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+                if row is None:
+                    raise UserFacingError(f"Unknown job ID {job_id!r}")
+                updated = replace(self._record_from_row(row), **changes)
+                self._connection.execute(
+                    """
+                    UPDATE jobs
+                    SET unit_name = ?, project_root = ?, cwd = ?, status = ?, created_at = ?,
+                        session_id = ?, project_name = ?, label = ?, timeout_seconds = ?,
+                        process_group_id = ?, finished_at = ?, return_code = ?, status_message = ?
+                    WHERE job_id = ?
+                    """,
+                    (*self._record_values(updated)[1:], job_id),
+                )
+                self._connection.commit()
+                return updated
+            except Exception:
+                self._connection.rollback()
+                raise
 
     def list_records(self) -> list[JobRecord]:
-        """:return: all valid persisted job records."""
-        records: list[JobRecord] = []
-        for path in self.root.glob("*.json"):
-            try:
-                with path.open("r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict):
-                    records.append(JobRecord.from_dict(data))
-            except (OSError, ValueError, KeyError, json.JSONDecodeError):
-                continue
-        return records
+        """:return: all persisted job records."""
+        with self._lock:
+            rows = self._connection.execute("SELECT * FROM jobs").fetchall()
+            return [self._record_from_row(row) for row in rows]
+
+    def list_running_records(self) -> list[JobRecord]:
+        """:return: jobs whose persisted lifecycle is still running via the status index."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM jobs WHERE status = ? ORDER BY created_at DESC",
+                (JobStatus.RUNNING.value,),
+            ).fetchall()
+            return [self._record_from_row(row) for row in rows]
 
     def prune_unretained_terminal_jobs(self, retained_job_ids: set[str]) -> None:
         """Delete terminal job metadata no longer owned by a retained session."""
-        for record in self.list_records():
-            if not record.status.is_terminal or record.job_id in retained_job_ids:
-                continue
-            path = self.state_file(record.job_id)
-            path.unlink(missing_ok=True)
-            Path(str(path) + ".lock").unlink(missing_ok=True)
-            (self.root / f".{record.job_id}.command").unlink(missing_ok=True)
+        terminal_values = tuple(status.value for status in JobStatus if status.is_terminal)
+        placeholders = ",".join("?" for _ in terminal_values)
+        with self._lock:
+            if retained_job_ids:
+                retained_placeholders = ",".join("?" for _ in retained_job_ids)
+                rows = self._connection.execute(
+                    f"""
+                    SELECT job_id FROM jobs
+                    WHERE status IN ({placeholders})
+                      AND job_id NOT IN ({retained_placeholders})
+                    """,
+                    (*terminal_values, *sorted(retained_job_ids)),
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    f"SELECT job_id FROM jobs WHERE status IN ({placeholders})",
+                    terminal_values,
+                ).fetchall()
+            job_ids = [str(row["job_id"]) for row in rows]
+            if job_ids:
+                delete_placeholders = ",".join("?" for _ in job_ids)
+                self._connection.execute(
+                    f"DELETE FROM jobs WHERE job_id IN ({delete_placeholders})",
+                    tuple(job_ids),
+                )
+        for job_id in job_ids:
+            (self.root / f".{job_id}.command").unlink(missing_ok=True)
 
     @staticmethod
     def validate_job_id(job_id: str) -> None:
@@ -857,24 +926,127 @@ class JobStore:
         if parsed.hex != job_id:
             raise UserFacingError(f"Invalid job ID {job_id!r}")
 
-    @staticmethod
-    def _write_atomic(path: Path, record: JobRecord) -> None:
-        fd, temp_name = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent)
-        try:
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(record.to_dict(), f, sort_keys=True)
-                f.write("\n")
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(temp_name, path)
-        except Exception:
+    def _discard_failed_database(self) -> None:
+        """Removes a newly-created database whose one-time legacy import did not complete."""
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(self._database_path) + suffix).unlink(missing_ok=True)
+
+    def _configure_database(self) -> None:
+        """Configures SQLite for concurrent Serena and runner-process access."""
+        self._connection.execute("PRAGMA journal_mode=WAL")
+        self._connection.execute("PRAGMA synchronous=NORMAL")
+        self._connection.execute(f"PRAGMA busy_timeout={self._BUSY_TIMEOUT_MS}")
+
+    def _create_schema(self) -> None:
+        """Creates the durable-job table and lifecycle access-path indexes."""
+        self._connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS jobs (
+                job_id TEXT PRIMARY KEY,
+                unit_name TEXT NOT NULL,
+                project_root TEXT NOT NULL,
+                cwd TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                session_id TEXT,
+                project_name TEXT,
+                label TEXT,
+                timeout_seconds INTEGER,
+                process_group_id INTEGER,
+                finished_at TEXT,
+                return_code INTEGER,
+                status_message TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_jobs_status_created
+                ON jobs(status, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_jobs_session
+                ON jobs(session_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_jobs_finished
+                ON jobs(finished_at DESC, created_at DESC);
+            """
+        )
+
+    def _import_legacy_records(self) -> None:
+        """Imports retained per-job JSON metadata once, then marks each source migrated."""
+        legacy: list[tuple[Path, JobRecord]] = []
+        for path in self.root.glob("*.json"):
             try:
-                os.close(fd)
-            except OSError:
-                pass
-            Path(temp_name).unlink(missing_ok=True)
-            raise
+                with path.open("r", encoding="utf-8") as stream:
+                    data = json.load(stream)
+                if isinstance(data, dict):
+                    legacy.append((path, JobRecord.from_dict(data)))
+            except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                continue
+        if not legacy:
+            return
+
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                for _, record in legacy:
+                    self._connection.execute(
+                        """
+                        INSERT OR IGNORE INTO jobs (
+                            job_id, unit_name, project_root, cwd, status, created_at, session_id,
+                            project_name, label, timeout_seconds, process_group_id, finished_at,
+                            return_code, status_message
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        self._record_values(record),
+                    )
+                row = self._connection.execute(
+                    "SELECT COUNT(*) AS count FROM jobs WHERE job_id IN ({})".format(",".join("?" for _ in legacy)),
+                    tuple(record.job_id for _, record in legacy),
+                ).fetchone()
+                if row is None or int(row["count"]) != len({record.job_id for _, record in legacy}):
+                    raise RuntimeError("Legacy durable-job migration validation failed")
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+
+        for path, _ in legacy:
+            os.replace(path, path.with_name(path.name + ".migrated"))
+
+    @staticmethod
+    def _record_values(record: JobRecord) -> tuple[object, ...]:
+        """Returns one job's ordered SQLite column values."""
+        return (
+            record.job_id,
+            record.unit_name,
+            record.project_root,
+            record.cwd,
+            record.status.value,
+            record.created_at,
+            record.session_id,
+            record.project_name,
+            record.label,
+            record.timeout_seconds,
+            record.process_group_id,
+            record.finished_at,
+            record.return_code,
+            record.status_message,
+        )
+
+    @staticmethod
+    def _record_from_row(row: sqlite3.Row) -> JobRecord:
+        """Projects one SQLite row to durable-job metadata."""
+        return JobRecord(
+            job_id=str(row["job_id"]),
+            unit_name=str(row["unit_name"]),
+            project_root=str(row["project_root"]),
+            cwd=str(row["cwd"]),
+            status=JobStatus(str(row["status"])),
+            created_at=str(row["created_at"]),
+            session_id=str(row["session_id"]) if row["session_id"] is not None else None,
+            project_name=str(row["project_name"]) if row["project_name"] is not None else None,
+            label=str(row["label"]) if row["label"] is not None else None,
+            timeout_seconds=int(row["timeout_seconds"]) if row["timeout_seconds"] is not None else None,
+            process_group_id=int(row["process_group_id"]) if row["process_group_id"] is not None else None,
+            finished_at=str(row["finished_at"]) if row["finished_at"] is not None else None,
+            return_code=int(row["return_code"]) if row["return_code"] is not None else None,
+            status_message=str(row["status_message"]) if row["status_message"] is not None else None,
+        )
 
 
 class JobManager:
@@ -1044,16 +1216,17 @@ class JobManager:
         return records
 
     def list_running_jobs(self) -> list[JobRecord]:
-        """Returns current running-job metadata with one retained-catalogue read."""
-        stored_records = self._store.list_records()
-        current_records: list[JobRecord] = []
+        """Returns current running-job metadata from the indexed running set."""
+        stored_records = self._store.list_running_records()
         running: list[JobRecord] = []
+        lifecycle_changed = False
         for stored in stored_records:
-            current = self._reconcile_record(stored) if stored.status is JobStatus.RUNNING else stored
-            current_records.append(current)
+            current = self._reconcile_record(stored)
+            lifecycle_changed = lifecycle_changed or current.status.is_terminal
             if current.status is JobStatus.RUNNING:
                 running.append(current)
-        self._sync_retention_observer(current_records)
+        if lifecycle_changed:
+            self._sync_retention_observer()
         return sorted(running, key=lambda record: record.created_at, reverse=True)
 
     def get_job_output_before(self, job_id: str, cursor: str) -> JobSnapshot:
