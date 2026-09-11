@@ -106,11 +106,11 @@ class SessionExecutionSummary:
 
 @dataclass
 class _SessionExecutionIndex:
-    """Rebuildable execution identifiers and counts for one retained session."""
+    """Rebuildable execution identifiers and derived facts for one retained session."""
 
     execution_ids: list[str] = field(default_factory=list)
     running_execution_count: int = 0
-    durable_job_count: int = 0
+    durable_job_ids: set[str] = field(default_factory=set)
     first_execution_started_at: float | None = None
     latest_execution_started_at: float | None = None
     latest_execution_id: str | None = None
@@ -141,14 +141,15 @@ class ExecutionStore:
         self._current_run_by_session: dict[str, str] = {}
         self._running_job_sessions: dict[str, str] = {}
         self._session_execution_index: dict[str, _SessionExecutionIndex] = {}
+        self._panel_session_index: dict[str, str] = {}
         self._job_session_index: dict[str, str] = {}
         self._save_batch_depth = 0
         self._save_pending = False
 
         migrated = self._load()
         self._interrupt_stale_state()
-        pruned = self._prune()
         self._rebuild_session_execution_index()
+        pruned = self._prune()
         if migrated or pruned:
             self._save()
         if use_default_root:
@@ -264,8 +265,6 @@ class ExecutionStore:
             if record is None:
                 return
             was_running = record.status in {"running", "queued"}
-            had_durable_job = record.durable_job_id is not None
-
             # finalize worker lifecycle without erasing an earlier request timeout/cancellation
             record.status = "completed" if succeeded else "failed"
             record.finished_at = now
@@ -287,7 +286,7 @@ class ExecutionStore:
             if record.project_name:
                 session.project_name = record.project_name
             session.updated_at = now
-            self._index_execution_finish(record, was_running=was_running, had_durable_job=had_durable_job)
+            self._index_execution_finish(record, was_running=was_running)
             self._prune()
             self._save()
 
@@ -314,8 +313,6 @@ class ExecutionStore:
     def list_session_executions(self, session_id: str) -> list[ExecutionRecord]:
         """Returns executions belonging to one session from oldest to newest."""
         with self._lock:
-            if self._prune():
-                self._save()
             index = self._session_execution_index.get(session_id)
             if index is None:
                 return []
@@ -328,8 +325,6 @@ class ExecutionStore:
     def list_session_execution_items(self, session_id: str) -> list[ExecutionSummaryRecord]:
         """Returns bounded execution rows for one session from oldest to newest."""
         with self._lock:
-            if self._prune():
-                self._save()
             index = self._session_execution_index.get(session_id)
             if index is None:
                 return []
@@ -342,8 +337,6 @@ class ExecutionStore:
     def list_session_execution_summaries(self) -> list[SessionExecutionSummary]:
         """Returns lightweight retained-session facts without expanding execution payloads."""
         with self._lock:
-            if self._prune():
-                self._save()
             summaries: list[SessionExecutionSummary] = []
             for session in self._sessions.values():
                 index = self._session_execution_index.get(session.session_id, _SessionExecutionIndex())
@@ -358,7 +351,7 @@ class ExecutionStore:
                         updated_at=session.updated_at,
                         execution_count=len(index.execution_ids),
                         running_execution_count=index.running_execution_count,
-                        durable_job_count=index.durable_job_count,
+                        durable_job_count=len(index.durable_job_ids),
                         first_execution_started_at=index.first_execution_started_at,
                         latest_execution_started_at=index.latest_execution_started_at,
                         latest_execution=self._execution_summary_record(latest_record) if latest_record is not None else None,
@@ -393,18 +386,15 @@ class ExecutionStore:
     def list_sessions(self) -> list[SessionRecord]:
         """Returns retained sessions from newest to oldest update time."""
         with self._lock:
-            if self._prune():
-                self._save()
             sessions = sorted(self._sessions.values(), key=lambda item: item.updated_at, reverse=True)
             return [SessionRecord(**asdict(session)) for session in sessions]
 
     def get_session_by_panel_id(self, panel_id: str) -> SessionRecord | None:
         """Returns one retained session by its dashboard panel identifier."""
         with self._lock:
-            for session in self._sessions.values():
-                if session.panel_id == panel_id:
-                    return SessionRecord(**asdict(session))
-        return None
+            session_id = self._panel_session_index.get(panel_id)
+            session = self._sessions.get(session_id) if session_id is not None else None
+            return SessionRecord(**asdict(session)) if session is not None else None
 
     def start_activity_run(self, session_id: str, project_name: str) -> ActivityPanelRun:
         """Starts a panel run and carries any currently running executions from its predecessor."""
@@ -476,38 +466,41 @@ class ExecutionStore:
             runs = sorted(self._activity_runs.values(), key=lambda item: item.started_at)
             return [ActivityPanelRun(**asdict(run)) for run in runs]
 
-    def sync_job_retention(self, jobs: list[JobRetentionState]) -> set[str]:
-        """Synchronize durable-job state with unified session retention.
-
-        Terminal job completion extends the owning session's retention window. Running jobs protect
-        their owning sessions from eviction. The returned job identifiers are those still owned by
-        retained sessions.
-        """
+    def maintain_retention(self) -> bool:
+        """Runs deterministic retention pruning outside ordinary read paths."""
         with self._lock:
-            self._running_job_sessions = {}
-            for job in jobs:
-                session_id = job.session_id
-                if session_id is None:
-                    session_id = next(
-                        (record.session_id for record in self._executions.values() if record.durable_job_id == job.job_id),
-                        None,
-                    )
-                if session_id is None:
-                    continue
-                if job.is_running:
-                    self._running_job_sessions[job.job_id] = session_id
-                if job.finished_at is not None and (session := self._sessions.get(session_id)) is not None:
-                    session.updated_at = max(session.updated_at, job.finished_at)
-
             changed = self._prune()
             if changed:
                 self._save()
+            return changed
 
-            return {
-                record.durable_job_id
-                for record in self._executions.values()
-                if record.durable_job_id is not None and record.session_id in self._sessions
-            }
+    def sync_job_retention(self, jobs: list[JobRetentionState]) -> set[str]:
+        """Synchronize durable-job lifecycle facts with retained session ownership.
+
+        Terminal job completion extends the owning session's retention window and running jobs
+        protect their owning sessions from later eviction. Retention pruning itself is owned by
+        lifecycle mutations and :meth:`maintain_retention`, not this synchronization read.
+        """
+        with self._lock:
+            running_job_sessions: dict[str, str] = {}
+            persistence_changed = False
+            for job in jobs:
+                session_id = job.session_id or self._job_session_index.get(job.job_id)
+                if session_id is None:
+                    continue
+                if job.is_running:
+                    running_job_sessions[job.job_id] = session_id
+                if job.finished_at is not None and (session := self._sessions.get(session_id)) is not None:
+                    updated_at = max(session.updated_at, job.finished_at)
+                    if updated_at != session.updated_at:
+                        session.updated_at = updated_at
+                        persistence_changed = True
+
+            self._running_job_sessions = running_job_sessions
+            if persistence_changed:
+                self._save()
+
+            return {job_id for job_id, session_id in self._job_session_index.items() if session_id in self._sessions}
 
     def retained_file_tokens(self) -> set[str]:
         """Returns snapshot tokens referenced by retained execution media/results."""
@@ -574,6 +567,7 @@ class ExecutionStore:
                 updated_at=timestamp,
             )
             self._sessions[session_id] = session
+            self._panel_session_index[session.panel_id] = session_id
         return session
 
     def _interrupt_stale_state(self) -> None:
@@ -694,8 +688,9 @@ class ExecutionStore:
         return {"_legacy_arguments": StructuredOutputCompactor.truncate_text(serialized, 7_900)}
 
     def _rebuild_session_execution_index(self) -> None:
-        """Rebuilds non-authoritative retained-session and durable-job lookup indexes."""
+        """Rebuilds non-authoritative retained-session, panel and durable-job lookup indexes."""
         self._session_execution_index = {session_id: _SessionExecutionIndex() for session_id in self._sessions}
+        self._panel_session_index = {session.panel_id: session.session_id for session in self._sessions.values()}
         self._job_session_index = {}
         records = sorted(self._executions.values(), key=lambda record: (record.started_at, record.execution_id))
         for record in records:
@@ -706,8 +701,19 @@ class ExecutionStore:
                 index = self._session_execution_index[record.session_id]
                 index.running_execution_count = max(0, index.running_execution_count - 1)
             if record.durable_job_id is not None:
-                self._session_execution_index[record.session_id].durable_job_count += 1
-                self._job_session_index[record.durable_job_id] = record.session_id
+                self._index_durable_job(record.session_id, record.durable_job_id)
+
+    def _index_durable_job(self, session_id: str, job_id: str) -> None:
+        """Indexes unique durable-job ownership for one retained session."""
+        previous_session_id = self._job_session_index.get(job_id)
+        if previous_session_id == session_id:
+            return
+        if previous_session_id is not None:
+            previous_index = self._session_execution_index.get(previous_session_id)
+            if previous_index is not None:
+                previous_index.durable_job_ids.discard(job_id)
+        self._session_execution_index.setdefault(session_id, _SessionExecutionIndex()).durable_job_ids.add(job_id)
+        self._job_session_index[job_id] = session_id
 
     @staticmethod
     def _execution_summary_record(record: ExecutionRecord) -> ExecutionSummaryRecord:
@@ -739,17 +745,15 @@ class ExecutionStore:
             index.latest_execution_started_at = record.started_at
             index.latest_execution_id = record.execution_id
 
-    def _index_execution_finish(self, record: ExecutionRecord, *, was_running: bool, had_durable_job: bool) -> None:
+    def _index_execution_finish(self, record: ExecutionRecord, *, was_running: bool) -> None:
         """Updates mutable counts and durable-job ownership after one execution becomes terminal."""
         index = self._session_execution_index.setdefault(record.session_id, _SessionExecutionIndex())
         if record.execution_id not in index.execution_ids:
             self._index_execution_start(record)
         if was_running:
             index.running_execution_count = max(0, index.running_execution_count - 1)
-        if not had_durable_job and record.durable_job_id is not None:
-            index.durable_job_count += 1
         if record.durable_job_id is not None:
-            self._job_session_index[record.durable_job_id] = record.session_id
+            self._index_durable_job(record.session_id, record.durable_job_id)
 
     @contextmanager
     def batch_updates(self) -> Iterator[None]:
@@ -806,7 +810,8 @@ class ExecutionStore:
             if record.retained_output_id is not None:
                 owned_output_ids.add(record.retained_output_id)
 
-        changed = self._sessions.pop(session_id, None) is not None
+        session = self._sessions.pop(session_id, None)
+        changed = session is not None
         for execution_id in [execution_id for execution_id, record in self._executions.items() if record.session_id == session_id]:
             self._executions.pop(execution_id, None)
             changed = True
@@ -815,6 +820,8 @@ class ExecutionStore:
             changed = True
         self._current_run_by_session.pop(session_id, None)
         self._session_execution_index.pop(session_id, None)
+        if session is not None:
+            self._panel_session_index.pop(session.panel_id, None)
         for job_id, owning_session_id in list(self._job_session_index.items()):
             if owning_session_id == session_id:
                 self._job_session_index.pop(job_id, None)
@@ -835,11 +842,17 @@ class ExecutionStore:
         protected.update(self._running_job_sessions.values())
         return protected
 
-    def _session_has_dangling_execution_reference(self, session_id: str) -> bool:
-        """Returns whether an activity run references an execution no longer retained by its session."""
-        records = {record.execution_id for record in self._executions.values() if record.session_id == session_id}
-        runs = [run for run in self._activity_runs.values() if run.session_id == session_id]
-        return any(execution_id not in records for run in runs for execution_id in run.execution_ids)
+    def _sessions_with_dangling_execution_references(self) -> set[str]:
+        """Returns sessions whose activity runs reference executions outside their retained index."""
+        retained_by_session = {session_id: set(index.execution_ids) for session_id, index in self._session_execution_index.items()}
+        dangling: set[str] = set()
+        for run in self._activity_runs.values():
+            retained_ids = retained_by_session.get(run.session_id)
+            if retained_ids is None:
+                continue
+            if any(execution_id not in retained_ids for execution_id in run.execution_ids):
+                dangling.add(run.session_id)
+        return dangling
 
     def _cleanup_unreferenced_artifacts(self) -> None:
         """Deletes crash-orphaned artifact blobs not referenced by retained sessions."""
@@ -899,11 +912,8 @@ class ExecutionStore:
 
         # remove incomplete historical panels atomically rather than exposing partial state
         protected = self._protected_session_ids()
-        for session_id in list(self._sessions):
-            if session_id in protected:
-                continue
-            if self._session_has_dangling_execution_reference(session_id):
-                changed = self._drop_session(session_id) or changed
+        for session_id in self._sessions_with_dangling_execution_references() - protected:
+            changed = self._drop_session(session_id) or changed
 
         # expire inactive sessions after the configured retention period
         now = time.time()

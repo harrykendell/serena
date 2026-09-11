@@ -21,20 +21,72 @@ from typing import Any
 from flask import Flask
 
 from serena.custom_dashboard import CustomDashboard
-from serena.execution_store import _STATE_VERSION, ExecutionRecord, ExecutionStore, SessionRecord
+from serena.execution_store import _STATE_VERSION, ActivityPanelRun, ExecutionRecord, ExecutionStore, SessionRecord
 from serena.git_metrics import GitLineMetrics
-from serena.jobs import JobPersistenceInfo, JobRecord, JobRuntimeInfo, JobSnapshot, JobStatus
+from serena.jobs import (
+    JobBackend,
+    JobManager,
+    JobOutputChunk,
+    JobPersistenceInfo,
+    JobRecord,
+    JobRuntimeInfo,
+    JobSnapshot,
+    JobStatus,
+    JobStore,
+)
+
+
+class _BenchmarkJobBackend(JobBackend):
+    """Keeps synthetic running records live without external process probes."""
+
+    def start(self, record: JobRecord, command_file: Path, state_file: Path) -> None:
+        raise AssertionError("benchmark does not start jobs")
+
+    def is_running(self, record: JobRecord) -> bool:
+        return record.status is JobStatus.RUNNING
+
+    def cancel(self, record: JobRecord) -> None:
+        raise AssertionError("benchmark does not cancel jobs")
+
+    def read_output(
+        self,
+        record: JobRecord,
+        cursor: str | None,
+        max_chars: int,
+        output_mode: str = "latest",
+    ) -> JobOutputChunk:
+        raise AssertionError("overview benchmark must not read job output")
+
+    def read_output_before(self, record: JobRecord, cursor: str, max_chars: int) -> JobOutputChunk:
+        raise AssertionError("overview benchmark must not read job output")
+
+    def runtime_info(self, record: JobRecord) -> JobRuntimeInfo:
+        raise AssertionError("overview benchmark must not collect job telemetry")
+
+    def persistence_info(self) -> JobPersistenceInfo:
+        return JobPersistenceInfo(
+            survives_serena_restart=True,
+            survives_logout=True,
+            survives_reboot=True,
+            linger_enabled=True,
+        )
 
 
 class _CountingJobManager:
-    """Minimal dashboard-facing job source with explicit telemetry accounting."""
+    """Instrumented facade over the real durable-job manager."""
 
-    max_concurrent_jobs = 12
-
-    def __init__(self, records: list[JobRecord]) -> None:
-        self._records = records
+    def __init__(self, root: Path, records: list[JobRecord]) -> None:
+        store = JobStore(root / "jobs")
+        for record in records:
+            store.create(record)
+        self._manager = JobManager(store=store, backend=_BenchmarkJobBackend())
         self.snapshot_queries = 0
         self.telemetry_operations = 0
+
+    @property
+    def max_concurrent_jobs(self) -> int:
+        """Returns the real manager's configured concurrency limit."""
+        return self._manager.max_concurrent_jobs
 
     def reset_counts(self) -> None:
         """Resets per-request instrumentation."""
@@ -42,52 +94,33 @@ class _CountingJobManager:
         self.telemetry_operations = 0
 
     def list_job_snapshots(self, limit: int = 20, running_only: bool = False) -> list[JobSnapshot]:
-        """Returns synthetic snapshots while counting the telemetry work they represent."""
+        """Returns real snapshots while counting telemetry work."""
         self.snapshot_queries += 1
-        records = self._records[:limit]
-        if running_only:
-            records = [record for record in records if record.status is JobStatus.RUNNING]
-        self.telemetry_operations += len(records)
-        runtime = JobRuntimeInfo(
-            elapsed_seconds=12.0,
-            seconds_since_last_output=1.0,
-            memory_bytes=64 * 1024 * 1024,
-            cpu_seconds=2.5,
-            process_count=1,
-        )
-        return [JobSnapshot(record=record, runtime=runtime) for record in records]
+        snapshots = self._manager.list_job_snapshots(limit=limit, running_only=running_only)
+        self.telemetry_operations += len(snapshots)
+        return snapshots
 
     def list_running_jobs(self) -> list[JobRecord]:
-        """Returns running metadata while counting one lightweight overview query."""
+        """Returns real running metadata while counting one overview query."""
         self.snapshot_queries += 1
-        return [record for record in self._records if record.status is JobStatus.RUNNING]
+        return self._manager.list_running_jobs()
 
     def get_job_record(self, job_id: str) -> JobRecord:
-        """Returns one lightweight retained job record without telemetry."""
-        try:
-            return next(record for record in self._records if record.job_id == job_id)
-        except StopIteration:
-            raise KeyError(job_id) from None
+        """Returns one real lightweight retained job record."""
+        return self._manager.get_job_record(job_id)
 
     def get_job_records(self, job_ids: set[str]) -> list[JobRecord]:
-        """Returns selected lightweight retained job records without telemetry."""
-        return [record for record in self._records if record.job_id in job_ids]
+        """Returns selected real lightweight retained job records."""
+        return self._manager.get_job_records(job_ids)
 
     def get_job(self, job_id: str) -> JobSnapshot:
-        """Returns synthetic detail while counting the telemetry work it represents."""
+        """Returns real job detail while counting its telemetry work."""
         self.telemetry_operations += 1
-        runtime = JobRuntimeInfo(
-            elapsed_seconds=12.0,
-            seconds_since_last_output=1.0,
-            memory_bytes=64 * 1024 * 1024,
-            cpu_seconds=2.5,
-            process_count=1,
-        )
-        return JobSnapshot(record=self.get_job_record(job_id), runtime=runtime)
+        return self._manager.get_job(job_id)
 
     @staticmethod
     def persistence_info() -> JobPersistenceInfo:
-        """Returns stable synthetic persistence metadata."""
+        """Returns stable persistence metadata without probing the workstation."""
         return JobPersistenceInfo(
             survives_serena_restart=True,
             survives_logout=True,
@@ -140,14 +173,15 @@ class _BenchmarkAgent:
 class _Case:
     """Owns one synthetic retained-history benchmark case."""
 
-    def __init__(self, root: Path, session_count: int, calls_per_session: int, job_count: int) -> None:
+    def __init__(self, root: Path, session_count: int, calls_per_session: int, job_count: int, running_job_count: int) -> None:
         self._root = root
         self._session_count = session_count
         self._calls_per_session = calls_per_session
-        self._job_count = min(job_count, session_count)
+        self._job_count = job_count
+        self._running_job_count = min(running_job_count, job_count)
         self._write_execution_state()
         self.store = ExecutionStore(root)
-        self.jobs = _CountingJobManager(self._job_records())
+        self.jobs = _CountingJobManager(root, self._job_records())
         self.agent = _BenchmarkAgent(self.store, self.jobs)
 
         orchestrator_home = root / "orchestrator-home"
@@ -162,6 +196,7 @@ class _Case:
         now = time.time()
         sessions: dict[str, dict[str, Any]] = {}
         executions: dict[str, dict[str, Any]] = {}
+        activity_runs: dict[str, dict[str, Any]] = {}
         argument_padding = "argument-value-" * 96
         result_padding = "result-value-" * 512
 
@@ -212,34 +247,49 @@ class _Case:
                 )
                 executions[execution_id] = asdict(execution)
 
+            run_id = f"run-{session_index:04d}"
+            activity_runs[run_id] = asdict(
+                ActivityPanelRun(
+                    run_id=run_id,
+                    session_id=session_id,
+                    project_name="serena",
+                    started_at=created_at,
+                    superseded=True,
+                    execution_ids=[f"execution-{session_index:04d}-{call_index:02d}" for call_index in range(self._calls_per_session)],
+                )
+            )
+
         payload = {
             "version": _STATE_VERSION,
             "sessions": sessions,
             "executions": executions,
-            "activity_runs": {},
+            "activity_runs": activity_runs,
         }
         self._root.mkdir(parents=True, exist_ok=True)
         (self._root / "state.json").write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
 
     def _job_records(self) -> list[JobRecord]:
-        """Returns retained terminal jobs referenced by the first synthetic sessions."""
+        """Returns real retained job records with bounded synthetic running history."""
         now = "2026-09-11T12:00:00+00:00"
-        return [
-            JobRecord(
-                job_id=f"{index:032x}",
-                unit_name=f"serena-job-{index:032x}.service",
-                project_root=str(self._root),
-                cwd=str(self._root),
-                status=JobStatus.COMPLETED,
-                created_at=now,
-                session_id=f"benchmark-session-{index:04d}",
-                project_name="serena",
-                label=f"Synthetic job {index}",
-                finished_at=now,
-                return_code=0,
+        records: list[JobRecord] = []
+        for index in range(self._job_count):
+            running = index < self._running_job_count
+            records.append(
+                JobRecord(
+                    job_id=f"{index:032x}",
+                    unit_name=f"serena-job-{index:032x}.service",
+                    project_root=str(self._root),
+                    cwd=str(self._root),
+                    status=JobStatus.RUNNING if running else JobStatus.COMPLETED,
+                    created_at=now,
+                    session_id=(f"benchmark-session-{index:04d}" if index < self._session_count else None),
+                    project_name="serena",
+                    label=f"Synthetic job {index}",
+                    finished_at=None if running else now,
+                    return_code=None if running else 0,
+                )
             )
-            for index in range(self._job_count)
-        ]
+        return records
 
     def measure(self, samples: int) -> dict[str, Any]:
         """Measures cold-cache ``/dashboard/api/state`` response construction."""
@@ -270,7 +320,9 @@ class _Case:
         return {
             "sessions": self._session_count,
             "calls_per_session": self._calls_per_session,
-            "terminal_jobs": self._job_count,
+            "retained_jobs": self._job_count,
+            "running_jobs": self._running_job_count,
+            "terminal_jobs": self._job_count - self._running_job_count,
             "returned_panels": returned_panels[-1],
             "median_ms": round(statistics.median(elapsed_ms), 3),
             "min_ms": round(min(elapsed_ms), 3),
@@ -288,6 +340,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--sessions", type=int, nargs="+", default=[10, 100, 1000])
     parser.add_argument("--calls-per-session", type=int, default=4)
     parser.add_argument("--terminal-jobs", type=int, default=100)
+    parser.add_argument("--running-jobs", type=int, default=3)
     parser.add_argument("--samples", type=int, default=3)
     parser.add_argument("--json", action="store_true", dest="json_output")
     return parser.parse_args()
@@ -299,7 +352,13 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="serena-dashboard-scale-") as temporary_root:
         root = Path(temporary_root)
         for session_count in args.sessions:
-            case = _Case(root / str(session_count), session_count, args.calls_per_session, args.terminal_jobs)
+            case = _Case(
+                root / str(session_count),
+                session_count,
+                args.calls_per_session,
+                args.terminal_jobs + args.running_jobs,
+                args.running_jobs,
+            )
             results.append(case.measure(args.samples))
 
     if args.json_output:

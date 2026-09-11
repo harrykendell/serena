@@ -167,10 +167,14 @@ def test_shared_snapshot_survives_until_last_referencing_session_expires(tmp_pat
     assert {session.session_id for session in store.list_sessions()} == {"chat-a", "chat-b"}
 
     now = 1_011.0
+    assert {session.session_id for session in store.list_sessions()} == {"chat-a", "chat-b"}
+    assert store.maintain_retention() is True
     assert [session.session_id for session in store.list_sessions()] == ["chat-b"]
     assert snapshot_path.is_file()
 
     now = 1_016.0
+    assert [session.session_id for session in store.list_sessions()] == ["chat-b"]
+    assert store.maintain_retention() is True
     assert store.list_sessions() == []
     assert not snapshot_path.exists()
 
@@ -220,7 +224,36 @@ def test_running_job_protects_session_and_completion_extends_retention(tmp_path:
 
     now = 1_031.0
     store.sync_job_retention([JobRetentionState(job_id=job_id, session_id="chat-a", is_running=False, finished_at=1_020.0)])
+    assert {session.session_id for session in store.list_sessions()} == {"chat-a", "chat-b"}
+    assert store.maintain_retention() is True
     assert [session.session_id for session in store.list_sessions()] == ["chat-b"]
+
+
+def test_session_summary_counts_each_durable_job_once(tmp_path: Path) -> None:
+    store = ExecutionStore(tmp_path / "execution-store")
+    started_at = time.time()
+    for index, tool_name in enumerate(("start_job", "job_status", "job_status")):
+        execution_id = f"execution-{index}"
+        store.start_execution(
+            execution_id=execution_id,
+            session_id="chat-a",
+            project_name="serena",
+            tool_name=tool_name,
+            arguments={},
+            started_at=started_at + index,
+        )
+        store.finish_execution(
+            execution_id,
+            succeeded=True,
+            durable_job_id="job-a",
+            durable_job_label="Synthetic job",
+            finished_at=started_at + index + 0.5,
+        )
+
+    [summary] = store.list_session_execution_summaries()
+
+    assert summary.execution_count == 3
+    assert summary.durable_job_count == 1
 
 
 def test_execution_store_rejects_pre_v2_state(tmp_path: Path) -> None:

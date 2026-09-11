@@ -1,6 +1,6 @@
 # Serena Activity UI Simplification and Dashboard Rebuild Plan
 
-Status: COMPLETE — U00–U03 COMPLETE (2026-09-11)
+Status: ACTIVE — U00–U04 COMPLETE; U05–U07 PLANNED (2026-09-11)
 
 Baseline: `3435c894` (`Show current Git metrics in Serena activity`) plus the original mixed working tree. U00 preserved that pre-existing work as `a0c6a541` (backend performance fixes), `94818381` (dashboard notifications/PWA/deep links), and `04ef9b6e` (validation fixes for the preserved backend work), then recorded the measurable rebuild baseline in `docs/03-special-guides/serena_activity_ui_simplification_u00_baseline.md`.
 
@@ -650,7 +650,7 @@ Add a deliberately small browser smoke layer for the browser-state regressions t
 
 ## 10. Implementation programme
 
-Implementation should proceed in four bounded checkpoints. The sequence is deliberately short: a simplification project should not build transitional architecture merely to keep the legacy iframe frontend alive between adjacent steps.
+The initial rebuild proceeded in four bounded checkpoints, U00–U03. Post-cutover profiling then exposed several correctness and scaling costs that the original fixtures did not exercise, so the programme continues with four focused follow-on checkpoints, U04–U07. These must preserve the hard-cut architecture rather than reintroducing transitional compatibility machinery.
 
 ### U00 — Preserve useful work and establish measurable guardrails
 
@@ -798,7 +798,153 @@ Finally:
 
 Checkpoint (complete 2026-09-11): notification/PWA/deep-link and Orchestrator behaviour are verified on the direct route architecture; the final compatibility audit is clean; the 1,000-session scale/request/DOM guardrails pass. Evidence: `docs/03-special-guides/serena_activity_ui_simplification_u03_checkpoint.md`.
 
-Completion condition: canonical facts are stored once, the dashboard has one current server document and one periodic request, overview work is limited to compact session summaries rather than historical bodies, and no retained behaviour depends on the old compatibility architecture.
+Completion condition for U00–U03: canonical facts are stored once, the dashboard has one current server document and one periodic request, overview work is limited to compact session summaries rather than historical bodies, and no retained behaviour depends on the old compatibility architecture.
+
+### U04 — Correct derived counts and make read paths genuinely linear
+
+Treat the post-cutover audit as a correctness/performance gate before changing persistence.
+
+Fix the canonical read/index logic first:
+
+- durable-job counts are counts of unique durable jobs owned by a session, not counts of executions that happen to mention the same `durable_job_id`; repeated `job_status` calls must not inflate `job_count`;
+- rebuildable session indexes may carry unique durable-job membership, or the equivalent query may derive `COUNT(DISTINCT durable_job_id)`, but no persisted duplicate job counter becomes authoritative;
+- replace per-session dangling-reference validation that rescans the complete execution/run population with one indexed or set-based validation pass;
+- ordinary `list_*`/`get_*` read APIs must not run retention pruning, artifact filesystem scans or state writes merely because the dashboard is polling;
+- retention pruning remains deterministic but runs on lifecycle mutations and an explicit maintenance path, not opportunistically on every read;
+- `JobManager.list_running_jobs()` must not read and decode the entire retained job set twice; orphan-command cleanup and retention synchronization must not turn an otherwise lightweight read into a global historical scan;
+- selected-session lookup must use the stored `panel_id` index rather than linearly searching all sessions;
+- retain one owner for each derived index and keep every such index rebuildable from canonical records.
+
+Strengthen the fixtures before judging the result:
+
+- extend the dashboard benchmark with activity runs so dangling-reference validation is exercised;
+- benchmark with the real `JobManager`/`JobStore`, including 100, 1,000 and 5,000 retained terminal jobs and a small number of running jobs;
+- add an observable regression case proving that `start_job` followed by repeated `job_status` calls still renders/counts one durable job;
+- profile the 100- and 1,000-session overview path and require approximately linear growth rather than accepting an absolute 1,000-session number alone.
+
+Measured gate: on the current workstation, the 1,000-session execution-side overview path should return to roughly the already-demonstrated indexed range (about 110–150 ms before the persistence rewrite), and 10× more sessions must not cause materially more than about 10–12× execution-side work.
+
+Checkpoint (complete 2026-09-11): correctness is restored and read-side work is linear and non-mutating before persistence is replaced. Evidence: `docs/03-special-guides/serena_activity_ui_simplification_u04_checkpoint.md`.
+
+### U05 — Replace JSON persistence with indexed SQLite stores
+
+Replace the storage mechanisms that make routine lifecycle operations proportional to retained history. Use Python's standard-library `sqlite3`; do not add an ORM or generic persistence framework.
+
+#### Serena execution/activity store
+
+Replace `~/.serena/execution_store/state.json` and its whole-file zstd rewrite with one SQLite database owned entirely by `ExecutionStore`, for example `~/.serena/execution_store/state.sqlite3`.
+
+Use a small normalized schema whose canonical facts mirror the existing domain model:
+
+- `sessions`: session identity, stable `panel_id`, title/project and creation/update timestamps;
+- `executions`: execution identity, session/project/tool, bounded structured arguments JSON, lifecycle timestamps/status, result/error/media metadata and durable-job identity/label;
+- `activity_runs`: run identity, session/project/start/superseded state;
+- `activity_run_executions`: ordered run membership with foreign keys and cascade deletion;
+- explicit retained-artifact/output references associated with executions so retention no longer has to regex-scan every historical result body to discover live resources.
+
+Create indexes for the actual access paths: session execution ordering, session status/count queries, `panel_id`, `durable_job_id`, activity-run membership and retention/update ordering. Prefer indexed SQL aggregation and direct lookup over rebuilding large Python dictionaries on every process start. Database indexes are derived implementation state, not additional semantic owners.
+
+Configure SQLite for this single-process/multi-threaded service deliberately:
+
+- `PRAGMA journal_mode=WAL`;
+- `PRAGMA synchronous=NORMAL` unless durability testing demonstrates a reason to require `FULL`;
+- `PRAGMA foreign_keys=ON`;
+- a bounded `busy_timeout`;
+- serialize connection use through `ExecutionStore`'s existing lock/transaction boundary rather than exposing connections to callers.
+
+Map `batch_updates()` to one real SQLite transaction. A normal tool start or finish should update only the affected rows/index pages; it must never serialize or recompress unrelated historical executions. Set-based `DELETE` plus foreign-key cascades should prune complete sessions atomically.
+
+#### Durable-job store
+
+Replace `JobStore`'s one-JSON-file-per-job catalogue with its own small SQLite database rather than coupling job ownership into `ExecutionStore`. Index at least `job_id`, `status`, `session_id` and creation/finish ordering. `list_running_jobs()` must be an indexed `status = RUNNING` query, while direct selected-job reads remain primary-key lookups. Command files/journal output remain external artifacts owned by the job backend.
+
+Do not create a shared Serena/Orchestrator persistence abstraction merely because both use durable data. The two stores keep independent ownership and schemas.
+
+#### Migration and hard cutover
+
+Provide a narrow one-time importer for the current execution JSON/zstd state and retained job JSON records:
+
+1. create a new database only when no SQLite state exists;
+2. import and validate all canonical records in one transaction;
+3. verify session/execution/run/job counts, run membership, unique durable-job ownership and retained resource references;
+4. atomically mark/rename the legacy state only after the transaction commits;
+5. never dual-write or merge SQLite and legacy JSON during normal operation.
+
+Keep the importer only for the deployment cutover window. Once the deployed Serena instance has migrated successfully and restart/recovery checks pass, remove the legacy writer/reader/compression path and its migration-only code in U07.
+
+Add scale measurements that directly target the reason for the change:
+
+- compare tool `start_execution` + `finish_execution` bookkeeping at roughly 1,000 and 10,000 retained executions; latency should remain essentially history-independent rather than growing linearly with database size;
+- compare process startup/load time at the same sizes;
+- query 0 running jobs with 100, 1,000 and 5,000 terminal jobs present and require indexed behaviour rather than O(all jobs) JSON decoding;
+- measure database size separately from latency; a modest increase in disk bytes is acceptable in exchange for eliminating repeated whole-history serialization/compression.
+
+Checkpoint: execution and job lifecycle persistence is transactional, indexed and local to changed records; compressed whole-state JSON is no longer the normal storage engine.
+
+### U06 — Remove avoidable transport and renderer work
+
+With storage/query costs bounded, optimise the remaining dashboard and shared-renderer hot paths without changing the one-current-document architecture.
+
+#### Conditional transport and payload ownership
+
+- introduce a cheap source revision/generation token for each current route document, assembled from the canonical stores that can change that document;
+- evaluate `If-None-Match` against that cheap revision before building `ActivityView` snapshots or serializing large JSON documents, so an unchanged 304 does not pay the full selected-session construction cost;
+- revision state is transport invalidation state only: it must not become a second persisted activity model or browser delta protocol;
+- have `ActivityView` own the exact latest-activity and submission-span semantics rather than recomputing slightly different rules in HTTP and JavaScript;
+- move the shared renderer payload conversion into one small transport serializer used by both MCP and HTTP boundaries, removing the duplicated call/job/snapshot serializers and the `arguments`/`structured_arguments` compatibility duplication where the renderer no longer needs both;
+- cache immutable assembled inline/static activity assets for the process lifetime instead of rereading/stat'ing the same files on each resource/index request.
+
+#### Large selected-session rendering
+
+The measured 2,048-call case has now triggered the previously deferred large-list optimisation gate. Start with mechanisms that reduce work without adding server paging state:
+
+- build activity rows in a detached `DocumentFragment` before one live attachment;
+- use one delegated click handler on the activity list rather than one listener per row;
+- changing the expanded entry patches only the affected old/new rows and detail container instead of rebuilding the complete list;
+- remove the dashboard expansion callback's redundant intermediate full render while the network detail is loading;
+- make `summaryMode` genuinely header-only so 1,000 overview cards do not construct hidden bodies, lists, buttons and background-job controls;
+- register the one-second clock only for panels/nodes with active elapsed-time text, and suspend dashboard ticking while the document is hidden;
+- use CSS containment/`content-visibility` where it measurably reduces layout/paint cost without changing semantics.
+
+Re-run the 2,048-call selected-session benchmark after those changes. If full construction or interaction remains unacceptably slow, introduce one deliberately small renderer-local windowing/virtualisation mechanism. It may bound DOM rows, but it must not add server pagination, per-row requests, a second poller or a general frontend state framework.
+
+Acceptance measurements should cover initial render, unchanged rerender, expand/collapse interaction, preservation of scroll position and 1,000-card overview construction. The existing one-periodic-request invariant remains unchanged.
+
+Checkpoint: unchanged polls are cheap before serialization, overview summaries are cheap DOM, and large selected sessions no longer rebuild thousands of rows for a one-row interaction.
+
+### U07 — Give Orchestrator the same compact-query discipline and close the programme
+
+Bring the direct Orchestrator path into the same scale model without merging its domain or renderer with Serena.
+
+- add a compact `DelegateStore` dashboard-summary query that returns only panel/session identity, timestamps, active state, delegate count, active count and whatever single latest summary the overview actually renders;
+- do not hydrate up to 50 complete delegate status objects per session merely to draw overview cards;
+- add direct selected-session lookup by `panel_id`/parent session rather than building every Orchestrator panel and filtering one;
+- maintain a small rebuildable delegate/session lookup index in `DelegateStore` if needed so process startup may scan retained records once but periodic dashboard reads do not;
+- remove the current 128-session dashboard visibility cap and the 50-delegate selected-session truncation from the canonical retained-session path; if one opened session later proves too large, apply the same measured renderer-local strategy as Serena rather than hiding sessions globally;
+- keep Orchestrator persistence independent; do not use this step to invent a shared persistence framework.
+
+Then rerun the complete programme audit with fixtures that represent the actual risks discovered after U03:
+
+- 1,000 Serena sessions with real activity runs;
+- 100/1,000/5,000 retained jobs through the real job store;
+- 10,000 retained executions for lifecycle-write/startup scaling;
+- a 2,048-call selected Serena session;
+- more than 128 retained Orchestrator sessions and more than 50 delegates in one selected session;
+- unchanged overview and selected-session conditional requests;
+- notification/deep-link, one-poller, media and inline-host behaviour from U03.
+
+Record before/after CPU latency, serialized bytes, database size, DOM rebuild/interaction time and request counts. Require no history-proportional work in ordinary tool persistence, running-job discovery or unchanged dashboard polling.
+
+After the deployed instance has migrated successfully:
+
+1. remove legacy execution/job JSON persistence and migration-only compression code that no longer has a live consumer;
+2. audit for duplicate serializers, stale counters/indexes and compatibility fields introduced only for U00–U03;
+3. run `uv run poe format`, `uv run poe type-check`, `uv run poe test`, the browser smoke matrix and the expanded scale benchmarks;
+4. inspect the complete Git diff;
+5. checkpoint the follow-on optimisation programme;
+6. restart deployed Serena and verify the SQLite state survives restart with the same retained sessions/jobs and dashboard behaviour.
+
+Checkpoint: U04–U07 close the measured post-cutover gaps while preserving the simple U02 architecture: canonical facts have one owner, storage mutations touch only changed records, overview work is compact and linear, one selected document owns detail, and the browser performs only work visible to the user.
 
 ## 11. Acceptance matrix
 
@@ -811,19 +957,24 @@ Before declaring the programme complete, manually verify at least:
 | ChatGPT inline | live-created row then reload | row width/layout and displayed timing agree before and after reload |
 | ChatGPT inline | long-running foreground tool | live status and elapsed time update and remain correct after reload |
 | ChatGPT inline | `start_job` | job replaces duplicate start-job row and remains inspectable |
+| ChatGPT inline | repeated `job_status` for one job | session still reports one durable job; repeated observations do not inflate `job_count` |
 | ChatGPT inline | unrelated job running | compact other-job indicator is shown |
 | ChatGPT inline | tool failure | concise canonical error is inspectable |
 | ChatGPT inline | large centrally truncated result | presented result matches canonical output and exposes `output_id` |
 | ChatGPT inline | image/file result | media/file remains accessible |
 | ChatGPT inline | Git mutation | fresh `+/-` and ahead count appear |
 | ChatGPT inline | superseded terminal panel | panel retires correctly |
+| Persistence | 10,000 retained executions | starting/finishing one new execution updates only local SQLite rows and remains approximately history-independent |
+| Persistence | migrated retained state then restart | all sessions, executions, runs, jobs and retained resource links survive the JSON-to-SQLite cutover with no dual-store ambiguity |
 | Dashboard desktop | retained sessions | one compact overview document renders all retained session summaries and one session opens directly |
 | Dashboard mobile | Serena/Orchestrator tabs | correct responsive tab behaviour |
-| Dashboard scale | 1,000 retained sessions | initial render uses one `/state` request, with no per-session hydration and acceptable payload/render cost |
+| Dashboard scale | 1,000 retained sessions with activity runs | initial render uses one `/state` request, overview construction remains approximately linear, and there is no per-session hydration |
 | Dashboard scale | periodic refresh with 10 vs 1,000 sessions | browser request count remains exactly one per poll |
+| Dashboard scale | unchanged overview/selected session | conditional request is rejected from a cheap route revision before full snapshot construction/JSON serialization |
 | Dashboard scale | active/idle/hidden scheduler | roughly 2 s / 10 s / 60 s cadence, no overlapping requests or catch-up bursts |
 | Dashboard scale | sessions with Git metadata | ordinary `/state` reads cached metrics and runs no Git subprocesses |
-| Dashboard scale | many terminal jobs | overview does not fetch terminal-job runtime telemetry/output |
+| Dashboard scale | 5,000 terminal jobs and no running jobs | running-job discovery remains an indexed lightweight query and does not decode the terminal-job catalogue |
+| Dashboard scale | 2,048-call selected session | initial rendering is bounded/acceptable and expanding one row does not rebuild thousands of unrelated rows |
 | Dashboard | open session | overview polling stops and exactly one selected-session document becomes the polling source |
 | Dashboard | historical large session | overview is independent of its result bodies; selected-session document contains its complete lightweight row history |
 | Dashboard | switch opened session | previous session document is discarded and only the newly selected session is polled |
@@ -836,6 +987,7 @@ Before declaring the programme complete, manually verify at least:
 | PWA deep link | tap notification | dashboard opens correct panel and job once |
 | Dashboard | subsequent refresh after deep link | target is not repeatedly reapplied/navigation is stable |
 | Orchestrator | active delegation | status/detail/action behaviour remains available |
+| Orchestrator scale | >128 retained sessions / >50 delegates in one session | overview still lists every retained session compactly and the selected session exposes its complete retained delegate history without global hydration |
 | Dark mode | both surfaces | panel/dashboard remain readable without separate JS state |
 
 ## 12. Testing strategy
@@ -863,7 +1015,7 @@ Also keep a deliberately small browser smoke layer because several important reg
 - opening a session switches the poll target rather than adding a second periodic request;
 - expanding a row keeps detail in that same selected-session request.
 
-Keep that browser layer narrow. Do not introduce broad visual snapshots, a general end-to-end suite, or source-string assertions unless a later recurrent failure demonstrates a specific need. Keep the 10/100/1,000-session benchmark as a coarse performance regression check in addition to these deterministic structural tests.
+Keep that browser layer narrow. Do not introduce broad visual snapshots, a general end-to-end suite, or source-string assertions unless a later recurrent failure demonstrates a specific need. Retain the 10/100/1,000-session overview benchmark, and add focused performance fixtures for 10,000-execution lifecycle writes/startup, 100/1,000/5,000 real retained jobs, unchanged conditional requests, the 2,048-call selected-session renderer and Orchestrator histories beyond the old 128-session/50-delegate bounds.
 
 ## 13. Complexity and size guardrails
 
@@ -891,23 +1043,30 @@ The finished implementation should satisfy all of the following:
 18. ordinary dashboard overview construction performs no Git subprocesses, reuses cached metrics by project and does not globally collect terminal-job runtime telemetry;
 19. historical result/argument/media bodies do not participate in overview construction; selected-session responses include only the bounded detail needed for the one expanded entry;
 20. CSS, rather than JavaScript, owns ordinary sizing/scrolling/responsive layout;
-21. no browser-side semantic parsing of persisted Python parameter representations and no dashboard-specific result truncation/compaction.
+21. no browser-side semantic parsing of persisted Python parameter representations and no dashboard-specific result truncation/compaction;
+22. ordinary execution/session/job reads are non-mutating and do not trigger retention pruning, whole-history artifact scans or persistence writes;
+23. execution/activity and durable-job canonical persistence uses indexed SQLite transactions so one lifecycle mutation touches only changed rows rather than rewriting retained history;
+24. session durable-job counts represent unique jobs rather than the number of execution records that reference those jobs;
+25. unchanged conditional dashboard requests can be rejected from cheap canonical revision tokens before building/serializing the complete route document;
+26. summary-mode rendering is materially cheaper than constructing a hidden full session panel, while remaining part of the same renderer;
+27. Orchestrator overview discovery is compact and uncapped by the old 128-session/50-delegate dashboard limits, with direct selected-session lookup rather than global hydration.
 
 A reduction of at least roughly half of the current UI/adapter JavaScript is a reasonable expected consequence of this architecture, but clarity and deleted state machines matter more than compressing source into fewer lines.
 
 ## 14. Decisions intentionally deferred until measurements exist
 
-Do not pre-optimise these areas:
+Post-U03 measurements have triggered exactly one formerly deferred area: large selected-session rendering. U06 must first apply detached construction, event delegation, row-local expansion and CSS containment; renderer-local windowing/virtualisation is justified only if those simpler changes do not bring the measured 2,048-call case within budget. Server-side session pagination remains deferred.
 
-- pagination/virtualisation within one opened session's lightweight call history;
-- list virtualisation;
+Continue to defer:
+
 - SSE/WebSocket activity streaming;
 - a frontend framework;
 - a bundler/transpiler;
+- server-side list/session pagination;
 - a generic shared Serena/Orchestrator persistence abstraction;
 - complex per-panel incremental/delta protocols.
 
-Only introduce one if the simplified implementation has a measured problem that the mechanism directly solves.
+Only introduce one if a measured problem remains and the mechanism directly solves it without weakening the one-current-document/one-periodic-request model.
 
 ## 15. Definition of done
 
@@ -931,6 +1090,13 @@ This programme is complete when:
 - overview construction never serializes/decodes complete historical results merely to list sessions and never fetches terminal-job runtime telemetry globally;
 - job deep links resolve through canonical job/session ownership and notification targets are consumed once;
 - canonical model/dashboard result semantics remain aligned with the central result-presentation architecture;
+- durable-job counts are unique-job counts and remain correct across repeated `job_status`/other observations of the same job;
+- ordinary read paths are non-mutating and scale from indexed/set-based queries rather than per-session rescans or historical retention work;
+- `ExecutionStore` and `JobStore` use independent indexed SQLite persistence with row-local transactions; compressed whole-history execution JSON and per-job catalogue scans are no longer normal-operation storage paths;
+- one tool start/finish remains approximately history-independent at 10,000 retained executions, and running-job discovery remains indexed with 5,000 terminal jobs present;
+- unchanged conditional overview/selected-session requests avoid full route-document construction and serialization;
+- a 2,048-call selected session no longer requires full-list DOM reconstruction for one-row expansion, and summary-mode overview cards avoid hidden full-panel DOM;
+- Orchestrator overview returns compact summaries for all retained sessions, direct selected-session lookup works beyond the former 128-session/50-delegate limits, and overview construction does not hydrate complete delegate histories;
 - deterministic scale tests and the small browser-state smoke matrix cover the performance/request-count invariants as observable behaviour;
 - standard format/type/test and browser-smoke checks pass for the implementation;
 - the final diff has been audited for old compatibility concepts and accidental transitional layers;
