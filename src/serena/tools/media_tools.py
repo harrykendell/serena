@@ -327,6 +327,7 @@ class UploadFileTool(Tool, ToolMarkerCanEdit):
         finally:
             temporary_path.unlink(missing_ok=True)
 
+        self.project.ls_sync_file_system_changes((relative_path,))
         return {
             "uploaded": relative_path,
             "source_snapshot": str(source_snapshot.link.uri),

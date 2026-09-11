@@ -1,7 +1,7 @@
 import logging
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -334,10 +334,6 @@ class Project(ToStringMixin):
         if os.path.isfile(start_path):
             return [relative_path]
 
-        # refresh automatically detected languages before filtering source files
-        if self.project_config.auto_detect_language_servers:
-            self.determine_language_server_candidates()
-
         for root, dirs, files in os.walk(start_path, followlinks=True):
             # prevent recursion into ignored directories
             dirs[:] = [d for d in dirs if not self.is_ignored_path(os.path.join(root, d))]
@@ -635,12 +631,10 @@ class Project(ToStringMixin):
             log.info("Removing and stopping the language server for language %s ...", ls_id.value)
             self.language_server_manager.remove_language_server(ls_id)
 
-    def ls_sync_file_system_changes(self) -> int:
-        """
-        Synchronizes file system changes with the project's associated language server(s), if applicable
-        """
+    def ls_sync_file_system_changes(self, relative_paths: Iterable[str] | None = None) -> int:
+        """Synchronizes known or project-wide file-system changes with active language servers."""
         if self.language_server_manager:
-            return self.language_server_manager.sync_file_system_changes()
+            return self.language_server_manager.sync_file_system_changes(relative_paths)
         return 0
 
     def shutdown(self, timeout: float = 2.0) -> None:

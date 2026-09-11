@@ -19,6 +19,7 @@ TSymbol = TypeVar("TSymbol", bound=Symbol)
 
 class CodeEditor(Generic[TSymbol], ABC):
     def __init__(self, project: Project) -> None:
+        self._project = project
         self.project_root = project.project_root
         self.encoding = project.project_config.encoding
         self.newline = project.line_ending.newline_str
@@ -87,6 +88,7 @@ class CodeEditor(Generic[TSymbol], ABC):
         new_contents = edited_file.get_contents()
         with open(abs_path, "w", encoding=self.encoding, newline=self.newline) as f:
             f.write(new_contents)
+        self._project.ls_sync_file_system_changes((edited_file.relative_path,))
 
     @abstractmethod
     def _find_unique_symbol(self, name_path: str, relative_file_path: str) -> TSymbol:
@@ -313,6 +315,7 @@ class LanguageServerCodeEditor(CodeEditor[LanguageServerSymbol]):
             old_abs_path = os.path.join(self._code_editor.project_root, self._old_relative_path)
             new_abs_path = os.path.join(self._code_editor.project_root, self._new_relative_path)
             os.rename(old_abs_path, new_abs_path)
+            self._code_editor._project.ls_sync_file_system_changes((self._old_relative_path, self._new_relative_path))
 
     def _workspace_edit_to_edit_operations(self, workspace_edit: ls_types.WorkspaceEdit) -> list["LanguageServerCodeEditor.EditOperation"]:
         operations: list[LanguageServerCodeEditor.EditOperation] = []

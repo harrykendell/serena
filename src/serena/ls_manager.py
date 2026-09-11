@@ -1,8 +1,9 @@
 import logging
 import os.path
+import subprocess
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -345,81 +346,123 @@ class LanguageServerManager:
         self._refresh_candidates()
         return self._candidate_for_file(relative_file_path) is not None
 
-    def sync_file_system_changes(self) -> int:
-        """Synchronizes file-system changes with currently running language servers."""
+    def sync_file_system_changes(self, relative_paths: Iterable[str] | None = None) -> int:
+        """Synchronizes known or project-wide file-system changes with running language servers."""
         if not self.get_active_language_server_ids():
             return 0
-        log.info("Polling file system for changes to source files ...")
-        num_changes = self._file_change_notifier.poll_and_notify()
-        log.info(f"File system polling complete; {num_changes} change events sent to language servers.")
+        if relative_paths is None:
+            log.info("Polling project file system for language-server changes ...")
+        num_changes = self._file_change_notifier.poll_and_notify(relative_paths)
+        if relative_paths is None:
+            log.info("Project file-system polling complete; %s change events sent to language servers.", num_changes)
         return num_changes
 
 
 class LanguageServerFileChangeNotifier:
-    """
-    Detects changes to source files on disk and notifies language servers of those changes.
-    """
+    """Detects project source changes and notifies running language servers."""
 
     def __init__(self, project: "Project", language_server_manager: LanguageServerManager, initial_poll: bool = True) -> None:
         self._project = project
         self._language_server_manager = language_server_manager
-        self._freshness_last_seen_mtimes: dict[str, float] | None = None
+        self._freshness_last_seen_mtimes: dict[str, int] | None = None
         self._freshness_lock = threading.Lock()
 
         if initial_poll:
-            # Establish the baseline for the first poll; no notifications are sent on the first call.
             with LogTime("Initialising file change notifier (polling for baseline)"):
                 self.poll_and_notify()
 
-    def poll_and_notify(self) -> int:
+    def poll_and_notify(self, relative_paths: Iterable[str] | None = None) -> int:
+        """Detects and publishes known-path or project-wide source-file changes.
+
+        :param relative_paths: exact project-relative paths known to have been touched, or ``None``
+            when the mutating operation is opaque and the complete project must be checked
+        :return: number of change events sent
         """
-        Detects source files that were changed, created or deleted on disk since the last call
-        and notifies every language server managed for this project via the LSP
-        ``workspace/didChangeWatchedFiles`` notification.
+        if relative_paths is None:
+            events = self._poll_project()
+        else:
+            events = self._poll_paths(relative_paths)
+        return self._notify(events)
 
-        This exists because Serena's own file and symbol tools notify the language server inline
-        (via didOpen/didChange/didClose) when they edit a file, but edits made through any other
-        channel (another editor, a second agent, a git checkout, a build step) are otherwise
-        invisible to a warm language server, causing symbolic queries to answer from a stale index.
+    def _gather_project_source_files(self) -> list[str]:
+        """Returns source files using Git enumeration when available, with filesystem fallback."""
+        result = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "."],
+            cwd=self._project.project_root,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            return self._project.gather_source_files()
 
-        The set of files considered is exactly the set Serena itself tracks (see
-        :meth:`gather_source_files`), so no separate file-discovery logic has to be kept in sync.
-        The dominant cost is the directory walk plus one ``os.stat`` per tracked file; this is
-        intended to be called before symbolic tool invocations rather than on a timer.
+        paths = result.stdout.decode("utf-8", errors="surrogateescape").split("\0")
+        return [rel_path for rel_path in paths if rel_path and not self._project.is_ignored_path(rel_path, ignore_non_source_files=True)]
 
-        :return: the number of change events sent (0 if nothing changed, if no language server is
-            running yet, or on the first call, which only establishes the baseline).
-        """
-        current: dict[str, float] = {}
-        for rel_path in self._project.gather_source_files():
+    def _poll_project(self) -> list[tuple[str, FileChangeType]]:
+        """Returns changes discovered by one complete project source-file scan."""
+        current: dict[str, int] = {}
+        for rel_path in self._gather_project_source_files():
             try:
-                current[rel_path] = os.stat(os.path.join(self._project.project_root, rel_path)).st_mtime
+                current[rel_path] = os.stat(os.path.join(self._project.project_root, rel_path)).st_mtime_ns
             except OSError:
                 continue
 
-        # Read-diff-swap under the lock only; the filesystem walk above and the LSP notifications
-        # below stay outside it so concurrent callers do not serialize on I/O.
         with self._freshness_lock:
             previous = self._freshness_last_seen_mtimes
             self._freshness_last_seen_mtimes = current
-
             if previous is None:
-                return 0
+                return []
 
-            # compute the set of individual events (created, changed, deleted)
             events: list[tuple[str, FileChangeType]] = []
-            for rel_path, mtime in current.items():
-                prev_mtime = previous.get(rel_path)
-                if prev_mtime is None:
+            for rel_path, mtime_ns in current.items():
+                previous_mtime_ns = previous.get(rel_path)
+                if previous_mtime_ns is None:
                     events.append((rel_path, FileChangeType.Created))
-                elif mtime > prev_mtime:
+                elif mtime_ns != previous_mtime_ns:
                     events.append((rel_path, FileChangeType.Changed))
             events.extend((rel_path, FileChangeType.Deleted) for rel_path in previous if rel_path not in current)
+            return events
 
+    def _poll_paths(self, relative_paths: Iterable[str]) -> list[tuple[str, FileChangeType]]:
+        """Returns changes for exact paths without walking the project."""
+        paths = tuple(dict.fromkeys(relative_paths))
+        current: dict[str, int | None] = {}
+        for rel_path in paths:
+            self._project.validate_relative_path(rel_path)
+            absolute_path = os.path.join(self._project.project_root, rel_path)
+            try:
+                if self._project.is_ignored_path(absolute_path, ignore_non_source_files=True):
+                    current[rel_path] = None
+                else:
+                    current[rel_path] = os.stat(absolute_path).st_mtime_ns
+            except (FileNotFoundError, OSError):
+                current[rel_path] = None
+
+        with self._freshness_lock:
+            if self._freshness_last_seen_mtimes is None:
+                self._freshness_last_seen_mtimes = {}
+            previous = self._freshness_last_seen_mtimes
+            events: list[tuple[str, FileChangeType]] = []
+            for rel_path, mtime_ns in current.items():
+                previous_mtime_ns = previous.get(rel_path)
+                if mtime_ns is None:
+                    if previous_mtime_ns is not None:
+                        previous.pop(rel_path, None)
+                        events.append((rel_path, FileChangeType.Deleted))
+                    continue
+                previous[rel_path] = mtime_ns
+                if previous_mtime_ns is None:
+                    events.append((rel_path, FileChangeType.Created))
+                elif mtime_ns != previous_mtime_ns:
+                    events.append((rel_path, FileChangeType.Changed))
+            return events
+
+    def _notify(self, events: list[tuple[str, FileChangeType]]) -> int:
+        """Publishes one batch of change events to every running language server."""
         if not events:
             return 0
 
-        # create the change didChangeWatchedFiles notification
         changes: list[FileEvent] = [
             {"uri": Path(self._project.project_root, rel_path).resolve().as_uri(), "type": change_type} for rel_path, change_type in events
         ]
@@ -427,23 +470,18 @@ class LanguageServerFileChangeNotifier:
         created_paths = [rel_path for rel_path, change_type in events if change_type == FileChangeType.Created]
 
         for ls in self._language_server_manager.iter_language_servers():
-            # send the didChangeWatchedFiles notification to the language server
             try:
                 ls.server.notify.did_change_watched_files(params)
-            except Exception as e:
-                log.error("Failed to notify language server of watched file changes", exc_info=e)
+            except Exception as error:
+                log.error("Failed to notify language server of watched file changes", exc_info=error)
 
-            # A didChangeWatchedFiles(Created) notification alone is not enough for every backend
-            # (observed with pyright) to fold a brand-new file into its cross-file reference graph;
-            # an open/close cycle forces the parse+bind that Serena's own file tools trigger via
-            # SolidLanguageServer.open_file().
             for rel_path in created_paths:
                 if ls.is_ignored_path(rel_path, ignore_unsupported_files=True):
                     continue
                 try:
                     with ls.open_file(rel_path):
                         pass
-                except Exception as e:
-                    log.error(f"Failed to refresh newly created file {rel_path!r} in language server", exc_info=e)
+                except Exception as error:
+                    log.error("Failed to refresh newly created file %r in language server", rel_path, exc_info=error)
 
         return len(events)

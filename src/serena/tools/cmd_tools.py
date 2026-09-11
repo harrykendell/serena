@@ -41,16 +41,19 @@ class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit):
 
         # stream internally to avoid pipe deadlock while still returning the complete logical result
         try:
-            result = execute_shell_command(
-                command,
-                cwd=_cwd,
-                capture_stderr=capture_stderr,
-                timeout=self.agent.serena_config.tool_timeout,
-            )
-        except TimeoutError as error:
-            raise UserFacingError(str(error)) from None
-        except OSError as error:
-            raise UserFacingError(f"Could not execute shell command: {error.strerror or error}") from None
+            try:
+                result = execute_shell_command(
+                    command,
+                    cwd=_cwd,
+                    capture_stderr=capture_stderr,
+                    timeout=self.agent.serena_config.tool_timeout,
+                )
+            except TimeoutError as error:
+                raise UserFacingError(str(error)) from None
+            except OSError as error:
+                raise UserFacingError(f"Could not execute shell command: {error.strerror or error}") from None
+        finally:
+            self.project.ls_sync_file_system_changes()
         payload: dict[str, object] = {"return_code": result.return_code}
         if result.stdout:
             payload["stdout"] = result.stdout

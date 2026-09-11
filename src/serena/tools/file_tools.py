@@ -80,6 +80,7 @@ class CreateTextFileTool(EditingToolWithDiagnostics):
                 abs_path.write_text(content, encoding=self.project.project_config.encoding, newline=self.project.line_ending.newline_str)
             except OSError as error:
                 raise UserFacingError(f"Could not write {relative_path}: {error.strerror or error}") from None
+            self.project.ls_sync_file_system_changes((relative_path,))
 
             result = "OK; overwrote existing file" if will_overwrite_existing else SUCCESS_RESULT
             return diagnostics_context.format_result(result)
@@ -204,7 +205,7 @@ class ReplaceContentTool(EditingToolWithDiagnostics):
                 )
             except OSError as error:
                 raise UserFacingError(f"Could not write {relative_path}: {error.strerror or error}") from None
-            self.project.ls_sync_file_system_changes()
+            self.project.ls_sync_file_system_changes((relative_path,))
 
             return diagnostics_context.format_result(SUCCESS_RESULT)
 

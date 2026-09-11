@@ -7,6 +7,8 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -92,6 +94,8 @@ class ExecutionStore:
         self._activity_runs: dict[str, ActivityPanelRun] = {}
         self._current_run_by_session: dict[str, str] = {}
         self._running_job_sessions: dict[str, str] = {}
+        self._save_batch_depth = 0
+        self._save_pending = False
         self._load()
         self._interrupt_stale_state()
         if self._prune():
@@ -535,7 +539,28 @@ class ExecutionStore:
                         if current is None or self._activity_runs[current].started_at < run.started_at:
                             self._current_run_by_session[run.session_id] = run.run_id
 
+    @contextmanager
+    def batch_updates(self) -> Iterator[None]:
+        """Persists a group of execution-store mutations with one final state write."""
+        with self._lock:
+            self._save_batch_depth += 1
+            try:
+                yield
+            finally:
+                self._save_batch_depth -= 1
+                if self._save_batch_depth == 0 and self._save_pending:
+                    self._save_pending = False
+                    self._write_state()
+
     def _save(self) -> None:
+        """Persists state immediately unless an enclosing update batch defers the write."""
+        if self._save_batch_depth > 0:
+            self._save_pending = True
+            return
+        self._write_state()
+
+    def _write_state(self) -> None:
+        """Writes the complete retained execution state atomically."""
         self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
         payload = {
             "version": _STATE_VERSION,

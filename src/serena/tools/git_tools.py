@@ -137,7 +137,10 @@ class GitBranchTool(_GitTool, ToolMarkerCanEdit):
                 args.append(self._validate_git_name(start_point, "start point"))
             return self._run_git(args)
         if action == "switch":
-            return self._run_git(["switch", name])
+            try:
+                return self._run_git(["switch", name])
+            finally:
+                self.project.ls_sync_file_system_changes()
         return self._run_git(["branch", "-d", name])
 
 

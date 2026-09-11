@@ -243,23 +243,24 @@ class SerenaFastMCPTool(FastMCPTool):
         submission_project_name = project.project_name if project is not None else ""
         execution_id = uuid.uuid4().hex
         execution_store = self._execution_store
-        execution_store.start_execution(
-            execution_id=execution_id,
-            session_id=session_id,
-            project_name=submission_project_name,
-            tool_name=self.name,
-            arguments=execution_store.serialize_auxiliary_value(arguments),
-        )
-        if self._activity_tracker is not None:
-            if submission_project_name:
-                self._activity_tracker.update_project(session_id, submission_project_name)
-            self._activity_tracker.start_tool(
-                session_id,
-                self.name,
-                arguments,
-                project_name=submission_project_name,
+        with execution_store.batch_updates():
+            execution_store.start_execution(
                 execution_id=execution_id,
+                session_id=session_id,
+                project_name=submission_project_name,
+                tool_name=self.name,
+                arguments=execution_store.serialize_auxiliary_value(arguments),
             )
+            if self._activity_tracker is not None:
+                if submission_project_name:
+                    self._activity_tracker.update_project(session_id, submission_project_name)
+                self._activity_tracker.start_tool(
+                    session_id,
+                    self.name,
+                    arguments,
+                    project_name=submission_project_name,
+                    execution_id=execution_id,
+                )
 
         def finish_execution(
             *,
@@ -277,36 +278,37 @@ class SerenaFastMCPTool(FastMCPTool):
             retained_output_id = presentation.retained_output_id if succeeded and presentation is not None else None
             retained_output_chars = presentation.retained_output_chars if succeeded and presentation is not None else None
 
-            if self._activity_tracker is not None:
-                self._activity_tracker.finish_tool(
-                    execution_id,
-                    succeeded=succeeded,
-                    result_serialization=result_serialization,
-                    error=error,
-                    project_name=project_name,
-                    result_metadata=metadata,
-                    retained_output_id=retained_output_id,
-                    retained_output_chars=retained_output_chars,
-                )
-            else:
-                execution_store.finish_execution(
-                    execution_id,
-                    succeeded=succeeded,
-                    result=result_serialization if media is None else None,
-                    error=error,
-                    project_name=project_name,
-                    retained_output_id=retained_output_id,
-                    retained_output_chars=retained_output_chars,
-                    media=media.storage_dict() if media is not None else None,
-                    durable_job_id=durable_job_id,
-                    durable_job_label=durable_job_label,
-                )
+            with execution_store.batch_updates():
+                if self._activity_tracker is not None:
+                    if project_name:
+                        self._activity_tracker.update_project(session_id, project_name)
+                    self._activity_tracker.finish_tool(
+                        execution_id,
+                        succeeded=succeeded,
+                        result_serialization=result_serialization,
+                        error=error,
+                        project_name=project_name,
+                        result_metadata=metadata,
+                        retained_output_id=retained_output_id,
+                        retained_output_chars=retained_output_chars,
+                    )
+                else:
+                    execution_store.finish_execution(
+                        execution_id,
+                        succeeded=succeeded,
+                        result=result_serialization if media is None else None,
+                        error=error,
+                        project_name=project_name,
+                        retained_output_id=retained_output_id,
+                        retained_output_chars=retained_output_chars,
+                        media=media.storage_dict() if media is not None else None,
+                        durable_job_id=durable_job_id,
+                        durable_job_label=durable_job_label,
+                    )
 
         def completed_project_name() -> str:
             current_project = self._agent.get_active_project_for_session(session_id)
             current_project_name = current_project.project_name if current_project is not None else ""
-            if self._activity_tracker is not None and current_project_name:
-                self._activity_tracker.update_project(session_id, current_project_name)
             return current_project_name if self.name == "activate_project" else submission_project_name
 
         def finish_unexpected(error: Exception, *, project_name: str) -> str:

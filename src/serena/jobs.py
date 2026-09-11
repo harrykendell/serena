@@ -212,6 +212,8 @@ class SystemdJobBackend(JobBackend):
     """Runs jobs as transient user systemd services with journald output."""
 
     _STOP_TIMEOUT_SECONDS = 5
+    _CPU_WEIGHT = 20
+    _NICE = 10
 
     @staticmethod
     def _run_required_command(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
@@ -232,6 +234,8 @@ class SystemdJobBackend(JobBackend):
             f"--description=Serena background job {record.job_id}",
             f"--working-directory={record.cwd}",
             "--property=Type=exec",
+            f"--property=CPUWeight={self._CPU_WEIGHT}",
+            f"--property=Nice={self._NICE}",
             "--property=KillMode=mixed",
             f"--property=TimeoutStopSec={self._STOP_TIMEOUT_SECONDS}s",
             "--property=StandardOutput=journal",
