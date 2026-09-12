@@ -575,6 +575,7 @@ async function runningIconAnimationScenario() {
           && statusStyle?.alignSelf === "center"
           && markerStyle?.width === "3px"
           && markerStyle?.height === "3px"
+          && markerStyle?.animationName === "activity-dots-bounce"
           && elapsedBefore !== elapsedAfter;
         document.getElementById("smoke-marker").textContent = pass
           ? "SMOKE_PASS running-icon-job"

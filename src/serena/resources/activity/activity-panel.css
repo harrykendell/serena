@@ -322,8 +322,30 @@
   width: 3px;
   height: 3px;
   border-radius: 50%;
-  background: currentColor;
-  box-shadow: -5px 0 currentColor, 5px 0 currentColor;
+  box-shadow: -5px 0 currentColor, 0 0 currentColor, 5px 0 currentColor;
+  animation: activity-dots-bounce 1.2s ease-in-out infinite;
+}
+
+@keyframes activity-dots-bounce {
+  0%, 40%, 100% {
+    box-shadow: -5px 0 currentColor, 0 0 currentColor, 5px 0 currentColor;
+  }
+  10% {
+    box-shadow: -5px -2px currentColor, 0 0 currentColor, 5px 0 currentColor;
+  }
+  20% {
+    box-shadow: -5px 0 currentColor, 0 -2px currentColor, 5px 0 currentColor;
+  }
+  30% {
+    box-shadow: -5px 0 currentColor, 0 0 currentColor, 5px -2px currentColor;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-row[data-status="starting"] .activity-status::before,
+  .activity-row[data-status="running"] .activity-status::before {
+    animation: none;
+  }
 }
 
 .activity-row[data-status="completed"] .activity-status {
