@@ -33,6 +33,22 @@
   }
 
 
+  function formatBytes(bytes) {
+    const value = number(bytes);
+    if (value === null) return "";
+    const absolute = Math.max(0, value);
+    if (absolute < 1024) return `${Math.round(absolute)} B`;
+    const units = ["KiB", "MiB", "GiB", "TiB"];
+    let scaled = absolute / 1024;
+    let unitIndex = 0;
+    while (scaled >= 1024 && unitIndex < units.length - 1) {
+      scaled /= 1024;
+      unitIndex += 1;
+    }
+    const digits = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
+    return `${scaled.toFixed(digits)} ${units[unitIndex]}`;
+  }
+
   function formatLiveDuration(seconds) {
     const value = Math.max(0, Math.floor(number(seconds) ?? 0));
     if (value < 60) return `${value}s`;
@@ -526,6 +542,7 @@ _releaseMedia(callId) {
           item.job_id,
           item.label,
           item.project,
+          item.command,
           normalizeStatus(item.status),
           item.status_message,
           startedAt,
@@ -579,6 +596,7 @@ _releaseMedia(callId) {
           job.job_id,
           job.label,
           job.project,
+          job.command,
           normalizeStatus(job.status),
           job.status_message,
           number(job.started_at ?? job.submitted_at),
@@ -680,7 +698,7 @@ _releaseMedia(callId) {
       appendText(titleLine, label, "activity-row-title");
       const scope = kind === "job" ? (item.project || "") : (item.scope || item.project_name || "");
       if (scope) appendText(titleLine, scope, "activity-row-scope");
-      const detail = kind === "job" ? (item.status_message || "JOB") : (item.detail || "");
+      const detail = kind === "job" ? (item.command || item.status_message || "JOB") : (item.detail || "");
       const detailNode = appendText(copy, detail, "activity-row-detail");
       copy.prepend(titleLine);
 
@@ -757,14 +775,19 @@ _releaseMedia(callId) {
     }
 
     _jobMetadata(detail) {
+      const lastOutput = number(detail.seconds_since_last_output);
+      const cpuSeconds = number(detail.cpu_seconds);
+      const timeoutSeconds = number(detail.timeout_seconds);
       const metadata = {
-        status: detail.status_message || detail.status,
-        cwd: detail.cwd,
-        return_code: detail.return_code,
-        timeout_seconds: detail.timeout_seconds,
-        memory_bytes: detail.memory_bytes,
-        cpu_seconds: detail.cpu_seconds,
-        process_count: detail.process_count,
+        Status: detail.status_message || statusLabel(detail.status),
+        "Working directory": detail.cwd,
+        Elapsed: formatLiveDuration(detail.elapsed_seconds),
+        "Last output": lastOutput === null ? null : `${formatDuration(lastOutput)} ago`,
+        Memory: formatBytes(detail.memory_bytes),
+        "CPU time": cpuSeconds === null ? null : formatDuration(cpuSeconds),
+        Processes: detail.process_count,
+        Timeout: timeoutSeconds === null ? null : formatDuration(timeoutSeconds),
+        "Return code": detail.return_code,
       };
       const compact = Object.fromEntries(Object.entries(metadata).filter(([, value]) => value !== null && value !== undefined && value !== ""));
       const content = renderValue(compact);
@@ -773,6 +796,12 @@ _releaseMedia(callId) {
     }
 
     _renderJobDetail(container, detail) {
+      if (detail.command) {
+        const command = document.createElement("pre");
+        command.className = "activity-pre activity-job-command";
+        command.textContent = detail.command;
+        this._appendDetailSection(container, "Command", command);
+      }
       this._appendDetailSection(container, "Job", this._jobMetadata(detail));
       if (detail.output) {
         const output = document.createElement("pre");

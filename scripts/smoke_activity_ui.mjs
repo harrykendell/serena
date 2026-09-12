@@ -176,6 +176,7 @@ function selectedJob(expanded = false) {
       job_id: "job-0",
       label: "Smoke background job",
       project: "serena",
+      command: "python smoke_job.py --steps 20",
       status: "completed",
       started_at: 1000,
       finished_at: 1001,
@@ -188,6 +189,7 @@ function selectedJob(expanded = false) {
         label: "Smoke background job",
         project: "serena",
         cwd: "/tmp/serena",
+        command: "python smoke_job.py --steps 20",
         status: "completed",
         status_message: "Job completed successfully.",
         return_code: 0,
@@ -427,7 +429,7 @@ async function sessionDaySeparatorsScenario() {
   if (!dom.includes("SMOKE_PASS session-day-separators")) throw new Error("Session day separator smoke failed");
 }
 
-async function durableJobDeduplicationScenario() {
+async function durableJobCommandScenario() {
   const snapshot = selected(false);
   snapshot.calls = [{
     call_id: "start-job-call",
@@ -445,6 +447,7 @@ async function durableJobDeduplicationScenario() {
     job_id: "job-0",
     label: "Smoke background job",
     project: "serena",
+    command: "python smoke_job.py --steps 20",
     status: "running",
     started_at: 1000,
     finished_at: null,
@@ -460,21 +463,23 @@ async function durableJobDeduplicationScenario() {
     const panel = new window.SerenaActivity.ActivityPanel(testRoot, { initialCollapsed: false });
     panel.render(${JSON.stringify(snapshot)});
     const rows = [...testRoot.querySelectorAll(".activity-row")];
-    const jobButton = rows[0]?.querySelector(".activity-row-button");
+    const callRow = rows.find(row => row.dataset.kind === "call");
+    const jobRow = rows.find(row => row.dataset.kind === "job");
+    const jobButton = jobRow?.querySelector(".activity-row-button");
     const jobAccent = jobButton ? getComputedStyle(jobButton, "::before") : null;
-    const jobDetail = rows[0]?.querySelector(".activity-row-detail");
-    const pass = rows.length === 1
-      && rows[0]?.dataset.kind === "job"
-      && rows[0]?.dataset.entryId === "job-0"
-      && jobDetail?.textContent === "JOB"
+    const jobDetail = jobRow?.querySelector(".activity-row-detail");
+    const pass = rows.length === 2
+      && callRow?.dataset.entryId === "start-job-call"
+      && jobRow?.dataset.entryId === "job-0"
+      && jobDetail?.textContent === "python smoke_job.py --steps 20"
       && jobAccent?.backgroundImage?.includes("linear-gradient")
-      && !testRoot.textContent.includes("start_job");
+      && testRoot.textContent.includes("start_job");
     document.getElementById("smoke-marker").textContent = pass
-      ? "SMOKE_PASS durable-job-deduplication"
-      : "SMOKE_FAIL durable-job-deduplication rows=" + rows.length + " text=" + testRoot.textContent;
+      ? "SMOKE_PASS durable-job-command"
+      : "SMOKE_FAIL durable-job-command rows=" + rows.length + " text=" + testRoot.textContent;
   `;
   const dom = await runChrome(prepareInlineHtml(snapshot, scenario), 200);
-  if (!dom.includes("SMOKE_PASS durable-job-deduplication")) throw new Error("Durable-job deduplication smoke failed");
+  if (!dom.includes("SMOKE_PASS durable-job-command")) throw new Error("Durable-job command smoke failed");
 }
 
 async function overviewAnimationContinuityScenario() {
@@ -1113,9 +1118,19 @@ async function expandedRunningJobLiveOutputScenario() {
   const scenario = `
     setTimeout(() => { window.__selectedPayload = ${JSON.stringify(updated)}; }, 200);
     setTimeout(() => {
-      const output = document.querySelector('#serena-widgets [data-panel-id="panel-0"] .activity-job-output')?.textContent || "";
+      const panel = document.querySelector('#serena-widgets [data-panel-id="panel-0"]');
+      const output = panel?.querySelector(".activity-job-output")?.textContent || "";
+      const command = panel?.querySelector(".activity-job-command")?.textContent || "";
+      const metadata = panel?.querySelector(".activity-job-metadata")?.textContent || "";
       const fetches = window.__smokeFetches.filter(path => path.startsWith("/dashboard/api/serena/sessions/panel-0?expanded=job-0"));
       const pass = output === "line 1\\nline 2"
+        && command === "python smoke_job.py --steps 20"
+        && metadata.includes("Elapsed")
+        && metadata.includes("2s")
+        && metadata.includes("Memory")
+        && metadata.includes("1.00 KiB")
+        && metadata.includes("CPU time")
+        && metadata.includes("0.1s")
         && fetches.length >= 2
         && window.__eventSourceUrl === "/dashboard/api/events";
       document.getElementById("smoke-marker").textContent = pass
@@ -1865,7 +1880,7 @@ async function serviceWorkerScenario() {
 
 await initialOverviewLoadScenario();
 await sessionDaySeparatorsScenario();
-await durableJobDeduplicationScenario();
+await durableJobCommandScenario();
 await overviewAnimationContinuityScenario();
 await runningIconAnimationScenario();
 await inlineHiddenTimerScenario();

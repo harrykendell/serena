@@ -205,6 +205,24 @@ class ExecutionStore:
             ).fetchone()
             return str(row["panel_id"]) if row is not None else None
 
+    def command_for_job(self, job_id: str) -> str | None:
+        """Returns the submitted command for the retained ``start_job`` execution."""
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT arguments_json
+                FROM executions
+                WHERE durable_job_id = ? AND tool_name = 'start_job'
+                ORDER BY started_at ASC, execution_id ASC
+                LIMIT 1
+                """,
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            command = self._load_json_object(str(row["arguments_json"])).get("command")
+            return command if isinstance(command, str) and command else None
+
     @staticmethod
     def compact_arguments(value: dict[str, Any]) -> dict[str, Any]:
         """Returns bounded JSON-safe keyword arguments without pre-serializing them."""

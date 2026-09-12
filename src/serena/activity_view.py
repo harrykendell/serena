@@ -221,6 +221,7 @@ class ActivityJobSummary:
     job_id: str
     label: str
     project: str
+    command: str | None
     status: str
     started_at: float
     finished_at: float | None
@@ -263,6 +264,7 @@ class ActivityJobDetail:
     label: str
     project: str
     cwd: str
+    command: str | None
     status: str
     status_message: str | None
     return_code: int | None
@@ -585,6 +587,7 @@ class ActivityView:
             label=record.label or "background job",
             project=record.project_name or "",
             cwd=record.cwd,
+            command=self._execution_store.command_for_job(record.job_id),
             status=record.status.value,
             status_message=record.status_message,
             return_code=record.return_code,
@@ -665,6 +668,7 @@ class ActivityView:
             job_id=record.job_id,
             label=record.label or "background job",
             project=record.project_name or "",
+            command=self._execution_store.command_for_job(record.job_id),
             status=record.status.value,
             started_at=datetime.fromisoformat(record.created_at).timestamp(),
             finished_at=datetime.fromisoformat(record.finished_at).timestamp() if record.finished_at else None,

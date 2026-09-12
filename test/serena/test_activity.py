@@ -638,7 +638,11 @@ def test_activity_tracker_marks_current_turn_job_and_exposes_other_running_jobs(
     source = _FakeJobSource([_job_record("other-job", "other optimisation")])
     tracker = _ActivityHarness(source)
     run = tracker.start_run("conversation-a", "serena")
-    call_id = tracker.start_tool("conversation-a", "start_job", {"label": "current optimisation"})
+    call_id = tracker.start_tool(
+        "conversation-a",
+        "start_job",
+        {"command": "python optimise.py --tau 8", "label": "current optimisation"},
+    )
 
     source.records.append(_job_record("current-job", "current optimisation"))
     result = {"job_id": "current-job", "label": "current optimisation"}
@@ -654,6 +658,7 @@ def test_activity_tracker_marks_current_turn_job_and_exposes_other_running_jobs(
         ("current-job", True),
         ("other-job", False),
     ]
+    assert snapshot["jobs"][0]["command"] == "python optimise.py --tau 8"
     assert snapshot["calls"][0]["job_id"] == "current-job"
     assert snapshot["calls"][0]["detail"] == "current optimisation"
 
@@ -663,7 +668,11 @@ def test_activity_tracker_exposes_job_runtime_and_output_on_demand() -> None:
     source.outputs["current-job"] = "step 1\nstep 2"
     tracker = _ActivityHarness(source)
     run = tracker.start_run("conversation-a", "serena")
-    call_id = tracker.start_tool("conversation-a", "start_job", {"label": "current optimisation"})
+    call_id = tracker.start_tool(
+        "conversation-a",
+        "start_job",
+        {"command": "python optimise.py --tau 8", "label": "current optimisation"},
+    )
     result = {"job_id": "current-job", "label": "current optimisation"}
     tracker.finish_tool(
         call_id,
@@ -675,6 +684,7 @@ def test_activity_tracker_exposes_job_runtime_and_output_on_demand() -> None:
     detail = tracker.get_job_detail("conversation-a", run["run_id"], "current-job")
 
     assert detail["label"] == "current optimisation"
+    assert detail["command"] == "python optimise.py --tau 8"
     assert detail["status"] == "running"
     assert detail["elapsed_seconds"] == 12.5
     assert detail["seconds_since_last_output"] == 0.5
