@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from flask import Flask, Response, abort, redirect, request
+from flask import Flask, Response, abort, redirect, request, stream_with_context
 from mcp.types import ResourceLink
 from pydantic import AnyUrl
 
@@ -19,7 +21,7 @@ from orchestrator.config import OrchestratorConfig
 from orchestrator.dashboard_sessions import OrchestratorDashboardSessionArchive
 from orchestrator.delegates import DelegateError, DelegateStore
 from serena.activity import ACTIVITY_RESOURCE_DIR
-from serena.activity_transport import activity_overview_payload, activity_snapshot_payload
+from serena.activity_transport import activity_overview_payload, activity_running_jobs_payload, activity_snapshot_payload
 from serena.activity_view import ActivityView
 from serena.push_notifications import WebPushNotifier
 from serena.tools.media_tools import read_result_file_link
@@ -78,42 +80,11 @@ class DashboardSessionOverview:
 
     def get_session(self) -> dict[str, Any]:
         """Returns compact runtime metadata for the custom dashboard."""
-        project = self._agent.get_default_project()
-        if project is None:
-            languages: list[str] = []
-            memories: list[str] = []
-        else:
-            languages = [language.value for language in project.get_language_server_candidates()]
-            memories = project.memory_manager.list_memories().get_full_list()
-
         return {
             "status": "success",
-            "languages": languages,
             "runtime_policy": "ChatGPT",
             "serena_version": self._agent.version,
             "active_tools": self._agent.get_active_tool_names(),
-            "total_tools": len(self._agent.get_exposed_tool_instances()),
-            "available_memories": memories,
-        }
-
-
-class DashboardMemoryOverview:
-    """Read-only access to memories for the active project."""
-
-    def __init__(self, agent: SerenaAgent):
-        self._agent = agent
-
-    def get_memory(self, memory_name: str) -> dict[str, Any]:
-        """Returns one memory from the currently active project."""
-        project = self._agent.get_default_project()
-        if project is None:
-            raise ValueError("No active project")
-
-        content = project.memory_manager.load_memory(memory_name)
-        return {
-            "status": "success",
-            "memory_name": memory_name,
-            "content": content,
         }
 
 
@@ -223,12 +194,88 @@ class DashboardOrchestratorOverview:
             raise KeyError(delegate_id) from exc
 
 
+class DashboardChangeStream:
+    """Fans out lightweight invalidations from one process-wide revision watcher."""
+
+    _CHECK_INTERVAL_SECONDS = 0.1
+    _HEARTBEAT_INTERVAL_SECONDS = 15.0
+
+    def __init__(self, revision_source: Callable[[], str]) -> None:
+        self._revision_source = revision_source
+        self._condition = threading.Condition()
+        self._generation = 0
+        self._subscribers = 0
+        self._started = False
+        self._stop_requested = False
+
+    def events(self) -> Iterator[str]:
+        """Yields SSE invalidations while canonical state remains in the existing HTTP documents."""
+        generation = self._subscribe()
+        try:
+            yield "retry: 1000\n\n"
+            while True:
+                with self._condition:
+                    changed = self._condition.wait_for(
+                        lambda generation=generation: self._generation != generation,
+                        timeout=self._HEARTBEAT_INTERVAL_SECONDS,
+                    )
+                    generation = self._generation
+                if changed:
+                    yield "event: invalidate\ndata: 1\n\n"
+                else:
+                    yield ": keepalive\n\n"
+        finally:
+            self._unsubscribe()
+
+    def _subscribe(self) -> int:
+        """Registers one stream consumer and starts the shared watcher when required."""
+        with self._condition:
+            self._subscribers += 1
+            self._stop_requested = False
+            if self._started:
+                return self._generation
+            initial_revision = self._revision_source()
+            self._started = True
+            generation = self._generation
+        threading.Thread(
+            target=self._watch,
+            args=(initial_revision,),
+            name="serena-dashboard-events",
+            daemon=True,
+        ).start()
+        return generation
+
+    def _unsubscribe(self) -> None:
+        """Stops the shared watcher once the last stream consumer disconnects."""
+        with self._condition:
+            self._subscribers = max(0, self._subscribers - 1)
+            if self._subscribers == 0:
+                self._stop_requested = True
+                self._condition.notify_all()
+
+    def _watch(self, revision: str) -> None:
+        """Publishes one generation change whenever renderer-visible durable state changes."""
+        while True:
+            time.sleep(self._CHECK_INTERVAL_SECONDS)
+            with self._condition:
+                if self._stop_requested and self._subscribers == 0:
+                    self._started = False
+                    self._stop_requested = False
+                    return
+            current_revision = self._revision_source()
+            if current_revision == revision:
+                continue
+            revision = current_revision
+            with self._condition:
+                self._generation += 1
+                self._condition.notify_all()
+
+
 class CustomDashboard:
     """Serena-specific dashboard integration kept outside the bundled frontend implementation."""
 
     def __init__(self, app: Flask, agent: SerenaAgent):
         self._session_overview = DashboardSessionOverview(agent)
-        self._memory_overview = DashboardMemoryOverview(agent)
         self._execution_store = agent.execution_store
         self._job_manager = agent.job_manager
         self._activity_view = ActivityView(
@@ -239,6 +286,7 @@ class CustomDashboard:
         self._orchestrator_overview = DashboardOrchestratorOverview()
         self._push_notifier = WebPushNotifier()
         self._revision_nonce = uuid.uuid4().hex
+        self._change_stream = DashboardChangeStream(self._stream_revision)
         self._register_routes(app)
 
     def set_serena_session_name(self, session_id: str, display_name: str) -> str:
@@ -276,15 +324,9 @@ class CustomDashboard:
         )
 
     def render_index_html(self) -> str:
-        """Returns the dashboard shell with compact bootstrap state and cached shared assets."""
+        """Returns the dashboard shell with cached shared activity assets."""
         html, activity_styles, activity_renderer = _dashboard_static_assets()
-        bootstrap = json.dumps(self.dashboard_state(), ensure_ascii=False, separators=(",", ":"))
-        bootstrap = bootstrap.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
-        injected = (
-            f"<style>{activity_styles}</style>\n"
-            f"<script>{activity_renderer}</script>\n"
-            f'<script id="dashboard-bootstrap" type="application/json">{bootstrap}</script>'
-        )
+        injected = f"<style>{activity_styles}</style>\n<script>{activity_renderer}</script>"
         return html.replace("</head>", f"  {injected}\n</head>", 1)
 
     @property
@@ -319,6 +361,14 @@ class CustomDashboard:
                 self._orchestrator_overview.revision_token(),
                 hashlib.blake2s(runtime.encode("utf-8"), digest_size=8).hexdigest(),
             )
+        )
+
+    def _stream_revision(self) -> str:
+        """Returns the cheap durable revision watched by the live invalidation stream."""
+        return (
+            f"{self._execution_store.dashboard_revision()}|"
+            f"{self._job_manager.dashboard_revision()}|"
+            f"{self._orchestrator_overview.revision_token()}"
         )
 
     def _serena_session_revision(self, panel_id: str, expanded_entry_id: str | None) -> str | None:
@@ -361,6 +411,13 @@ class CustomDashboard:
         def get_dashboard_state() -> Response:
             return self._conditional_json_response(app, self._overview_revision(), self.dashboard_state)
 
+        @app.route("/dashboard/api/events", methods=["GET"])
+        def get_dashboard_events() -> Response:
+            response = Response(stream_with_context(self._change_stream.events()), mimetype="text/event-stream")
+            response.headers["Cache-Control"] = "private, no-cache"
+            response.headers["X-Accel-Buffering"] = "no"
+            return response
+
         @app.route("/dashboard/api/serena/sessions/<panel_id>", methods=["GET"])
         def get_serena_session_document(panel_id: str) -> Response:
             expanded = request.args.get("expanded") or None
@@ -371,7 +428,9 @@ class CustomDashboard:
 
             def payload() -> dict[str, Any]:
                 try:
-                    return activity_snapshot_payload(self._activity_view.for_session(panel_id, expanded_entry_id=expanded))
+                    snapshot = activity_snapshot_payload(self._activity_view.for_session(panel_id, expanded_entry_id=expanded))
+                    snapshot["dashboard_jobs"] = activity_running_jobs_payload(self._activity_view.dashboard_jobs())
+                    return snapshot
                 except ValueError:
                     abort(400)
                 except KeyError:
@@ -425,13 +484,3 @@ class CustomDashboard:
             except (TypeError, ValueError):
                 abort(400)
             return {"status": "success"}
-
-        @app.route("/dashboard/api/memory", methods=["GET"])
-        def get_custom_memory() -> dict[str, Any]:
-            try:
-                memory_name = request.args.get("name")
-                if not memory_name:
-                    raise ValueError("Memory name is required")
-                return self._memory_overview.get_memory(memory_name)
-            except Exception as exc:
-                return {"status": "error", "message": str(exc)}

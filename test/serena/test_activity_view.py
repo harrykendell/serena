@@ -109,7 +109,7 @@ def test_dashboard_overview_scales_from_lightweight_indexes_without_history_expa
     assert all(not session.active for session in overview.sessions[1:])
     assert overview.sessions[1].session_id == "session-999"
     assert jobs.running_queries == 1
-    assert git.cached_reads == ["serena"]
+    assert git.cached_reads == []
 
     selected = view.for_session(ExecutionStore.panel_id_for_session("session-999"))
     assert len(selected.calls) == 1
@@ -124,3 +124,37 @@ def test_dashboard_overview_scales_from_lightweight_indexes_without_history_expa
     assert detailed.expanded_call is not None
     assert detailed.expanded_call.result is not None
     assert detailed.expanded_call.result.startswith("historical-result:")
+
+
+def test_retained_sessions_keep_session_owned_git_metrics(tmp_path: Path) -> None:
+    store = ExecutionStore(tmp_path / "execution-store")
+    for session_id in ("session-a", "session-b"):
+        execution_id = f"execution-{session_id}"
+        store.start_execution(
+            execution_id=execution_id,
+            session_id=session_id,
+            project_name="serena",
+            tool_name="read_file",
+            arguments={"relative_path": f"{session_id}.txt"},
+        )
+        store.finish_execution(execution_id, succeeded=True, result="ok")
+
+    metrics_a = GitLineMetrics(additions=7, deletions=2, ahead_commits=1)
+    metrics_b = GitLineMetrics(additions=11, deletions=5, ahead_commits=3)
+    store.update_session_git_metrics("session-a", metrics_a)
+    store.update_session_git_metrics("session-b", metrics_b)
+    git = _CountingGitMetricsSource()
+    view = ActivityView(store, _OverviewJobSource([]), git)
+
+    first = {session.session_id: session for session in view.dashboard_overview().sessions}
+    assert first["session-a"].git_metrics == metrics_a
+    assert first["session-b"].git_metrics == metrics_b
+
+    updated_b = GitLineMetrics(additions=19, deletions=8, ahead_commits=4)
+    store.update_session_git_metrics("session-b", updated_b)
+    second = {session.session_id: session for session in view.dashboard_overview().sessions}
+
+    assert second["session-a"].git_metrics == metrics_a
+    assert second["session-b"].git_metrics == updated_b
+    assert view.for_session(ExecutionStore.panel_id_for_session("session-a")).git_metrics == metrics_a
+    assert git.cached_reads == []

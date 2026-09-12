@@ -5,28 +5,30 @@ const ACTIVE_POLL_INTERVAL_MS = 2000;
 const IDLE_POLL_INTERVAL_MS = 10000;
 const HIDDEN_POLL_INTERVAL_MS = 60000;
 
-const bootstrapNode = document.getElementById("dashboard-bootstrap");
-const dashboardBootstrapState = bootstrapNode ? JSON.parse(bootstrapNode.textContent || "{}") : {};
 const DASHBOARD_ASSET_VERSION = document.documentElement.dataset.assetVersion || "";
 
 let currentRoute = initialRoute();
 let activeOverviewView = currentRoute.kind === "orchestrator" ? "orchestrator" : "serena";
-let currentDocument = currentRoute.kind === "overview" ? dashboardBootstrapState : null;
+let currentDocument = null;
 let currentEtag = null;
 let routeGeneration = 0;
 let refreshInFlight = false;
 let refreshRequested = false;
 let refreshTimer = null;
 let clockTimer = null;
-let latestOverview = dashboardBootstrapState;
-let latestResources = { tools: [], memories: [] };
+let latestOverview = null;
+let latestOverviewEtag = null;
+let latestTools = [];
 let latestJobs = { jobs: [], running_jobs: 0, max_concurrent_jobs: 0 };
 let visibleActivityPanels = [];
+let serenaOverviewSnapshots = new Map();
 let visibleElapsedNodes = [];
 let selectedSerenaPanel = null;
 let selectedSerenaRoot = null;
 let objectUrls = [];
 let pendingNotificationTarget = currentRoute.notificationTarget;
+let changeStream = null;
+let changeStreamConnected = false;
 
 function byId(id) {
   return document.getElementById(id);
@@ -106,8 +108,18 @@ function documentHasActiveWork(documentState = currentDocument) {
   return serenaActive || orchestratorActive || Number(documentState?.jobs?.running_jobs || 0) > 0;
 }
 
+function hasExpandedRunningJob() {
+  if (currentRoute.kind !== "serena" || !currentRoute.expandedEntryId) return false;
+  return (currentDocument?.jobs || []).some(
+    job => job.job_id === currentRoute.expandedEntryId && job.status === "running",
+  );
+}
+
 function nextRefreshDelay() {
   if (document.hidden) return HIDDEN_POLL_INTERVAL_MS;
+  if (hasExpandedRunningJob()) return ACTIVE_POLL_INTERVAL_MS;
+  if (changeStreamConnected) return HIDDEN_POLL_INTERVAL_MS;
+  if (currentRoute.kind !== "overview") return ACTIVE_POLL_INTERVAL_MS;
   return documentHasActiveWork() ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS;
 }
 
@@ -119,11 +131,31 @@ function scheduleRefresh(delay = nextRefreshDelay()) {
   }, delay);
 }
 
+function setupChangeStream() {
+  if (!("EventSource" in window)) return;
+  const source = new EventSource(`${API_PREFIX}/events`);
+  changeStream = source;
+  source.addEventListener("open", () => {
+    changeStreamConnected = true;
+    scheduleRefresh(0);
+  });
+  source.addEventListener("invalidate", () => {
+    scheduleRefresh(0);
+  });
+  source.addEventListener("error", () => {
+    changeStreamConnected = false;
+    scheduleRefresh();
+  });
+}
+
 async function fetchCurrentDocument(path, etag) {
   const headers = { Accept: "application/json" };
   if (etag) headers["If-None-Match"] = etag;
-  const response = await fetch(`${API_PREFIX}${path}`, { cache: "no-cache", headers });
-  if (response.status === 304) return { unchanged: true, etag };
+  const response = await fetch(`${API_PREFIX}${path}`, { cache: etag ? "no-cache" : "no-store", headers });
+  if (response.status === 304) {
+    if (!etag) throw new Error("304 response without a reusable dashboard document");
+    return { unchanged: true, etag };
+  }
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   const data = await response.json();
   if (data?.status === "error") throw new Error(data.message || "Serena API error");
@@ -143,14 +175,35 @@ async function refresh() {
   refreshInFlight = true;
   const generation = routeGeneration;
   const path = routePath();
+  const requestEtag = hasExpandedRunningJob() ? null : currentEtag;
+  const overviewRequest = currentRoute.kind !== "overview" && latestOverview === null
+    ? fetchCurrentDocument("/state", null).catch(error => {
+        console.warn("Dashboard overview context fetch failed", error);
+        return null;
+      })
+    : Promise.resolve(null);
   try {
-    const response = await fetchCurrentDocument(path, currentEtag);
+    const [response, overviewResponse] = await Promise.all([
+      fetchCurrentDocument(path, requestEtag),
+      overviewRequest,
+    ]);
     if (generation !== routeGeneration) return;
+    if (overviewResponse && !overviewResponse.unchanged) {
+      latestOverview = overviewResponse.data;
+      latestOverviewEtag = overviewResponse.etag || null;
+      renderOverviewMetadata(latestOverview?.session || {}, latestOverview?.jobs || {});
+    }
     currentEtag = response.etag || null;
     if (!response.unchanged) {
+      const preserveViewport = currentDocument !== null;
       currentDocument = response.data;
-      if (currentRoute.kind === "overview") latestOverview = response.data;
-      renderCurrentDocument();
+      if (currentRoute.kind === "overview") {
+        latestOverview = response.data;
+        latestOverviewEtag = currentEtag;
+      } else if (currentRoute.kind === "serena" && response.data?.dashboard_jobs) {
+        renderOverviewMetadata(latestOverview?.session || {}, response.data.dashboard_jobs);
+      }
+      renderCurrentDocument({ preserveViewport });
     }
     setConnection("connected", "Connected");
   } catch (error) {
@@ -169,11 +222,17 @@ async function refresh() {
   }
 }
 
-function navigate(route, { replace = false } = {}) {
+function navigate(route, { replace = false, preserveOverviewDom = false } = {}) {
+  const openingPromotedSerenaPanel = Boolean(
+    route.kind === "serena"
+    && selectedSerenaPanel
+    && selectedSerenaRoot?.dataset.panelId === route.panelId
+  );
+
   currentRoute = { ...route, notificationTarget: null };
   routeGeneration += 1;
   currentDocument = null;
-  currentEtag = null;
+  currentEtag = currentRoute.kind === "overview" ? latestOverviewEtag : null;
   clearObjectUrls();
 
   const url = new URL(window.location.href);
@@ -186,11 +245,27 @@ function navigate(route, { replace = false } = {}) {
   if (currentRoute.kind === "serena") activeOverviewView = "serena";
   if (currentRoute.kind === "orchestrator") activeOverviewView = "orchestrator";
   applyActivityView();
-  renderLoadingRoute();
+
+  if (currentRoute.kind === "overview" && latestOverview) {
+    currentDocument = latestOverview;
+    if (!preserveOverviewDom) renderCurrentDocument();
+  } else if (!openingPromotedSerenaPanel) {
+    renderLoadingRoute();
+  }
   void refresh();
 }
 
 function returnToOverview() {
+  const panelId = currentRoute.kind === "serena" ? currentRoute.panelId : null;
+  const summary = latestOverview?.serena?.panels?.find(panel => panel.panel_id === panelId) || null;
+  if (panelId && summary && selectedSerenaPanel && selectedSerenaRoot?.dataset.panelId === panelId) {
+    selectedSerenaPanel.demote();
+    selectedSerenaPanel.render(activitySummarySnapshot(summary));
+    selectedSerenaPanel = null;
+    selectedSerenaRoot = null;
+    navigate({ kind: "overview" }, { preserveOverviewDom: true });
+    return;
+  }
   navigate({ kind: "overview" });
 }
 
@@ -199,22 +274,41 @@ function renderLoadingRoute() {
   visibleElapsedNodes = [];
   selectedSerenaPanel = null;
   selectedSerenaRoot = null;
-  const targetId = currentRoute.kind === "orchestrator" ? "orchestrator-widgets" : "serena-widgets";
-  const target = byId(targetId);
-  if (!target) return;
-  target.replaceChildren();
-  const loading = document.createElement("div");
-  loading.className = "empty-card";
-  loading.textContent = "Loading…";
-  target.append(loading);
+  const targetIds = currentRoute.kind === "overview"
+    ? ["serena-widgets", "orchestrator-widgets"]
+    : [currentRoute.kind === "orchestrator" ? "orchestrator-widgets" : "serena-widgets"];
+  for (const targetId of targetIds) {
+    const target = byId(targetId);
+    if (!target) continue;
+    target.replaceChildren();
+    const loading = document.createElement("div");
+    loading.className = "empty-card";
+    loading.textContent = "Loading…";
+    target.append(loading);
+  }
 }
 
-function renderCurrentDocument() {
+function restoreViewport(viewport) {
+  if (!viewport) return;
+  const generation = routeGeneration;
+  const restore = () => {
+    if (generation === routeGeneration) window.scrollTo(viewport.x, viewport.y);
+  };
+  restore();
+  requestAnimationFrame(() => {
+    restore();
+    requestAnimationFrame(restore);
+  });
+}
+
+function renderCurrentDocument({ preserveViewport = false } = {}) {
+  const viewport = preserveViewport ? { x: window.scrollX, y: window.scrollY } : null;
   clearObjectUrls();
   visibleElapsedNodes = [];
   if (currentRoute.kind === "serena") renderSelectedSerena(currentDocument);
   else if (currentRoute.kind === "orchestrator") renderSelectedOrchestrator(currentDocument);
   else renderOverview(currentDocument);
+  restoreViewport(viewport);
   startClock();
 }
 
@@ -227,19 +321,14 @@ function renderOverview(state) {
 }
 
 function renderOverviewMetadata(session, jobs) {
-  setText("languages", (session.languages || []).join(" · "), "None");
   setText("runtime-policy", session.runtime_policy, "ChatGPT");
   setText("version", session.serena_version, "—");
-  const activeTools = session.active_tools || [];
-  const memories = session.available_memories || [];
-  latestResources = { tools: activeTools, memories };
+  latestTools = session.active_tools || [];
   latestJobs = jobs || { jobs: [], running_jobs: 0, max_concurrent_jobs: 0 };
-  setText("tool-count", activeTools.length);
-  setText("memories-count", memories.length);
+  setText("tool-count", latestTools.length);
   setText("running-jobs-count", latestJobs.running_jobs || 0);
   setText("max-jobs-count", latestJobs.max_concurrent_jobs || 0);
-  byId("tools-button")?.setAttribute("aria-label", `${activeTools.length} active tools`);
-  byId("memories-button")?.setAttribute("aria-label", `${memories.length} memories`);
+  byId("tools-button")?.setAttribute("aria-label", `${latestTools.length} active tools`);
   byId("jobs-button")?.setAttribute("aria-label", `${latestJobs.running_jobs || 0} of ${latestJobs.max_concurrent_jobs || 0} Serena jobs running`);
   if (byId("jobs-dialog")?.open) renderRunningJobs();
 }
@@ -252,30 +341,89 @@ function activitySummarySnapshot(panel) {
   };
 }
 
+function openSerenaSummaryPanel(panel, root, summary) {
+  if (selectedSerenaPanel && selectedSerenaPanel !== panel) {
+    const previousPanelId = selectedSerenaRoot?.dataset.panelId || null;
+    const previousSummary = latestOverview?.serena?.panels?.find(item => item.panel_id === previousPanelId) || null;
+    selectedSerenaPanel.demote();
+    if (previousSummary) selectedSerenaPanel.render(activitySummarySnapshot(previousSummary));
+  }
+
+  selectedSerenaPanel = panel;
+  selectedSerenaRoot = root;
+  navigate({ kind: "serena", panelId: summary.panel_id, expandedEntryId: null });
+}
+
+function sessionDay(timestampSeconds) {
+  const seconds = Number(timestampSeconds);
+  if (!Number.isFinite(seconds)) return null;
+
+  const date = new Date(seconds * 1000);
+  if (!Number.isFinite(date.getTime())) return null;
+
+  return {
+    date,
+    key: `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`,
+  };
+}
+
+function sessionDayLabel(date) {
+  const day = date.getDate();
+  const mod100 = day % 100;
+  const suffix = mod100 >= 11 && mod100 <= 13
+    ? "th"
+    : ({ 1: "st", 2: "nd", 3: "rd" }[day % 10] || "th");
+  const weekday = date.toLocaleDateString("en-GB", { weekday: "long" });
+  const month = date.toLocaleDateString("en-GB", { month: "long" });
+  const year = date.getFullYear();
+  const yearSuffix = year === new Date().getFullYear() ? "" : ` ${year}`;
+
+  return `${weekday} ${day}${suffix} ${month}${yearSuffix}`;
+}
+
 function renderSerenaOverview(panels) {
   const container = byId("serena-widgets");
   if (!container) return;
   visibleActivityPanels = [];
+  selectedSerenaPanel = null;
+  selectedSerenaRoot = null;
   setText("serena-panel-count", panels.length, "0");
   setSectionDetail("serena", false);
 
   if (!panels.length) {
+    serenaOverviewSnapshots = new Map();
     container.replaceChildren(emptyCard("No Serena session activity recorded yet."));
     return;
   }
 
+  const nextSnapshots = new Map();
   const fragment = document.createDocumentFragment();
+  let previousDayKey = null;
   for (const summary of panels) {
+    const day = sessionDay(summary.started_at);
+    if (day && previousDayKey !== null && day.key !== previousDayKey) {
+      const separator = document.createElement("div");
+      separator.className = "session-day-separator";
+      separator.textContent = sessionDayLabel(day.date);
+      fragment.append(separator);
+    }
+    if (day) previousDayKey = day.key;
+
+    const snapshot = activitySummarySnapshot(summary);
     const root = document.createElement("div");
-    root.className = "dashboard-activity-card";
+    root.dataset.panelId = summary.panel_id;
     fragment.append(root);
-    const panel = new window.SerenaActivity.ActivityPanel(root, {
+    let panel = null;
+    panel = new window.SerenaActivity.ActivityPanel(root, {
       initialCollapsed: true,
       summaryMode: true,
-      onOpen: () => navigate({ kind: "serena", panelId: summary.panel_id, expandedEntryId: null }),
+      previousSnapshot: serenaOverviewSnapshots.get(summary.panel_id) || null,
+      onOpen: () => openSerenaSummaryPanel(panel, root, summary),
     });
-    panel.render(activitySummarySnapshot(summary));
+    panel.render(snapshot);
+    nextSnapshots.set(summary.panel_id, snapshot);
   }
+  serenaOverviewSnapshots = nextSnapshots;
   container.replaceChildren(fragment);
 }
 
@@ -288,31 +436,52 @@ function selectedBackButton(label) {
   return button;
 }
 
+function selectedSerenaPanelOptions() {
+  return {
+    onCollapse: returnToOverview,
+    onExpandedChange: entryId => {
+      currentRoute = { ...currentRoute, expandedEntryId: entryId || null };
+      routeGeneration += 1;
+      currentEtag = null;
+      void refresh();
+    },
+    loadMedia: loadDashboardMedia,
+  };
+}
+
 function renderSelectedSerena(snapshot) {
   const container = byId("serena-widgets");
   if (!container || !snapshot) return;
-  setSectionDetail("serena", true, snapshot.session_title || "Serena session");
-  setText("serena-panel-count", "1", "1");
+  const summaries = latestOverview?.serena?.panels || [];
+  setSectionDetail("serena", false);
+  setText("serena-panel-count", summaries.length || 1, "1");
   applyActivityView("serena");
 
-  if (!selectedSerenaRoot || !selectedSerenaPanel) {
-    container.replaceChildren();
-    container.append(selectedBackButton("All Serena sessions"));
-    selectedSerenaRoot = document.createElement("div");
-    container.append(selectedSerenaRoot);
+  if (!selectedSerenaRoot || !selectedSerenaPanel || selectedSerenaRoot.dataset.panelId !== currentRoute.panelId) {
+    const matchingRoot = Array.from(container.children).find(
+      child => child instanceof HTMLElement && child.dataset.panelId === currentRoute.panelId,
+    );
+    if (!matchingRoot && summaries.length) {
+      renderSerenaOverview(summaries);
+    }
+
+    selectedSerenaRoot = Array.from(container.children).find(
+      child => child instanceof HTMLElement && child.dataset.panelId === currentRoute.panelId,
+    ) || null;
+    if (!selectedSerenaRoot) {
+      selectedSerenaRoot = document.createElement("div");
+      selectedSerenaRoot.dataset.panelId = currentRoute.panelId;
+      container.append(selectedSerenaRoot);
+    }
+
     selectedSerenaPanel = new window.SerenaActivity.ActivityPanel(selectedSerenaRoot, {
       initialCollapsed: false,
       expandedEntryId: currentRoute.expandedEntryId,
-      onExpandedChange: entryId => {
-        currentRoute = { ...currentRoute, expandedEntryId: entryId || null };
-        routeGeneration += 1;
-        currentEtag = null;
-        void refresh();
-      },
-      loadMedia: loadDashboardMedia,
+      ...selectedSerenaPanelOptions(),
     });
   }
 
+  selectedSerenaPanel.promote(selectedSerenaPanelOptions());
   selectedSerenaPanel.setExpandedEntryId(currentRoute.expandedEntryId);
   selectedSerenaPanel.render(snapshot);
   visibleActivityPanels = [selectedSerenaPanel];
@@ -599,65 +768,25 @@ function setupJobsDialog() {
   });
 }
 
-function openResourceDialog(kind) {
+function openResourceDialog() {
   const dialog = byId("resource-dialog");
-  const title = byId("resource-dialog-title");
   const container = byId("resource-dialog-content");
-  if (!dialog || !title || !container) return;
-  const values = kind === "tools" ? latestResources.tools : latestResources.memories;
-  title.textContent = kind === "tools" ? "Active tools" : "Memories";
+  if (!dialog || !container) return;
   container.replaceChildren();
-  if (!values.length) container.append(emptyCard(kind === "tools" ? "No active tools." : "No memories."));
-  for (const value of values) {
-    const button = document.createElement(kind === "memories" ? "button" : "div");
-    if (kind === "memories") {
-      button.type = "button";
-      button.className = "resource-row resource-row-button";
-      button.addEventListener("click", () => {
-        dialog.close();
-        void openMemory(value);
-      });
-    } else {
-      button.className = "resource-row";
-    }
-    button.textContent = value;
-    container.append(button);
+  if (!latestTools.length) container.append(emptyCard("No active tools."));
+  for (const toolName of latestTools) {
+    const row = document.createElement("div");
+    row.className = "resource-row";
+    row.textContent = toolName;
+    container.append(row);
   }
   dialog.showModal();
 }
 
 function setupResourceDialog() {
   const dialog = byId("resource-dialog");
-  byId("tools-button")?.addEventListener("click", () => openResourceDialog("tools"));
-  byId("memories-button")?.addEventListener("click", () => openResourceDialog("memories"));
+  byId("tools-button")?.addEventListener("click", openResourceDialog);
   byId("resource-dialog-close")?.addEventListener("click", () => dialog?.close());
-  dialog?.addEventListener("click", event => {
-    if (event.target === dialog) dialog.close();
-  });
-}
-
-async function openMemory(name) {
-  const dialog = byId("memory-dialog");
-  const title = byId("memory-dialog-title");
-  const content = byId("memory-dialog-content");
-  if (!dialog || !title || !content) return;
-  title.textContent = name;
-  content.textContent = "Loading…";
-  dialog.showModal();
-  try {
-    const response = await fetch(`${API_PREFIX}/memory?name=${encodeURIComponent(name)}`, { cache: "no-cache" });
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-    const data = await response.json();
-    if (data.status === "error") throw new Error(data.message || "Could not read memory");
-    content.textContent = data.content || "";
-  } catch (error) {
-    content.textContent = error instanceof Error ? error.message : "Could not read memory";
-  }
-}
-
-function setupMemoryDialog() {
-  const dialog = byId("memory-dialog");
-  byId("memory-dialog-close")?.addEventListener("click", () => dialog?.close());
   dialog?.addEventListener("click", event => {
     if (event.target === dialog) dialog.close();
   });
@@ -735,7 +864,7 @@ async function setupPushNotifications() {
 function tickVisibleActivity() {
   const now = Date.now() / 1000;
   for (const panel of visibleActivityPanels) panel.tick(now);
-  for (const item of visibleElapsedNodes) item.node.textContent = window.SerenaActivity.formatDuration(now - item.startedAt);
+  for (const item of visibleElapsedNodes) item.node.textContent = window.SerenaActivity.formatLiveDuration(now - item.startedAt);
 }
 
 function startClock() {
@@ -765,18 +894,21 @@ function handlePopState() {
   currentEtag = null;
   if (route.kind === "serena") activeOverviewView = "serena";
   applyActivityView();
-  if (currentDocument) renderCurrentDocument();
-  else renderLoadingRoute();
+  if (currentDocument) {
+    renderCurrentDocument();
+  } else if (route.kind === "serena" && latestOverview) {
+    renderSerenaOverview(latestOverview?.serena?.panels || []);
+    applyActivityView("serena");
+  } else {
+    renderLoadingRoute();
+  }
   void refresh();
 }
 
 setupActivityViewTabs();
 setupJobsDialog();
 setupResourceDialog();
-setupMemoryDialog();
 void setupPushNotifications();
-byId("connection-state")?.setAttribute("data-state", "connected");
-setText("connection-label", "Connected", "Connected");
 applyActivityView();
 startClock();
 
@@ -784,10 +916,6 @@ document.addEventListener("visibilitychange", handleVisibilityChange, { passive:
 window.addEventListener("focus", () => scheduleRefresh(0), { passive: true });
 window.addEventListener("popstate", handlePopState, { passive: true });
 
-if (currentDocument) {
-  renderCurrentDocument();
-  scheduleRefresh();
-} else {
-  renderLoadingRoute();
-  void refresh();
-}
+renderLoadingRoute();
+void refresh();
+setupChangeStream();

@@ -318,9 +318,9 @@ def test_activity_run_refreshes_git_metrics_only_when_requested() -> None:
 
     cached = tracker.get_run("conversation-a", run["run_id"])
     assert source.refresh_calls == 1
-    assert cached["git_additions"] == 1
-    assert cached["git_deletions"] == 1
-    assert cached["git_ahead_commits"] == 1
+    assert cached["git_additions"] == 8
+    assert cached["git_deletions"] == 3
+    assert cached["git_ahead_commits"] == 4
 
     refreshed = tracker.get_run("conversation-a", run["run_id"], refresh_git_metrics=True)
     assert source.refresh_calls == 2

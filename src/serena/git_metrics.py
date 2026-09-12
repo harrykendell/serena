@@ -19,11 +19,7 @@ class GitLineMetrics:
 
 
 class GitMetricsSource(Protocol):
-    """Provides cached and explicitly refreshed Git line metrics for named Serena projects."""
-
-    def get_project_git_metrics(self, project_name: str) -> GitLineMetrics | None:
-        """Returns cached line metrics for ``project_name`` without performing Git work."""
-        ...
+    """Provides explicitly refreshed Git line metrics for named Serena projects."""
 
     def refresh_project_git_metrics(self, project_name: str) -> GitLineMetrics | None:
         """Recomputes and returns line metrics for ``project_name``."""

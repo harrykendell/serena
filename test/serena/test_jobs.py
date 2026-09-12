@@ -1,3 +1,4 @@
+import subprocess
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -6,6 +7,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from serena.errors import UserFacingError
+from serena.execution_store import ExecutionStore
+from serena.git_metrics import GitLineMetrics
 from serena.job_runner import run_job
 from serena.jobs import (
     DEFAULT_MAX_CONCURRENT_JOBS,
@@ -538,3 +541,45 @@ def test_runner_records_terminal_exit_status_and_consumes_command(tmp_path: Path
     assert finished.finished_at is not None
     assert notified == [finished]
     assert not command_file.exists()
+
+
+def test_runner_persists_final_git_snapshot_for_owning_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SERENA_HOME", str(tmp_path / "serena-home"))
+    monkeypatch.setattr(
+        "serena.push_notifications.WebPushNotifier.send_job_finished",
+        lambda self, record: True,
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "serena@example.invalid"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.name", "Serena Test"], cwd=project, check=True)
+    tracked = project / "tracked.txt"
+    tracked.write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=project, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=project, check=True, capture_output=True)
+
+    jobs = JobStore(tmp_path / "jobs")
+    job_id = "1123456789abcdef0123456789abcdef"
+    record = JobRecord(
+        job_id=job_id,
+        unit_name=f"serena-job-{job_id}.service",
+        project_root=str(project),
+        cwd=str(project),
+        status=JobStatus.RUNNING,
+        created_at="2026-08-28T18:00:00+00:00",
+        session_id="chat-a",
+        project_name="serena",
+        label="Git snapshot runner test",
+    )
+    jobs.create(record)
+    command_file = jobs.create_command_file(job_id, "printf 'two\\n' >> tracked.txt")
+
+    assert run_job(jobs.state_file(job_id), command_file) == 0
+
+    session = ExecutionStore().get_session_by_panel_id(ExecutionStore.panel_id_for_session("chat-a"))
+    assert session is not None
+    assert session.git_metrics == GitLineMetrics(additions=1, deletions=0, ahead_commits=None)

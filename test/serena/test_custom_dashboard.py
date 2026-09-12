@@ -1,5 +1,4 @@
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,7 +10,6 @@ from serena.dashboard import DashboardServer
 from serena.execution_store import ExecutionStore
 from serena.git_metrics import GitLineMetrics
 from serena.jobs import JobManager
-from solidlsp.ls_config import LanguageServerId
 
 
 class _DashboardAgent:
@@ -28,13 +26,7 @@ class _DashboardAgent:
     def get_active_project(self):
         return self.project
 
-    def get_default_project(self):
-        return self.project
-
     def get_active_tool_names(self):
-        return []
-
-    def get_exposed_tool_instances(self):
         return []
 
     @staticmethod
@@ -93,7 +85,6 @@ def test_dashboard_serves_shell_overview_and_selected_session(tmp_path: Path, mo
     assert b"Serena + Orchestrator" in response.data
     assert b"notification-button" in response.data
     assert b'id="jobs-button"' in response.data
-    assert b"dashboard-bootstrap" in response.data
     assert b"serena-widgets" in response.data
     assert b"orchestrator-widgets" in response.data
     assert state["session"]["runtime_policy"] == "ChatGPT"
@@ -102,6 +93,12 @@ def test_dashboard_serves_shell_overview_and_selected_session(tmp_path: Path, mo
     assert len(state["serena"]["panels"]) == 1
     assert selected["panel_id"] == panel_id
     assert [call["call_id"] for call in selected["calls"]] == ["execution-a"]
+    assert selected["dashboard_jobs"] == {
+        "status": "success",
+        "jobs": [],
+        "running_jobs": 0,
+        "max_concurrent_jobs": 12,
+    }
 
 
 def test_job_notification_link_redirects_to_originating_panel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -212,6 +209,32 @@ def test_dashboard_revalidates_unchanged_selected_session_before_building_docume
     assert second.data == b""
 
 
+def test_dashboard_event_stream_invalidates_after_visible_state_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_roots(tmp_path, monkeypatch)
+    agent = _DashboardAgent()
+    _one_execution(agent)
+    dashboard = DashboardServer(agent=agent)
+    client = dashboard._app.test_client()
+
+    response = client.get("/dashboard/api/events", buffered=False)
+    chunks = iter(response.response)
+    assert response.status_code == 200
+    assert response.content_type == "text/event-stream; charset=utf-8"
+    assert response.headers["Cache-Control"] == "private, no-cache"
+    assert next(chunks) == b"retry: 1000\n\n"
+
+    agent.execution_store.start_execution(
+        execution_id="execution-live",
+        session_id="session-a",
+        project_name="serena",
+        tool_name="read_file",
+        arguments={"relative_path": "live.txt"},
+    )
+
+    assert next(chunks) == b"event: invalidate\ndata: 1\n\n"
+    response.close()
+
+
 def test_dashboard_overview_is_compact_and_selected_session_is_complete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_roots(tmp_path, monkeypatch)
     agent = _DashboardAgent()
@@ -226,6 +249,10 @@ def test_dashboard_overview_is_compact_and_selected_session_is_complete(tmp_path
             started_at=float(task),
         )
         agent.execution_store.finish_execution(execution_id, succeeded=True, result=f"file {task}")
+    agent.execution_store.update_session_git_metrics(
+        "session-a",
+        GitLineMetrics(additions=17, deletions=4, ahead_commits=3),
+    )
     dashboard = DashboardServer(agent=agent)
     client = dashboard._app.test_client()
 
@@ -520,34 +547,3 @@ def test_retained_serena_session_serves_rendered_media(tmp_path: Path, monkeypat
     assert response.status_code == 200
     assert response.content_type == "image/png"
     assert response.data == image_bytes
-
-
-def test_custom_dashboard_uses_default_project_and_dynamic_languages() -> None:
-    memory_manager = SimpleNamespace(list_memories=lambda: SimpleNamespace(get_full_list=list))
-    project = SimpleNamespace(
-        project_name="project-a",
-        project_root="/tmp/project-a",
-        memory_manager=memory_manager,
-        get_language_server_candidates=lambda: [LanguageServerId.PYTHON, LanguageServerId.HTML],
-    )
-    dashboard = DashboardServer(agent=_DashboardAgent(project))
-
-    session = dashboard._app.test_client().get("/dashboard/api/state").get_json()["session"]
-
-    assert session["languages"] == ["python", "html"]
-
-
-def test_memory_endpoint_reads_active_project_memory() -> None:
-    memory_manager = MagicMock()
-    memory_manager.load_memory.return_value = "# Critical info\n\nMemory body"
-    project = SimpleNamespace(memory_manager=memory_manager)
-    dashboard = DashboardServer(agent=_DashboardAgent(project))
-
-    response = dashboard._app.test_client().get("/dashboard/api/memory?name=critical_info").get_json()
-
-    assert response == {
-        "status": "success",
-        "memory_name": "critical_info",
-        "content": "# Critical info\n\nMemory body",
-    }
-    memory_manager.load_memory.assert_called_once_with("critical_info")

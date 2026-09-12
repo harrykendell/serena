@@ -150,6 +150,14 @@ Results:
 
 The deployed `orchestrator-mcp.service` and `serena-mcp.service` were restarted after migration cleanup. Before restart the persisted stores contained 42 sessions, 7,608 executions, 123 activity runs and 224 jobs with one running job. After restart they contained the same 42 sessions, 123 activity runs and 224 jobs; executions had advanced to 7,614 solely from the verification tool calls. The dashboard returned the same 42 Serena panels, two Orchestrator panels and one running job. Both SQLite databases returned `ok` from `PRAGMA integrity_check`.
 
+### Final browser startup correction
+
+Final iOS verification exposed a startup-only regression: retained dashboard items could remain absent until a later activity update. The earlier `content-visibility` hypothesis was disproved and that performance optimisation remains enabled. Instead, the dashboard now has one data path from its first render onward: the HTML response is a lightweight shell, startup immediately fetches the current `/state` or selected-session document with cache bypass, and later polls revalidate that same route with its ETag. This removes the separate embedded-overview bootstrap representation and its browser-sensitive synchronous render path. The dependency-free browser smoke now verifies immediate overview and direct selected-session startup as well as the existing one-poller, notification, detail and cadence invariants.
+
+### Final inline session expansion tweak
+
+The Serena dashboard now expands the selected retained session in place instead of replacing the entire retained-session list. The selected card is upgraded to the full activity renderer while every sibling summary remains visible; collapsing the selected header returns that card to summary mode. Periodic request cost is unchanged: overview mode polls only `/state`, selected-session mode polls only that session document, and a direct selected-session/deep-link startup fetches `/state` once in parallel only when no overview is already cached so the sibling summaries can be reconstructed. The browser smoke covers three retained sessions, sibling preservation during activity-detail expansion, collapse back to overview, and direct selected-session startup.
+
 ## Final audit
 
 The final source audit found no retained Serena dashboard compatibility adapter, iframe/window-openai emulation, duplicate `structured_arguments` renderer field or browser delta/hydration protocol. Canonical execution/job facts remain in independent SQLite stores, canonical Orchestrator delegate facts remain in Orchestrator's independent store, and the Orchestrator SQLite dashboard index is explicitly rebuildable derived state.

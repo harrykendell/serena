@@ -57,7 +57,7 @@ The principal invariant is:
 
 A second invariant protects dashboard scale:
 
-> **The dashboard has one current server document and one periodic request.** Overview mode returns all compact session summaries in one request; selected-session mode replaces that poll with one complete session document. Neither mode may issue per-session polling, decode unrelated historical results, collect terminal-job telemetry globally or run Git probes once per panel.
+> **The dashboard has one current server document and one live invalidation stream.** Overview mode returns all compact session summaries in one request; selected-session mode replaces that document with one complete session snapshot. The shared SSE connection carries invalidations only, causing at most one coalesced current-route GET; neither mode may issue per-session polling/streams, decode unrelated historical results, collect terminal-job telemetry globally or run Git probes once per panel.
 
 ## 2. Why a rebuild is preferable to further refactoring
 
@@ -100,14 +100,14 @@ The rebuild must preserve the useful observable behaviour rather than the curren
 Keep:
 
 - one compact activity panel per `show_activity` run;
-- Serena logo and compact current/recent activity summary;
+- Serena logo and a compact steady summary of tool/job counts plus Git state, with a brief label/detail flash whenever genuinely new tool/job activity appears; expansion or historical hydration must not trigger that flash;
 - session title where currently available;
 - tool name, useful semantic detail and scope;
 - running/completed/failed/cancelled/waiting state;
 - submitted time and elapsed/runtime display;
 - tool count and relevant job count;
 - time between first and latest submitted tool;
-- current Git additions/deletions and commits ahead of origin;
+- the session-owned Git additions/deletions and commits-ahead snapshot, refreshed when that session starts a panel or mutates repository state and otherwise left unchanged;
 - current-turn durable jobs represented as activity entries without duplicating the corresponding `start_job` tool row;
 - compact indication of other running Serena jobs;
 - collapse/expand;
@@ -130,8 +130,8 @@ Keep:
 - desktop and mobile Serena/Orchestrator views;
 - active/inactive state and concise panel summaries;
 - fast first paint from one compact overview document containing all retained session summaries, with no per-session hydration;
-- one fully opened Serena session at a time, with expandable activity history and one entry detail at a time;
-- current Git metrics for Serena sessions;
+- one fully opened Serena session at a time, expanded in place among the retained session summaries so opening it never removes the other sessions, with expandable activity history and one entry detail at a time;
+- retained session-owned Git metrics for Serena sessions, so completed sessions do not drift with later repository changes;
 - top-level `jobs n/N` control with a running-jobs view;
 - tools, memories, languages, runtime and version metadata that remain useful operationally;
 - PWA installability;
@@ -276,7 +276,7 @@ The overview document returns **all retained session summaries in one response**
 - created/last-activity timestamps and active state;
 - lightweight tool/job counts where useful;
 - latest tool/job name/status where cheap;
-- cached Git metrics for the represented project;
+- the persisted Git snapshot owned by that retained session;
 - no argument bodies, results, media bodies, job journals or terminal-job telemetry.
 
 Hundreds of such records are expected to be cheap to serialize, transfer and rebuild as ordinary DOM. Keep a 10/100/1,000-session benchmark as the guardrail. If the 1,000-session case exposes a problem, first reduce summary size, eliminate hidden backend work or improve in-place rendering; do not solve it by silently limiting or paging retained sessions out of the overview.
@@ -291,7 +291,7 @@ O(number of retained session summaries + currently running jobs)
 
 with a very small constant, rather than scanning/parsing all retained executions/results. This is acceptable for hundreds of sessions and intentionally simpler than maintaining a browser paging protocol.
 
-Git state must not make overview polling expensive. `/state` reads the already-maintained `GitMetricsSource.get_project_git_metrics(...)` cache and performs **no Git subprocesses**. The same cached project value is reused for every matching summary.
+Git state must not make overview polling expensive or rewrite history. Each session persists the latest Git snapshot produced by activity owned by that session. `/state` reads those integers directly from the compact session rows and performs **no Git subprocesses** or project-cache lookups. Starting a new inline panel explicitly refreshes and stores that session's snapshot; tools classified as repository writes refresh and persist the owning session's snapshot after the mutation. Ordinary activity/dashboard polling never refreshes Git, so completed sessions remain frozen even when another session later changes the same repository.
 
 Running-job metadata should likewise come from a cheap running-job index/query. `/state` must not reconcile every retained terminal job or collect terminal-job telemetry simply to show the overview.
 
@@ -299,7 +299,7 @@ Running-job metadata should likewise come from a cheap running-job index/query. 
 
 Opening a Serena session fetches one complete renderer-facing session snapshot. It contains all lightweight activity rows required to rebuild that session UI in one pass. The browser does not merge deltas, hydrate neighbouring sessions or reconstruct state from several endpoints.
 
-Keep potentially bulky detail scoped to the one expanded entry. Pass its identifier as an optional query parameter on the same session request and return that entry's structured arguments, canonical presented result/error, media metadata or bounded live job output alongside the session snapshot. This preserves the **one periodic request** invariant even when a call/job detail is open. Media/file bytes and retained full-output resources remain separate resource requests only when the user explicitly opens them.
+Keep potentially bulky detail scoped to the one expanded entry. Pass its identifier as an optional query parameter on the same session request and return that entry's structured arguments, canonical presented result/error, media metadata or bounded live job output alongside the session snapshot. This preserves the **one current-route document request** invariant even when a call/job detail is open; SSE remains an invalidation-only side channel rather than a second state source. Media/file bytes and retained full-output resources remain separate resource requests only when the user explicitly opens them.
 
 A session response should therefore resemble a small manifest: complete panel state plus references/bounded detail, not every historical file/output body embedded inline.
 
@@ -413,25 +413,25 @@ For each poll, request exactly the document corresponding to the current route. 
 
 Do not incrementally merge activity rows, maintain per-panel dirty/revision state, hydrate individual collapsed sessions, or reconcile several independently fetched panel models. Rebuilding the overview list or the one selected panel from canonical data is the default; introduce finer DOM reconciliation only if profiling shows the simple rebuild is materially inadequate.
 
-The scheduler must coalesce triggers and never overlap requests. Do not retain the current 500 ms dashboard-wide poll merely to animate elapsed time; the local clock handles that. Start around **2 s while the current document contains active work, 10 s when idle and visible, and 60 s while hidden**, with immediate refresh on focus/navigation/user actions. These are simple constants, not separate polling state machines.
+The scheduler must coalesce triggers and never overlap requests. Do not retain a fast dashboard-wide poll merely to animate elapsed time; the local clock handles that. The browser opens one long-lived `/dashboard/api/events` SSE connection whose messages are invalidations only: on an invalidation it immediately re-fetches the one canonical document for the current route and rebuilds from that complete snapshot. While the stream is healthy, keep only a slow 60 s safety revalidation. If SSE is unavailable or disconnected, fall back to the simple **2 s while active/selected, 10 s when idle and visible, and 60 s while hidden** polling policy. Focus/navigation/user actions still trigger immediate refreshes.
 
-The request budget is therefore:
+The healthy-stream request budget is therefore:
 
 ```text
-overview visible
-    1 × /state per poll
+browser
+    1 × long-lived /events connection
 
-one Serena session visible
-    1 × /serena/sessions/<id>?expanded=<entry?> per poll
+renderer-visible state changes
+    1 × current-route document GET per coalesced invalidation
 
-one Orchestrator session visible
-    1 × /orchestrator/sessions/<id>?expanded=<delegate?> per poll
+60 s safety revalidation
+    1 × current-route document GET
 
 media / retained output / explicit actions
     additional requests only when the user asks for them
 ```
 
-There is never `1 + N` polling for N sessions. A dashboard with hundreds of retained sessions still has one periodic request and one periodic render decision.
+The event stream never carries activity state or deltas and never creates one subscription per session. There is therefore still no `1 + N` polling or streaming fan-out for N sessions. A dashboard with hundreds of retained sessions has one live invalidation stream and at most one current-route fetch in flight. When a direct Serena deep link starts without a cached overview, fetch `/state` once in parallel with the selected-session document so sibling summaries can still be rendered; subsequent updates remain selected-route-only.
 
 For efficient unchanged polls, prefer a cheap server-side generation/ETag tied to the current document rather than hashing/materialising a large response on every request. The overview generation changes only when summary-visible facts change; each selected-session generation changes only when that session's renderer-visible facts change. These generations are transport/cache metadata over canonical state, not a browser-side semantic revision protocol. If a running expanded job's bounded output changes, that selected-session document naturally changes as well.
 
@@ -486,9 +486,9 @@ POST /dashboard/api/push/subscribe
 GET /dashboard/job/<job_id>
 ```
 
-`/state` returns the complete compact overview document for the dashboard: dashboard metadata, running/max job counts, all retained Serena session summaries and all retained Orchestrator session summaries. It is the only periodic request while the overview route is visible.
+`/state` returns the complete compact overview document for the dashboard: dashboard metadata, running/max job counts, all retained Serena session summaries and all retained Orchestrator session summaries. While the overview route is visible it is re-fetched only on a coalesced live invalidation, explicit refresh trigger or slow safety revalidation.
 
-A selected Serena/Orchestrator route polls only its corresponding session document. The selected-session response contains the complete lightweight renderer snapshot and, when `expanded` is supplied, the bounded detail needed for that one expanded row/delegate. Do not expose separate polling endpoints for panel summaries, call details or job details unless a later measured requirement proves the single-document contract inadequate.
+A selected Serena/Orchestrator route similarly fetches only its corresponding session document when invalidated. The selected-session response contains the complete lightweight renderer snapshot and, when `expanded` is supplied, the bounded detail needed for that one expanded row/delegate. Do not expose separate polling endpoints for panel summaries, call details or job details unless a later measured requirement proves the single-document contract inadequate.
 
 Use conditional requests if they are cheap: the server should be able to decide that a document is unchanged from a lightweight generation/last-change marker before serialising the complete body. Avoid body hashing, browser delta protocols, partial-response merging or per-panel revision bookkeeping.
 
@@ -686,7 +686,7 @@ Complete the backend simplification as one coherent change:
 - implement one complete compact overview projection plus `for_run(...)` and one complete selected-session snapshot projection with optional expanded-entry detail;
 - order the overview active-first then by recency and keep each summary deliberately small enough that hundreds can be returned in one document;
 - provide a narrow JobManager metadata path if `/state` would otherwise reconcile/collect telemetry for retained terminal jobs;
-- make `/state` consume cached Git metrics only, with no Git subprocesses during ordinary dashboard refresh;
+- make `/state` consume persisted session-owned Git snapshots only, with no Git subprocesses or project-cache reads during ordinary dashboard refresh;
 - resolve `job_id -> session_id -> panel_id` directly from canonical ownership.
 
 Scale tests at this checkpoint must demonstrate structurally that discovery does not call a full-session expansion once per panel, does not decode historical result bodies, does not collect terminal-job telemetry globally, and executes no Git subprocesses during ordinary `/state` construction.
@@ -780,7 +780,7 @@ Run the scale fixture again and require:
 - at the starting policy, ordinary polling is no faster than roughly one request per 2 s while active, one per 10 s while idle and one per 60 s while hidden, with refresh triggers coalesced rather than queued into bursts;
 - `/state` latency, serialized size and DOM rebuild time remain acceptable at 1,000 summaries; if not, optimise the compact summary/query/render path rather than capping or paging the overview;
 - historical result size/content does not materially affect `/state` payload construction;
-- ordinary `/state` performs no Git subprocesses and reuses cached metrics per project;
+- ordinary `/state` performs no Git subprocesses or Git cache lookups and reads each session's persisted Git snapshot directly;
 - global discovery does not collect terminal-job runtime telemetry;
 - opening a Serena session switches from overview polling to one session-document poll rather than adding another periodic request;
 - expanding one entry keeps the same one session-document poll by including `expanded=<entry_id>`;
@@ -966,13 +966,14 @@ Before declaring the programme complete, manually verify at least:
 | ChatGPT inline | superseded terminal panel | panel retires correctly |
 | Persistence | 10,000 retained executions | starting/finishing one new execution updates only local SQLite rows and remains approximately history-independent |
 | Persistence | migrated retained state then restart | all sessions, executions, runs, jobs and retained resource links survive the JSON-to-SQLite cutover with no dual-store ambiguity |
-| Dashboard desktop | retained sessions | one compact overview document renders all retained session summaries and one session opens directly |
+| Dashboard desktop | retained sessions | one compact overview document renders all retained session summaries; opening one session expands that card in place while every other session remains visible |
+| Dashboard | initial load/reload | the shell immediately fetches the current route document (`/state` or one selected session) and renders it; no embedded alternate overview snapshot or later tool/job update is required to make retained items appear |
 | Dashboard mobile | Serena/Orchestrator tabs | correct responsive tab behaviour |
 | Dashboard scale | 1,000 retained sessions with activity runs | initial render uses one `/state` request, overview construction remains approximately linear, and there is no per-session hydration |
 | Dashboard scale | periodic refresh with 10 vs 1,000 sessions | browser request count remains exactly one per poll |
 | Dashboard scale | unchanged overview/selected session | conditional request is rejected from a cheap route revision before full snapshot construction/JSON serialization |
 | Dashboard scale | active/idle/hidden scheduler | roughly 2 s / 10 s / 60 s cadence, no overlapping requests or catch-up bursts |
-| Dashboard scale | sessions with Git metadata | ordinary `/state` reads cached metrics and runs no Git subprocesses |
+| Dashboard scale | sessions with Git metadata | ordinary `/state` reads persisted session snapshots, runs no Git subprocesses/cache lookups, and later work in the same project does not alter completed-session values |
 | Dashboard scale | 5,000 terminal jobs and no running jobs | running-job discovery remains an indexed lightweight query and does not decode the terminal-job catalogue |
 | Dashboard scale | 2,048-call selected session | initial rendering is bounded/acceptable and expanding one row does not rebuild thousands of unrelated rows |
 | Dashboard | open session | overview polling stops and exactly one selected-session document becomes the polling source |
@@ -1002,7 +1003,7 @@ uv run poe test
 
 During implementation, run focused affected tests at each checkpoint, then the normal full standard suite at the final cutover.
 
-Most coverage should remain backend/read-model behavioural tests and small protocol tests. Add scale-focused tests with instrumented fake collaborators so the architectural constraints are deterministic rather than timing-only: assert one overview request regardless of session count, no per-session full-history query, no historical-result decoding during overview construction, no terminal-job telemetry sweep and cached Git lookup reuse by project.
+Most coverage should remain backend/read-model behavioural tests and small protocol tests. Add scale-focused tests with instrumented fake collaborators so the architectural constraints are deterministic rather than timing-only: assert one overview request regardless of session count, no per-session full-history query, no historical-result decoding during overview construction, no terminal-job telemetry sweep, no Git lookup during overview construction, and session-owned Git snapshots that do not drift when another session changes the same project.
 
 Also keep a deliberately small browser smoke layer because several important regressions are properties of live DOM/state behaviour rather than backend data:
 
@@ -1040,7 +1041,7 @@ The finished implementation should satisfy all of the following:
 15. at most one Serena dashboard session is fully opened at a time and at most one entry detail is expanded in it;
 16. an expanded entry is included in the selected-session document so live detail does not create a second periodic request;
 17. no per-panel timers, polling loops, observers, iframe runtimes, paging state or hidden hydration requests;
-18. ordinary dashboard overview construction performs no Git subprocesses, reuses cached metrics by project and does not globally collect terminal-job runtime telemetry;
+18. ordinary dashboard overview construction performs no Git subprocesses or Git-cache lookups, reads persisted session-owned Git snapshots directly and does not globally collect terminal-job runtime telemetry;
 19. historical result/argument/media bodies do not participate in overview construction; selected-session responses include only the bounded detail needed for the one expanded entry;
 20. CSS, rather than JavaScript, owns ordinary sizing/scrolling/responsive layout;
 21. no browser-side semantic parsing of persisted Python parameter representations and no dashboard-specific result truncation/compaction;
@@ -1059,7 +1060,7 @@ Post-U03 measurements have triggered exactly one formerly deferred area: large s
 
 Continue to defer:
 
-- SSE/WebSocket activity streaming;
+- bidirectional WebSocket transport or state-bearing stream messages beyond the implemented one-way SSE invalidation channel;
 - a frontend framework;
 - a bundler/transpiler;
 - server-side list/session pagination;
@@ -1084,9 +1085,9 @@ This programme is complete when:
 - the dashboard contains no activity iframe, fake MCP runtime, duplicated preview, delta merge or resize/scroll-reconciliation machinery;
 - `dashboard_widgets.py` and widget-serving routes are gone;
 - overview mode polls exactly one `/state` document containing all compact retained Serena/Orchestrator summaries with no per-session hydration;
-- selected-session mode stops overview polling and polls exactly one complete session document, including the one expanded entry detail when applicable;
-- a 1,000-session retained history still uses one overview request per poll, returns every retained summary, and remains within the measured acceptable payload/latency/DOM-rebuild budget without entry caps or paging;
-- one dashboard scheduler owns whichever route document is current, and one shared clock owns elapsed-time updates;
+- selected-session mode stops overview fetching and re-fetches exactly one complete session document per live invalidation, including the one expanded entry detail when applicable;
+- a 1,000-session retained history still uses one shared invalidation stream and at most one current-route request per coalesced update, returns every retained summary, and remains within the measured acceptable payload/latency/DOM-rebuild budget without entry caps or paging;
+- one dashboard scheduler owns whichever route document is current, one shared SSE stream supplies invalidations, and one shared clock owns elapsed-time updates;
 - overview construction never serializes/decodes complete historical results merely to list sessions and never fetches terminal-job runtime telemetry globally;
 - job deep links resolve through canonical job/session ownership and notification targets are consumed once;
 - canonical model/dashboard result semantics remain aligned with the central result-presentation architecture;
@@ -1100,4 +1101,4 @@ This programme is complete when:
 - deterministic scale tests and the small browser-state smoke matrix cover the performance/request-count invariants as observable behaviour;
 - standard format/type/test and browser-smoke checks pass for the implementation;
 - the final diff has been audited for old compatibility concepts and accidental transitional layers;
-- final LOC/payload/request/scale measurements demonstrate that the rebuilt UI is materially smaller, uses one periodic request for the current route, and pays only the small linear cost of compact overview summaries rather than history/body-sized or per-session request costs.
+- final LOC/payload/request/scale measurements demonstrate that the rebuilt UI is materially smaller, uses one shared invalidation stream plus at most one current-route request per coalesced update, and pays only the small linear cost of compact overview summaries rather than history/body-sized or per-session request costs.

@@ -1,3 +1,4 @@
+import sqlite3
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -5,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from serena.execution_store import ExecutionStore
+from serena.git_metrics import GitLineMetrics
 from serena.retention import JobRetentionState, SessionRetentionPolicy
 
 
@@ -49,6 +51,43 @@ def test_execution_store_survives_restart_and_pins_file_snapshots(tmp_path: Path
     }
     assert restored.retained_file_tokens() == {token}
     assert ExecutionStore.retained_file_tokens_from_disk() == {token}
+
+
+def test_execution_store_upgrades_session_git_snapshot_columns(tmp_path: Path) -> None:
+    root = tmp_path / "execution-store"
+    root.mkdir()
+    database = sqlite3.connect(root / "state.sqlite3")
+    database.execute(
+        """
+        CREATE TABLE sessions (
+            session_id TEXT PRIMARY KEY,
+            panel_id TEXT NOT NULL UNIQUE,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            display_name TEXT NOT NULL DEFAULT '',
+            project_name TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    database.execute(
+        "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)",
+        ("chat-a", ExecutionStore.panel_id_for_session("chat-a"), 1.0, 1.0, "Chat A", "serena"),
+    )
+    database.execute("PRAGMA user_version=1")
+    database.commit()
+    database.close()
+
+    store = ExecutionStore(root)
+    session = store.get_session_by_panel_id(ExecutionStore.panel_id_for_session("chat-a"))
+    assert session is not None
+    assert session.git_metrics == GitLineMetrics()
+
+    expected = GitLineMetrics(additions=9, deletions=2, ahead_commits=4)
+    store.update_session_git_metrics("chat-a", expected)
+    restarted = ExecutionStore(root)
+    migrated = restarted.get_session_by_panel_id(ExecutionStore.panel_id_for_session("chat-a"))
+    assert migrated is not None
+    assert migrated.git_metrics == expected
 
 
 def test_execution_store_persists_operator_conversation_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

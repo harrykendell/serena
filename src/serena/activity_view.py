@@ -226,6 +226,7 @@ class ActivityJobSummary:
     finished_at: float | None
     current_turn: bool
     session_id: str | None
+    panel_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -318,6 +319,14 @@ class ActivitySessionSummary:
 
 
 @dataclass(frozen=True)
+class ActivityRunningJobs:
+    """Compact global durable-job metadata for dashboard chrome."""
+
+    running_jobs: tuple[ActivityJobSummary, ...]
+    max_concurrent_jobs: int
+
+
+@dataclass(frozen=True)
 class ActivityOverview:
     """Complete compact retained-session overview document."""
 
@@ -342,19 +351,15 @@ class ActivityView:
 
     def dashboard_overview(self) -> ActivityOverview:
         """Returns every retained session as one compact active-first overview document."""
-        running_records = self._list_running_jobs_safely()
-        running_jobs = tuple(self._job_summary(record, current_turn=False) for record in running_records)
+        job_overview = self.dashboard_jobs()
+        running_jobs = job_overview.running_jobs
         running_by_session: dict[str, list[ActivityJobSummary]] = {}
         for job in running_jobs:
             if job.session_id:
                 running_by_session.setdefault(job.session_id, []).append(job)
 
-        git_by_project: dict[str, GitLineMetrics] = {}
         sessions: list[ActivitySessionSummary] = []
         for summary in self._execution_store.list_session_execution_summaries():
-            if summary.project_name not in git_by_project:
-                git_by_project[summary.project_name] = self._git_metrics(summary.project_name)
-            git_metrics = git_by_project[summary.project_name]
             latest_call = self._entry_summary(summary.latest_execution) if summary.latest_execution is not None else None
             calls = (latest_call,) if latest_call is not None else ()
             sessions.append(
@@ -370,12 +375,20 @@ class ActivityView:
                     job_count=summary.durable_job_count,
                     latest_activity=self._latest_activity(calls, running_by_session.get(summary.session_id, ())),
                     submission_span_seconds=self._submission_span(summary),
-                    git_metrics=git_metrics,
+                    git_metrics=summary.git_metrics,
                 )
             )
         sessions.sort(key=lambda item: (not item.active, -item.updated_at, item.panel_id))
         return ActivityOverview(
             sessions=tuple(sessions),
+            running_jobs=running_jobs,
+            max_concurrent_jobs=job_overview.max_concurrent_jobs,
+        )
+
+    def dashboard_jobs(self) -> ActivityRunningJobs:
+        """Returns current global durable-job metadata without scanning retained sessions."""
+        running_jobs = tuple(self._job_summary(record, current_turn=False) for record in self._list_running_jobs_safely())
+        return ActivityRunningJobs(
             running_jobs=running_jobs,
             max_concurrent_jobs=self._job_source.max_concurrent_jobs,
         )
@@ -402,6 +415,10 @@ class ActivityView:
         )
         known_job_labels = self._job_labels(records)
         calls = tuple(self._entry_summary(record, known_job_labels=known_job_labels) for record in records)
+        git_metrics = session.git_metrics if session is not None else GitLineMetrics()
+        if refresh_git_metrics:
+            git_metrics = self._refresh_git_metrics(run.project_name)
+            self._execution_store.update_session_git_metrics(session_id, git_metrics)
         return ActivitySnapshot(
             session_id=session_id,
             panel_id=self._execution_store.panel_id_for_session(session_id),
@@ -413,7 +430,7 @@ class ActivityView:
             superseded=run.superseded,
             submission_span_seconds=self._submission_span_records(records),
             latest_activity=self._latest_activity(calls, jobs),
-            git_metrics=self._git_metrics(run.project_name, refresh=refresh_git_metrics),
+            git_metrics=git_metrics,
             calls=calls,
             jobs=jobs,
         )
@@ -460,7 +477,7 @@ class ActivityView:
             superseded=False,
             submission_span_seconds=self._submission_span_records(records),
             latest_activity=self._latest_activity(calls, jobs),
-            git_metrics=self._git_metrics(session.project_name),
+            git_metrics=session.git_metrics,
             calls=calls,
             jobs=jobs,
             expanded_call=expanded_call,
@@ -636,19 +653,13 @@ class ActivityView:
         except (OSError, RuntimeError, ValueError):
             return []
 
-    def _git_metrics(self, project_name: str, *, refresh: bool = False) -> GitLineMetrics:
-        """Returns cached Git metrics unless an explicit inline refresh was requested."""
+    def _refresh_git_metrics(self, project_name: str) -> GitLineMetrics:
+        """Recomputes Git metrics for one project when a session explicitly requests a snapshot."""
         if self._git_metrics_source is None or not project_name:
             return GitLineMetrics()
-        metrics = (
-            self._git_metrics_source.refresh_project_git_metrics(project_name)
-            if refresh
-            else self._git_metrics_source.get_project_git_metrics(project_name)
-        )
-        return metrics or GitLineMetrics()
+        return self._git_metrics_source.refresh_project_git_metrics(project_name) or GitLineMetrics()
 
-    @staticmethod
-    def _job_summary(record: JobRecord, *, current_turn: bool) -> ActivityJobSummary:
+    def _job_summary(self, record: JobRecord, *, current_turn: bool) -> ActivityJobSummary:
         """Projects lightweight durable-job metadata into a renderer row."""
         return ActivityJobSummary(
             job_id=record.job_id,
@@ -659,6 +670,7 @@ class ActivityView:
             finished_at=datetime.fromisoformat(record.finished_at).timestamp() if record.finished_at else None,
             current_turn=current_turn,
             session_id=record.session_id,
+            panel_id=self._execution_store.panel_id_for_session(record.session_id) if record.session_id else None,
         )
 
     @staticmethod
@@ -672,9 +684,11 @@ class ActivityView:
         if latest_call is None and latest_job is None:
             return None
         if latest_job is not None and (latest_call is None or latest_job.started_at > latest_call.started_at):
+            origin = next((call for call in calls if call.job_id == latest_job.job_id), None)
+            detail = (origin.scope if origin is not None else "") or latest_job.project or "durable job"
             return ActivityLatestSummary(
                 label=latest_job.label or "Job",
-                detail="durable job",
+                detail=detail,
                 scope=latest_job.project,
                 status=latest_job.status,
                 started_at=latest_job.started_at,

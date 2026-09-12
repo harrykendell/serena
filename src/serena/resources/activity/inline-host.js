@@ -11,6 +11,8 @@
   let retired = false;
   let initialCollapseResolved = false;
   let detailGeneration = 0;
+  let heightFrame = null;
+  let lastNotifiedHeight = null;
 
   function unwrap(result) {
     return result?.structuredContent ?? result?.structured_content ?? result;
@@ -42,7 +44,14 @@
   }
 
   function notifyHeight() {
-    requestAnimationFrame(() => window.openai?.notifyIntrinsicHeight?.());
+    if (heightFrame !== null) return;
+    heightFrame = requestAnimationFrame(() => {
+      heightFrame = null;
+      const height = document.documentElement.scrollHeight;
+      if (height === lastNotifiedHeight) return;
+      lastNotifiedHeight = height;
+      window.openai?.notifyIntrinsicHeight?.();
+    });
   }
 
   async function callTool(name, args) {
@@ -141,7 +150,8 @@
 
 
   function syncClock() {
-    const needsClock = !retired && !document.hidden && panel.hasLiveActivity();
+    // Embedded ChatGPT frames may report themselves hidden while their activity panel is visible.
+    const needsClock = !retired && panel.hasLiveActivity();
     if (needsClock && clockTimer === null) {
       clockTimer = setInterval(() => panel.tick(Date.now() / 1000), 1000);
     } else if (!needsClock && clockTimer !== null) {
@@ -154,8 +164,10 @@
     retired = true;
     if (pollTimer !== null) clearTimeout(pollTimer);
     if (clockTimer !== null) clearInterval(clockTimer);
+    if (heightFrame !== null) cancelAnimationFrame(heightFrame);
     pollTimer = null;
     clockTimer = null;
+    heightFrame = null;
     panel.retire();
   }
 
@@ -184,7 +196,10 @@
 
   function acceptGlobals(event) {
     const next = event?.detail?.globals?.toolOutput;
-    if (!next?.run_id || (runId && next.run_id !== runId)) return;
+    if (!next?.run_id || runId) return;
+
+    // seed an iframe that started before ChatGPT supplied its initial tool output;
+    // once a run is known, canonical live state belongs to the get_activity poll.
     detailGeneration += 1;
     panel.setExpandedEntryId(null);
     render(next);
@@ -192,7 +207,6 @@
   }
 
   window.addEventListener("openai:set_globals", acceptGlobals, { passive: true });
-  document.addEventListener("visibilitychange", syncClock, { passive: true });
 
   const initial = window.openai?.toolOutput;
   if (initial?.run_id) render(initial);

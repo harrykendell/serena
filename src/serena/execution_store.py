@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
+from serena.git_metrics import GitLineMetrics
 from serena.retention import (
     DEFAULT_SESSION_RETENTION,
     JobRetentionState,
@@ -33,6 +34,7 @@ class SessionRecord:
     updated_at: float
     display_name: str = ""
     project_name: str = ""
+    git_metrics: GitLineMetrics = field(default_factory=GitLineMetrics)
 
 
 @dataclass
@@ -101,6 +103,7 @@ class SessionExecutionSummary:
     durable_job_count: int
     first_execution_started_at: float | None
     latest_execution_started_at: float | None
+    git_metrics: GitLineMetrics
     latest_execution: ExecutionSummaryRecord | None
 
 
@@ -111,7 +114,7 @@ class ExecutionStore:
     and mutates normalized SQLite rows directly.
     """
 
-    _DATABASE_SCHEMA_VERSION = 1
+    _DATABASE_SCHEMA_VERSION = 2
     _DATABASE_FILENAME = "state.sqlite3"
     _BUSY_TIMEOUT_MS = 5_000
 
@@ -122,7 +125,7 @@ class ExecutionStore:
         retention: SessionRetentionPolicy = DEFAULT_SESSION_RETENTION,
     ) -> None:
         use_default_root = root is None
-        self._root = root or self._default_root()
+        self._root = root or self.default_root()
         self._database_path = self._root / self._DATABASE_FILENAME
         self._retention = retention
         self._lock = threading.RLock()
@@ -171,7 +174,8 @@ class ExecutionStore:
         return Path(configured_home).expanduser() if configured_home else Path.home() / ".serena"
 
     @classmethod
-    def _default_root(cls) -> Path:
+    def default_root(cls) -> Path:
+        """Returns the canonical persistent execution-store directory."""
         return cls._serena_home() / "execution_store"
 
     @staticmethod
@@ -460,6 +464,9 @@ class ExecutionStore:
                     sessions.panel_id,
                     sessions.display_name,
                     sessions.project_name,
+                    sessions.git_additions,
+                    sessions.git_deletions,
+                    sessions.git_ahead_commits,
                     sessions.created_at,
                     sessions.updated_at,
                     COUNT(executions.execution_id) AS execution_count,
@@ -509,6 +516,11 @@ class ExecutionStore:
                     latest_execution_started_at=(
                         float(row["latest_execution_started_at"]) if row["latest_execution_started_at"] is not None else None
                     ),
+                    git_metrics=GitLineMetrics(
+                        additions=int(row["git_additions"]),
+                        deletions=int(row["git_deletions"]),
+                        ahead_commits=(int(row["git_ahead_commits"]) if row["git_ahead_commits"] is not None else None),
+                    ),
                     latest_execution=latest.get(str(row["session_id"])),
                 )
                 for row in aggregate_rows
@@ -540,6 +552,23 @@ class ExecutionStore:
             self._connection.execute(
                 "UPDATE sessions SET project_name = ?, updated_at = ? WHERE session_id = ?",
                 (project_name, now, session_id),
+            )
+
+    def update_session_git_metrics(self, session_id: str, metrics: GitLineMetrics) -> None:
+        """Persists the latest Git snapshot produced by activity owned by one session."""
+        now = time.time()
+        with self._transaction():
+            self._ensure_session(session_id, now)
+            self._connection.execute(
+                """
+                UPDATE sessions
+                SET git_additions = ?,
+                    git_deletions = ?,
+                    git_ahead_commits = ?,
+                    updated_at = MAX(updated_at, ?)
+                WHERE session_id = ?
+                """,
+                (metrics.additions, metrics.deletions, metrics.ahead_commits, now, session_id),
             )
 
     def list_sessions(self) -> list[SessionRecord]:
@@ -837,7 +866,10 @@ class ExecutionStore:
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
                 display_name TEXT NOT NULL DEFAULT '',
-                project_name TEXT NOT NULL DEFAULT ''
+                project_name TEXT NOT NULL DEFAULT '',
+                git_additions INTEGER NOT NULL DEFAULT 0,
+                git_deletions INTEGER NOT NULL DEFAULT 0,
+                git_ahead_commits INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS executions (
@@ -900,6 +932,17 @@ class ExecutionStore:
                 ON retained_resources(kind, resource_id);
             """
         )
+
+        # add session-owned Git snapshots when upgrading an existing SQLite store
+        session_columns = {str(row["name"]) for row in self._connection.execute("PRAGMA table_info(sessions)").fetchall()}
+        for column_name, definition in (
+            ("git_additions", "INTEGER NOT NULL DEFAULT 0"),
+            ("git_deletions", "INTEGER NOT NULL DEFAULT 0"),
+            ("git_ahead_commits", "INTEGER"),
+        ):
+            if column_name not in session_columns:
+                self._connection.execute(f"ALTER TABLE sessions ADD COLUMN {column_name} {definition}")
+
         self._connection.execute(f"PRAGMA user_version={self._DATABASE_SCHEMA_VERSION}")
 
     def _ensure_session(self, session_id: str, timestamp: float) -> SessionRecord:
@@ -1011,6 +1054,11 @@ class ExecutionStore:
             updated_at=float(row["updated_at"]),
             display_name=str(row["display_name"]),
             project_name=str(row["project_name"]),
+            git_metrics=GitLineMetrics(
+                additions=int(row["git_additions"]),
+                deletions=int(row["git_deletions"]),
+                ahead_commits=(int(row["git_ahead_commits"]) if row["git_ahead_commits"] is not None else None),
+            ),
         )
 
     def _activity_run_from_row(self, row: sqlite3.Row) -> ActivityPanelRun:
@@ -1111,7 +1159,7 @@ class ExecutionStore:
     @classmethod
     def _retained_resource_ids_from_database(cls, kind: str) -> set[str]:
         """Reads retained resource identifiers directly from the authoritative SQLite database."""
-        path = cls._default_root() / cls._DATABASE_FILENAME
+        path = cls.default_root() / cls._DATABASE_FILENAME
         if not path.is_file():
             return set()
         try:

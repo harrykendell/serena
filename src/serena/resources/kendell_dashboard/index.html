@@ -52,20 +52,8 @@
             </dd>
           </div>
           <div class="meta-item">
-            <dt>Languages</dt>
-            <dd id="languages">—</dd>
-          </div>
-          <div class="meta-item">
             <dt>Runtime</dt>
             <dd id="runtime-policy">—</dd>
-          </div>
-          <div class="meta-item">
-            <dt>Memories</dt>
-            <dd>
-              <button class="meta-resource-button" id="memories-button" type="button" aria-haspopup="dialog" aria-controls="resource-dialog">
-                <span id="memories-count">—</span>
-              </button>
-            </dd>
           </div>
           <div class="meta-item">
             <dt>Version</dt>
@@ -133,23 +121,12 @@
     <dialog class="memory-dialog resource-dialog" id="resource-dialog" aria-labelledby="resource-dialog-title">
       <div class="memory-dialog-head">
         <div>
-          <div class="memory-dialog-kicker">Resources</div>
-          <h2 id="resource-dialog-title">Resources</h2>
+          <div class="memory-dialog-kicker">Serena</div>
+          <h2 id="resource-dialog-title">Active tools</h2>
         </div>
         <button class="memory-dialog-close" id="resource-dialog-close" type="button" aria-label="Close resources">×</button>
       </div>
       <div class="resource-dialog-content" id="resource-dialog-content"></div>
-    </dialog>
-
-    <dialog class="memory-dialog" id="memory-dialog" aria-labelledby="memory-dialog-title">
-      <div class="memory-dialog-head">
-        <div>
-          <div class="memory-dialog-kicker">Memory</div>
-          <h2 id="memory-dialog-title">Memory</h2>
-        </div>
-        <button class="memory-dialog-close" id="memory-dialog-close" type="button" aria-label="Close memory">×</button>
-      </div>
-      <pre class="memory-content" id="memory-dialog-content">Loading…</pre>
     </dialog>
   </div>
 </body>

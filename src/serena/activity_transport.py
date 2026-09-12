@@ -11,6 +11,7 @@ from serena.activity_view import (
     ActivityJobSummary,
     ActivityLatestSummary,
     ActivityOverview,
+    ActivityRunningJobs,
     ActivitySnapshot,
 )
 
@@ -45,6 +46,7 @@ def activity_job_payload(job: ActivityJobSummary) -> dict[str, Any]:
         "started_at": job.started_at,
         "finished_at": job.finished_at,
         "current_turn": job.current_turn,
+        "panel_id": job.panel_id,
     }
 
 
@@ -128,9 +130,19 @@ def activity_snapshot_payload(snapshot: ActivitySnapshot) -> dict[str, Any]:
     }
 
 
+def activity_running_jobs_payload(running: ActivityRunningJobs) -> dict[str, Any]:
+    """Returns compact global durable-job metadata for dashboard chrome."""
+    jobs = [activity_job_payload(job) for job in running.running_jobs]
+    return {
+        "status": "success",
+        "jobs": jobs,
+        "running_jobs": len(jobs),
+        "max_concurrent_jobs": running.max_concurrent_jobs,
+    }
+
+
 def activity_overview_payload(overview: ActivityOverview) -> tuple[dict[str, Any], dict[str, Any]]:
     """Returns compact Serena session discovery and running-job documents."""
-    panel_by_session = {summary.session_id: summary.panel_id for summary in overview.sessions}
     panels = [
         {
             "panel_id": summary.panel_id,
@@ -147,19 +159,8 @@ def activity_overview_payload(overview: ActivityOverview) -> tuple[dict[str, Any
         }
         for summary in overview.sessions
     ]
-    jobs = [
-        {
-            **activity_job_payload(job),
-            "panel_id": panel_by_session.get(job.session_id) if job.session_id is not None else None,
-        }
-        for job in overview.running_jobs
-    ]
-    return (
-        {"status": "success", "panels": panels},
-        {
-            "status": "success",
-            "jobs": jobs,
-            "running_jobs": len(jobs),
-            "max_concurrent_jobs": overview.max_concurrent_jobs,
-        },
+    running = ActivityRunningJobs(
+        running_jobs=overview.running_jobs,
+        max_concurrent_jobs=overview.max_concurrent_jobs,
     )
+    return {"status": "success", "panels": panels}, activity_running_jobs_payload(running)

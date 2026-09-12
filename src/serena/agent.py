@@ -551,7 +551,9 @@ class SerenaAgent:
                             return call()
                         finally:
                             try:
-                                runtime.git_metrics.refresh()
+                                metrics = runtime.git_metrics.refresh()
+                                if metrics is not None:
+                                    self._execution_store.update_session_git_metrics(session_id, metrics)
                             except Exception as error:
                                 log.warning("Could not refresh Git state for %s: %s", project.project_name, error)
 

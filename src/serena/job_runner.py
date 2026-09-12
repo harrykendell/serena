@@ -13,7 +13,9 @@ from types import FrameType
 
 import psutil
 
-from serena.jobs import JobStatus, JobStore
+from serena.execution_store import ExecutionStore
+from serena.git_metrics import GitProjectMetrics
+from serena.jobs import JobRecord, JobStatus, JobStore
 
 _TERMINATION_GRACE_SECONDS = 2.0
 
@@ -67,6 +69,18 @@ def _terminate_job_processes(process: subprocess.Popen[str], job_id: str) -> Non
         pass
 
 
+def _persist_session_git_snapshot(record: JobRecord) -> None:
+    """Persist final repository metrics for the session that owns ``record`` when available."""
+    if record.session_id is None:
+        return
+    try:
+        metrics = GitProjectMetrics(record.project_root).refresh()
+        if metrics is not None:
+            ExecutionStore(ExecutionStore.default_root()).update_session_git_metrics(record.session_id, metrics)
+    except Exception as error:
+        print(f"Serena job Git snapshot failed: {error.__class__.__name__}: {error}", file=sys.stderr)
+
+
 def run_job(state_file: Path, command_file: Path) -> int:
     """Run a stored command and persist its natural terminal status before exiting."""
     store = JobStore(state_file.parent)
@@ -79,6 +93,7 @@ def run_job(state_file: Path, command_file: Path) -> int:
         del frame
         if process is not None:
             _terminate_job_processes(process, record.job_id)
+        _persist_session_git_snapshot(record)
         # Leave the persisted job state as RUNNING. The manager that requested cancellation, or a
         # later reconciliation after a systemd timeout/external stop, owns the terminal status.
         raise SystemExit(128 + signum)
@@ -120,6 +135,7 @@ def run_job(state_file: Path, command_file: Path) -> int:
         return_code=return_code,
         status_message=status_message,
     )
+    _persist_session_git_snapshot(terminal_record)
 
     # notify only after terminal state is durable; push delivery must never alter the job result
     try:

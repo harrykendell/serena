@@ -127,7 +127,7 @@ button { font: inherit; }
 .session-summary { padding: 10px 12px; }
 .metadata-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(90px, 1fr));
+  grid-template-columns: repeat(4, minmax(90px, 1fr));
   gap: 0;
   margin: 0;
 }
@@ -209,6 +209,25 @@ button { font: inherit; }
   font-weight: 650;
 }
 .session-widgets { display: grid; gap: 8px; }
+.session-day-separator {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  margin: 2px 2px 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.session-day-separator::before,
+.session-day-separator::after {
+  content: "";
+  border-top: 1px solid var(--border);
+}
+.session-day-separator::before { flex: 1 1 auto; }
+.session-day-separator::after { width: 10px; flex: 0 0 10px; }
 .empty-card { padding: 12px; color: var(--muted); font-size: 11px; }
 
 .tabs {
@@ -426,17 +445,6 @@ button { font: inherit; }
 .resource-row strong,
 .resource-row span { display: block; }
 .resource-row span { margin-top: 2px; color: var(--muted); font-size: 10px; }
-.memory-content {
-  max-height: min(620px, 68vh);
-  margin: 0;
-  overflow: auto;
-  padding: 13px 14px 16px;
-  background: var(--surface);
-  color: var(--ink);
-  font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-}
 
 @container activity-workspace (max-width: 1011px) {
   .activity-view-tabs { display: flex; }
@@ -444,11 +452,6 @@ button { font: inherit; }
   .activity-columns { display: block; }
   .activity-columns[data-active-view="serena"] .orchestrator-section,
   .activity-columns[data-active-view="orchestrator"] .activity-section { display: none; }
-}
-
-@media (max-width: 900px) {
-  .metadata-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 8px; }
-  .meta-item:nth-child(4) { padding-left: 0; border-left: 0; }
 }
 
 @media (max-width: 700px) {

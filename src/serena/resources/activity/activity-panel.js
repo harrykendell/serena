@@ -15,6 +15,7 @@
   };
 
   function number(value) {
+    if (value === null || value === undefined || value === "") return null;
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : null;
   }
@@ -28,6 +29,17 @@
     if (minutes < 60) return `${minutes}m ${remainder}s`;
     const hours = Math.floor(minutes / 60);
     return `${hours}h ${minutes % 60}m`;
+  }
+
+
+  function formatLiveDuration(seconds) {
+    const value = Math.max(0, Math.floor(number(seconds) ?? 0));
+    if (value < 60) return `${value}s`;
+    const minutes = Math.floor(value / 60);
+    const remainder = value % 60;
+    if (minutes < 60) return `${minutes}m ${remainder}s`;
+    const hours = Math.floor(minutes / 60);
+    return `${hours}h ${minutes % 60}m ${remainder}s`;
   }
 
   function formatClock(epochSeconds) {
@@ -49,6 +61,15 @@
     return STATUS_LABELS[normalized] || normalized.replaceAll("_", " ");
   }
 
+  function statusIcon(status) {
+    const normalized = normalizeStatus(status);
+    if (normalized === "running") return "●";
+    if (normalized === "failed" || normalized === "timed_out") return "!";
+    if (normalized === "cancelled") return "×";
+    if (normalized === "queued" || normalized === "pending" || normalized === "waiting") return "○";
+    return "✓";
+  }
+
   function isRunning(status) {
     return normalizeStatus(status) === "running";
   }
@@ -59,11 +80,6 @@
     node.textContent = text;
     parent.append(node);
     return node;
-  }
-
-  function objectLabel(value) {
-    if (Array.isArray(value)) return `Array (${value.length})`;
-    return `Object (${Object.keys(value).length})`;
   }
 
   function renderValue(value, depth = 0) {
@@ -120,16 +136,16 @@
     }
 
     if (Array.isArray(value) || typeof value === "object") {
-      const details = document.createElement("details");
-      details.className = "activity-structure";
-      details.open = depth === 0;
-      const summary = document.createElement("summary");
-      summary.textContent = objectLabel(value);
-      details.append(summary);
+      const entries = Array.isArray(value) ? value.map((item, index) => [String(index), item]) : Object.entries(value);
+      if (entries.length === 0) {
+        const node = document.createElement("span");
+        node.className = "activity-scalar";
+        node.textContent = Array.isArray(value) ? "[]" : "{}";
+        return node;
+      }
 
       const list = document.createElement("dl");
       list.className = "activity-fields";
-      const entries = Array.isArray(value) ? value.map((item, index) => [String(index), item]) : Object.entries(value);
       for (const [key, item] of entries) {
         const term = document.createElement("dt");
         term.textContent = key;
@@ -137,8 +153,7 @@
         definition.append(renderValue(item, depth + 1));
         list.append(term, definition);
       }
-      details.append(list);
-      return details;
+      return list;
     }
 
     const fallback = document.createElement("span");
@@ -152,7 +167,7 @@
       if (!(root instanceof Element)) throw new TypeError("ActivityPanel requires a DOM root element");
       this.root = root;
       this.options = options;
-      this.snapshot = null;
+      this.snapshot = options.previousSnapshot || null;
       this.collapsed = Boolean(options.initialCollapsed);
       this.expandedEntryId = options.expandedEntryId || null;
       this.otherJobsExpanded = false;
@@ -160,6 +175,7 @@
       this.liveNodes = [];
       this.hasRenderedRows = false;
       this.retired = false;
+      this.summaryFlashTimer = null;
       this._build();
     }
 
@@ -175,12 +191,16 @@
       const logo = document.createElement("span");
       logo.className = "activity-logo";
       logo.setAttribute("aria-hidden", "true");
-      logo.innerHTML = '<svg viewBox="0 0 256 256" focusable="false"><rect x="24" y="24" width="208" height="208" rx="48" fill="#fff" stroke="currentColor" stroke-width="12"/><path d="M104 76 64 128l40 52M152 76l40 52-40 52" fill="none" stroke="currentColor" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/><path d="M116 128h24" fill="none" stroke="currentColor" stroke-width="18" stroke-linecap="round"/><circle cx="128" cy="128" r="9" fill="currentColor"/></svg>';
+      logo.innerHTML = '<svg viewBox="0 0 256 256" focusable="false"><rect x="24" y="24" width="208" height="208" rx="48" fill="#fff" stroke="currentColor" stroke-width="12"/><g class="activity-logo-mark"><path class="activity-logo-bracket-left" d="M104 76 64 128l40 52" fill="none" stroke="currentColor" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/><path class="activity-logo-bracket-right" d="M152 76l40 52-40 52" fill="none" stroke="currentColor" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/><path d="M116 128h24" fill="none" stroke="currentColor" stroke-width="18" stroke-linecap="round"/><circle cx="128" cy="128" r="9" fill="currentColor"/></g></svg>';
 
       const heading = document.createElement("span");
       heading.className = "activity-heading";
       this.titleNode = appendText(heading, "Serena", "activity-title");
-      this.summaryNode = appendText(heading, "Waiting for activity", "activity-summary");
+      this.summaryStack = document.createElement("span");
+      this.summaryStack.className = "activity-summary-stack";
+      this.summaryNode = appendText(this.summaryStack, "Waiting for activity", "activity-summary activity-summary-normal");
+      this.summaryFlashNode = appendText(this.summaryStack, "", "activity-summary activity-summary-flash");
+      heading.append(this.summaryStack);
 
       const meta = document.createElement("span");
       meta.className = "activity-header-meta";
@@ -197,6 +217,7 @@
           return;
         }
         this.setCollapsed(!this.collapsed);
+        if (this.collapsed && typeof this.options.onCollapse === "function") this.options.onCollapse(this.snapshot);
       });
 
       if (this.options.summaryMode) {
@@ -204,6 +225,10 @@
         return;
       }
 
+      this._buildBody();
+    }
+
+    _buildBody() {
       this.body = document.createElement("div");
       this.body.className = "activity-body";
       this.list = document.createElement("ol");
@@ -239,6 +264,30 @@
         this._notifyHeight();
       });
       this._syncCollapsed();
+    }
+
+    promote(options = {}) {
+      if (!this.options.summaryMode) return;
+      this.options = { ...this.options, ...options, summaryMode: false };
+      this.collapsed = false;
+      this.chevron.textContent = "⌄";
+      this.header.setAttribute("aria-expanded", "true");
+      this._buildBody();
+      this._notifyHeight();
+    }
+
+    demote(options = {}) {
+      if (this.options.summaryMode) return;
+      this.options = { ...this.options, ...options, summaryMode: true };
+      this.collapsed = true;
+      this.expandedEntryId = null;
+      this.otherJobsExpanded = false;
+      this.liveNodes = [];
+      this.hasRenderedRows = false;
+      this.body?.remove();
+      this.chevron.textContent = "›";
+      this.header.setAttribute("aria-expanded", "false");
+      this._notifyHeight();
     }
 
     setCollapsed(collapsed) {
@@ -298,8 +347,25 @@
       const row = this._findRow(this.expandedEntryId);
       const detailContainer = row?.querySelector(".activity-detail");
       if (!row || !detailContainer) return;
+
+      if (row.dataset.kind === "job") {
+        const detail = this.snapshot?.expanded_job;
+        if (detail?.job_id === this.expandedEntryId && this._refreshJobDetail(detailContainer, detail)) return;
+      }
+
       detailContainer.replaceChildren();
       this._renderExpandedDetail(detailContainer, row.dataset.kind, this.expandedEntryId);
+    }
+
+    _hasRunningSessionActivity() {
+      if (!this.snapshot) return false;
+      if (this.snapshot.active) return true;
+      if ((this.snapshot.calls || []).some(call => isRunning(call.status))) return true;
+      return (this.snapshot.jobs || []).some(job => {
+        if (!isRunning(job.status)) return false;
+        if (job.panel_id) return job.panel_id === this.snapshot.panel_id;
+        return Boolean(job.current_turn);
+      });
     }
 
     hasLiveActivity() {
@@ -310,7 +376,9 @@
       const previous = this.snapshot;
       this.snapshot = snapshot || {};
       if (this.retired) return;
+      this.root.classList.toggle("activity-running", this._hasRunningSessionActivity());
       this._renderHeader();
+      this._flashNewActivity(previous);
       if (this.options.summaryMode) {
         this.tick(Date.now() / 1000);
         this._notifyHeight();
@@ -320,9 +388,7 @@
         const rowsUnchanged = Boolean(
           this.hasRenderedRows
           && previous
-          && previous.updated_at === this.snapshot.updated_at
-          && (previous.calls || []).length === (this.snapshot.calls || []).length
-          && (previous.jobs || []).length === (this.snapshot.jobs || []).length
+          && this._rowsKey(previous) === this._rowsKey(this.snapshot)
         );
         if (rowsUnchanged) this._refreshExpandedDetail();
         else this._renderRows();
@@ -339,15 +405,7 @@
     tick(nowSeconds) {
       const now = number(nowSeconds) ?? Date.now() / 1000;
       for (const item of this.liveNodes) {
-        item.node.textContent = formatDuration(now - item.startedAt);
-      }
-      if (this.snapshot) {
-        const running = this._runningEntries();
-        if (running.length > 0) {
-          const earliest = Math.min(...running.map(item => number(item.started_at) ?? now));
-          this.durationNode.textContent = formatDuration(now - earliest);
-          this.durationNode.title = "Elapsed time for active work";
-        }
+        item.node.textContent = formatLiveDuration(now - item.startedAt);
       }
     }
 
@@ -358,6 +416,8 @@
     }
 
     destroy() {
+      if (this.summaryFlashTimer !== null) window.clearTimeout(this.summaryFlashTimer);
+      this.summaryFlashTimer = null;
       this.liveNodes = [];
       this.mediaCache.clear();
       this.root.replaceChildren();
@@ -384,11 +444,6 @@
       const deletions = number(snapshot.git_deletions) ?? 0;
       const ahead = number(snapshot.git_ahead_commits) ?? 0;
       this.summaryNode.replaceChildren();
-      if (latest) {
-        const latestLabel = latest.label || "Activity";
-        const latestDetail = latest.detail || latest.scope || "";
-        appendText(this.summaryNode, latestDetail ? `${latestLabel} · ${latestDetail} · ` : `${latestLabel} · `, "activity-latest-summary");
-      }
       appendText(this.summaryNode, `${toolCount} ${toolCount === 1 ? "tool" : "tools"} · ${jobCount} ${jobCount === 1 ? "job" : "jobs"}`);
       if (additions || deletions) {
         appendText(this.summaryNode, " · ");
@@ -405,6 +460,65 @@
       const span = number(snapshot.submission_span_seconds);
       this.durationNode.textContent = span === null ? "" : formatDuration(span);
       this.durationNode.title = span === null ? "" : "Time between first and latest submitted tool";
+    }
+
+    _flashNewActivity(previous) {
+      if (!previous) return;
+
+      const previousActivity = previous.latest_activity || null;
+      const activity = this.snapshot?.latest_activity || null;
+      if (!activity) return;
+
+      const identity = item => [
+        number(item?.started_at) ?? null,
+        item?.label || "",
+        item?.detail || "",
+        item?.scope || "",
+      ].join("\u0000");
+      if (previousActivity && identity(previousActivity) === identity(activity)) return;
+      const previousStartedAt = number(previousActivity?.started_at);
+      const startedAt = number(activity.started_at);
+      if (previousStartedAt !== null && startedAt !== null && startedAt <= previousStartedAt) return;
+
+      const detail = activity.detail || activity.scope || "";
+      this.summaryFlashNode.replaceChildren();
+      appendText(this.summaryFlashNode, activity.label || "Activity", "activity-summary-flash-label");
+      if (detail) appendText(this.summaryFlashNode, ` · ${detail}`, "activity-summary-flash-detail");
+
+      if (this.summaryFlashTimer !== null) window.clearTimeout(this.summaryFlashTimer);
+      this.summaryStack.classList.add("is-activity-flash");
+      this.summaryFlashTimer = window.setTimeout(() => {
+        this.summaryStack.classList.remove("is-activity-flash");
+        this.summaryFlashTimer = null;
+      }, 1000);
+    }
+
+    _rowsKey(snapshot) {
+      const calls = Array.isArray(snapshot?.calls) ? snapshot.calls : [];
+      const jobs = Array.isArray(snapshot?.jobs) ? snapshot.jobs : [];
+      return JSON.stringify({
+        calls: calls.map(call => [
+          call.call_id,
+          call.tool_name,
+          normalizeStatus(call.status),
+          call.scope,
+          call.project_name,
+          call.detail,
+          number(call.started_at ?? call.submitted_at),
+          number(call.finished_at),
+        ]),
+        jobs: jobs.map(job => [
+          job.job_id,
+          job.label,
+          job.project,
+          normalizeStatus(job.status),
+          job.status_message,
+          number(job.started_at ?? job.submitted_at),
+          number(job.finished_at),
+          Boolean(job.current_turn),
+          job.panel_id,
+        ]),
+      });
     }
 
     _renderRows() {
@@ -457,6 +571,7 @@
 
       const status = document.createElement("span");
       status.className = "activity-status";
+      status.textContent = statusIcon(normalizedStatus);
       status.setAttribute("aria-label", statusLabel(normalizedStatus));
       status.title = statusLabel(normalizedStatus);
 
@@ -514,7 +629,8 @@
     }
 
     _renderCallDetail(container, detail) {
-      this._appendDetailSection(container, "Parameters", renderValue(detail.arguments ?? {}));
+      const parameters = this._appendDetailSection(container, "Parameters", renderValue(detail.arguments ?? {}));
+      parameters.classList.add("activity-detail-parameters");
 
       if (detail.error) {
         const error = document.createElement("pre");
@@ -522,9 +638,11 @@
         error.textContent = detail.error;
         this._appendDetailSection(container, "Error", error);
       } else if (detail.structured_result !== null && detail.structured_result !== undefined) {
-        this._appendDetailSection(container, "Result", renderValue(detail.structured_result));
+        const result = this._appendDetailSection(container, "Result", renderValue(detail.structured_result));
+        result.classList.add("activity-detail-result");
       } else if (detail.result !== null && detail.result !== undefined && detail.result !== "") {
-        this._appendDetailSection(container, "Result", renderValue(detail.result));
+        const result = this._appendDetailSection(container, "Result", renderValue(detail.result));
+        result.classList.add("activity-detail-result");
       }
 
       if (detail.media) {
@@ -535,7 +653,7 @@
       }
     }
 
-    _renderJobDetail(container, detail) {
+    _jobMetadata(detail) {
       const metadata = {
         status: detail.status_message || detail.status,
         cwd: detail.cwd,
@@ -546,13 +664,58 @@
         process_count: detail.process_count,
       };
       const compact = Object.fromEntries(Object.entries(metadata).filter(([, value]) => value !== null && value !== undefined && value !== ""));
-      this._appendDetailSection(container, "Job", renderValue(compact));
+      const content = renderValue(compact);
+      content.classList.add("activity-job-metadata");
+      return content;
+    }
+
+    _renderJobDetail(container, detail) {
+      this._appendDetailSection(container, "Job", this._jobMetadata(detail));
       if (detail.output) {
         const output = document.createElement("pre");
-        output.className = "activity-pre";
+        output.className = "activity-pre activity-job-output";
         output.textContent = detail.output;
-        this._appendDetailSection(container, detail.earlier_output_omitted ? "Recent output" : "Output", output);
+        const section = this._appendDetailSection(container, detail.earlier_output_omitted ? "Recent output" : "Output", output);
+        section.classList.add("activity-job-output-section");
       }
+    }
+
+    _refreshJobDetail(container, detail) {
+      const metadata = container.querySelector(".activity-job-metadata");
+      if (!metadata) return false;
+      metadata.replaceWith(this._jobMetadata(detail));
+
+      const outputSection = container.querySelector(".activity-job-output-section");
+      const output = outputSection?.querySelector(".activity-job-output");
+      if (!detail.output) {
+        outputSection?.remove();
+        return true;
+      }
+
+      if (!outputSection || !output) {
+        const nextOutput = document.createElement("pre");
+        nextOutput.className = "activity-pre activity-job-output";
+        nextOutput.textContent = detail.output;
+        const nextSection = this._appendDetailSection(
+          container,
+          detail.earlier_output_omitted ? "Recent output" : "Output",
+          nextOutput,
+        );
+        nextSection.classList.add("activity-job-output-section");
+        return true;
+      }
+
+      const heading = outputSection.querySelector("h4");
+      if (heading) heading.textContent = detail.earlier_output_omitted ? "Recent output" : "Output";
+      const previousOutput = output.textContent || "";
+      if (detail.output !== previousOutput) {
+        if (detail.output.startsWith(previousOutput)) {
+          output.append(document.createTextNode(detail.output.slice(previousOutput.length)));
+        } else {
+          output.textContent = detail.output;
+        }
+      }
+      return true;
     }
 
     _appendDetailSection(container, title, content) {
@@ -562,6 +725,7 @@
       heading.textContent = title;
       section.append(heading, content);
       container.append(section);
+      return section;
     }
 
     async _loadMedia(callId, media, container) {
@@ -631,5 +795,5 @@
     }
   }
 
-  window.SerenaActivity = Object.freeze({ ActivityPanel, formatDuration, formatClock, renderValue });
+  window.SerenaActivity = Object.freeze({ ActivityPanel, formatDuration, formatLiveDuration, formatClock, renderValue });
 })();

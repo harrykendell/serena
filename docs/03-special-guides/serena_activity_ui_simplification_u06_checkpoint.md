@@ -119,3 +119,7 @@ Results:
 - 1,000-session server document: `96.165 ms` median, `487,044 B`, one cached Git read, zero Git refreshes, one running-job metadata query and zero terminal telemetry operations.
 
 U00–U06 are complete. U07 is now the next implementation step: give the independent Orchestrator path equivalent compact-query discipline and then perform the final cutover audit/legacy cleanup.
+
+## Post-checkpoint startup correction
+
+Final pre-release verification found that iOS browsers could initially show no retained dashboard items until a later activity update. The first attempted row-paint workaround did not address the symptom and was reverted. The underlying architectural weakness was the split startup path: overview state was embedded into the HTML shell and rendered synchronously, while every subsequent update used the canonical `/dashboard/api/state` route. The final correction removes the embedded overview snapshot entirely. Every initial load now starts with an immediate no-store fetch of the current route document, then uses the same ETag revalidation path for later polls. This preserves one current document/one poller, removes duplicated overview JSON from the HTML response, and gives initial load and later updates the same rendering path. Browser smoke coverage now requires both overview and direct selected-session routes to render from their first API document without waiting for later activity.

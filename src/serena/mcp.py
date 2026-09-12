@@ -721,7 +721,6 @@ class SerenaMCPFactory:
                 activity_view.for_run,
                 get_mcp_session_id(mcp_ctx),
                 run_id,
-                refresh_git_metrics=True,
             )
             return activity_snapshot_payload(snapshot)
 
