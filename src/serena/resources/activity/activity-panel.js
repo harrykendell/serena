@@ -602,8 +602,7 @@ _releaseMedia(callId) {
       const jobs = Array.isArray(snapshot.jobs) ? snapshot.jobs : [];
       const runMode = Boolean(snapshot.run_id);
       const primaryJobs = runMode ? jobs.filter(job => job.current_turn) : jobs;
-      const primaryJobIds = new Set(primaryJobs.map(job => job.job_id));
-      const visibleCalls = calls.filter(call => !(call.tool_name === "start_job" && call.job_id && primaryJobIds.has(call.job_id)));
+      const visibleCalls = calls;
       const backgroundJobs = runMode ? jobs.filter(job => !job.current_turn && isRunning(job.status)) : [];
       const primary = [
         ...visibleCalls.map(call => ({ kind: "call", id: call.call_id, item: call })),
