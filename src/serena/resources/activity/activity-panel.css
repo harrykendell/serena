@@ -319,25 +319,27 @@
 .activity-row[data-status="starting"] .activity-status::before,
 .activity-row[data-status="running"] .activity-status::before {
   content: "";
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
-  box-shadow: -5px 0 currentColor, 0 0 currentColor, 5px 0 currentColor;
+  width: 13px;
+  height: 7px;
+  background:
+    radial-gradient(circle, currentColor 0 1.5px, transparent 1.6px) 0 50% / 3px 3px no-repeat,
+    radial-gradient(circle, currentColor 0 1.5px, transparent 1.6px) 5px 50% / 3px 3px no-repeat,
+    radial-gradient(circle, currentColor 0 1.5px, transparent 1.6px) 10px 50% / 3px 3px no-repeat;
   animation: activity-dots-bounce 1.2s ease-in-out infinite;
 }
 
 @keyframes activity-dots-bounce {
   0%, 40%, 100% {
-    box-shadow: -5px 0 currentColor, 0 0 currentColor, 5px 0 currentColor;
+    background-position: 0 50%, 5px 50%, 10px 50%;
   }
   10% {
-    box-shadow: -5px -2px currentColor, 0 0 currentColor, 5px 0 currentColor;
+    background-position: 0 calc(50% - 2px), 5px 50%, 10px 50%;
   }
   20% {
-    box-shadow: -5px 0 currentColor, 0 -2px currentColor, 5px 0 currentColor;
+    background-position: 0 50%, 5px calc(50% - 2px), 10px 50%;
   }
   30% {
-    box-shadow: -5px 0 currentColor, 0 0 currentColor, 5px -2px currentColor;
+    background-position: 0 50%, 5px 50%, 10px calc(50% - 2px);
   }
 }
 

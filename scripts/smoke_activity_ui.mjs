@@ -573,8 +573,10 @@ async function runningIconAnimationScenario() {
           && status?.textContent === ""
           && statusStyle?.display === "grid"
           && statusStyle?.alignSelf === "center"
-          && markerStyle?.width === "3px"
-          && markerStyle?.height === "3px"
+          && markerStyle?.width === "13px"
+          && markerStyle?.height === "7px"
+          && markerStyle?.backgroundImage.includes("radial-gradient")
+          && markerStyle?.boxShadow === "none"
           && markerStyle?.animationName === "activity-dots-bounce"
           && elapsedBefore !== elapsedAfter;
         document.getElementById("smoke-marker").textContent = pass
