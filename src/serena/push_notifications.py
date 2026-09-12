@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from filelock import FileLock
 from pywebpush import webpush
 
-from serena.config.serena_config import SerenaPaths
+from serena.config.serena_config import SerenaConfig, SerenaPaths
 from serena.jobs import JobRecord, JobStatus
 
 
@@ -63,9 +63,13 @@ class WebPushNotifier:
         self,
         root: Path | None = None,
         sender: Callable[..., Any] = webpush,
+        minimum_job_duration_seconds: float | None = None,
     ) -> None:
         if root is None:
             root = Path(SerenaPaths().serena_user_home_dir) / "push"
+        if minimum_job_duration_seconds is None:
+            minimum_job_duration_seconds = SerenaConfig.from_config_file().tool_timeout
+
         self._root = root
         self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self._root, 0o700)
@@ -73,6 +77,7 @@ class WebPushNotifier:
         self._subscription_path = self._root / "subscription.json"
         self._key_lock = FileLock(str(self._root / ".vapid.lock"))
         self._sender = sender
+        self._minimum_job_duration_seconds = minimum_job_duration_seconds
 
     @property
     def public_key(self) -> str:
@@ -94,8 +99,14 @@ class WebPushNotifier:
         return subscription
 
     def send_job_finished(self, record: JobRecord) -> bool:
-        """Send a completion notification for a naturally completed or failed job when subscribed."""
-        if record.status not in {JobStatus.COMPLETED, JobStatus.FAILED} or not self._subscription_path.exists():
+        """Send a completion notification for a sufficiently long naturally completed or failed job."""
+        duration_seconds = self._duration_seconds(record)
+        if (
+            record.status not in {JobStatus.COMPLETED, JobStatus.FAILED}
+            or duration_seconds is None
+            or duration_seconds <= self._minimum_job_duration_seconds
+            or not self._subscription_path.exists()
+        ):
             return False
 
         subscription = WebPushSubscription.from_payload(json.loads(self._subscription_path.read_text(encoding="utf-8")))
@@ -104,9 +115,7 @@ class WebPushNotifier:
         detail = [status]
         if record.project_name:
             detail.append(record.project_name)
-        duration = self._format_duration(record)
-        if duration:
-            detail.append(duration)
+        detail.append(self._format_duration(duration_seconds))
         payload = json.dumps(
             {
                 "title": title,
@@ -128,15 +137,18 @@ class WebPushNotifier:
         return True
 
     @staticmethod
-    def _format_duration(record: JobRecord) -> str:
-        """:return: compact wall-clock duration for a finished job when timestamps are available."""
+    def _duration_seconds(record: JobRecord) -> float | None:
+        """:return: elapsed wall-clock seconds for a finished job when timestamps are valid."""
         if not record.finished_at:
-            return ""
+            return None
         try:
-            seconds = max(0.0, (datetime.fromisoformat(record.finished_at) - datetime.fromisoformat(record.created_at)).total_seconds())
+            return max(0.0, (datetime.fromisoformat(record.finished_at) - datetime.fromisoformat(record.created_at)).total_seconds())
         except ValueError:
-            return ""
+            return None
 
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        """:return: compact wall-clock duration for a finished job."""
         rounded = round(seconds)
         hours, remainder = divmod(rounded, 3600)
         minutes, seconds = divmod(remainder, 60)
