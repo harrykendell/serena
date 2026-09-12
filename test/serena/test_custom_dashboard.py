@@ -68,6 +68,7 @@ def test_dashboard_serves_shell_overview_and_selected_session(tmp_path: Path, mo
     dashboard_script = client.get("/dashboard/dashboard.js")
     service_worker = client.get("/dashboard/service-worker.js")
     manifest = client.get("/dashboard/manifest.webmanifest")
+    app_icon = client.get("/dashboard/serena-app-icon-180.png")
     versioned_dashboard_script = client.get("/dashboard/dashboard.js?v=test")
     state = client.get("/dashboard/api/state").get_json()
     panel_id = state["serena"]["panels"][0]["panel_id"]
@@ -81,8 +82,12 @@ def test_dashboard_serves_shell_overview_and_selected_session(tmp_path: Path, mo
     assert dashboard_script.headers["Cache-Control"] == "private, no-cache"
     assert service_worker.status_code == 200
     assert manifest.status_code == 200
+    assert app_icon.status_code == 200
+    assert app_icon.mimetype == "image/png"
     assert versioned_dashboard_script.headers["Cache-Control"] == "private, max-age=31536000, immutable"
     assert b"Serena + Orchestrator" in response.data
+    assert b"serena-app-icon-180.png" in response.data
+    assert b"apple-touch-icon-precomposed" in response.data
     assert b"notification-button" in response.data
     assert b'id="jobs-button"' in response.data
     assert b"serena-widgets" in response.data

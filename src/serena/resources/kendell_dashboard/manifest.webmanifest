@@ -8,9 +8,16 @@
   "theme_color": "#10161d",
   "icons": [
     {
-      "src": "serena-icon-128.png",
-      "sizes": "128x128",
-      "type": "image/png"
+      "src": "serena-app-icon-180.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "serena-app-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
     }
   ]
 }

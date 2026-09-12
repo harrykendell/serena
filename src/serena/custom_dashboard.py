@@ -45,6 +45,8 @@ def _dashboard_static_assets() -> tuple[str, str, str]:
         "serena-logo.svg",
         "orchestrator-logo.svg",
         "serena-icon-128.png",
+        "serena-app-icon-180.png",
+        "serena-app-icon-512.png",
     )
     shared_assets = (
         ACTIVITY_RESOURCE_DIR / "activity-panel.css",
