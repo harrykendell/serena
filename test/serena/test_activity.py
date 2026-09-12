@@ -936,3 +936,31 @@ def test_activity_tools_expose_widget_and_private_polling_contract() -> None:
     assert job_detail_meta is not None
     assert job_detail_meta["ui"] == {"visibility": ["app"]}
     assert job_detail_meta["openai/visibility"] == "private"
+
+
+def test_activity_poll_uses_run_identity_across_reconnected_mcp_session() -> None:
+    harness = _ActivityHarness(_FakeJobSource())
+    run = harness.start_run("conversation-a", "serena")
+
+    class Agent:
+        execution_store = harness.execution_store
+
+        @staticmethod
+        def get_active_project_for_session(session_id: str):
+            return None
+
+    async def poll() -> dict[str, Any]:
+        factory = SerenaMCPFactory(transport="stdio")
+        factory.agent = Agent()  # type: ignore[assignment]
+        factory._activity_run_manager = harness.run_manager
+        factory._activity_view = harness.view
+        mcp = FastMCP("activity-test")
+        factory._register_activity_tools(mcp)
+        meta = RequestParams.Meta.model_validate({"openai/session": "reconnected-session"})
+        context = SimpleNamespace(request_context=SimpleNamespace(meta=meta), session=object())
+        return await mcp._tool_manager.call_tool("get_activity", {"run_id": run["run_id"]}, context=context)
+
+    result = asyncio.run(poll())
+
+    assert result["run_id"] == run["run_id"]
+    assert result["session_id"] == "conversation-a"

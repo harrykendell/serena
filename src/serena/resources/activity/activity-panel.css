@@ -309,26 +309,7 @@
 
 .activity-row[data-status="starting"] .activity-status,
 .activity-row[data-status="running"] .activity-status {
-  color: #00491e;
-  animation: activity-running-pulse 1.4s ease-in-out infinite;
-}
-
-@keyframes activity-running-pulse {
-  0%, 100% {
-    opacity: .68;
-    transform: scale(.94);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .activity-row[data-status="starting"] .activity-status,
-  .activity-row[data-status="running"] .activity-status {
-    animation: none;
-  }
+  color: var(--serena-activity-text-muted);
 }
 
 .activity-row[data-status="completed"] .activity-status {
@@ -342,13 +323,6 @@
 
 .activity-row[data-status="cancelled"] .activity-status {
   opacity: .5;
-}
-
-@media (prefers-color-scheme: dark) {
-  .activity-row[data-status="starting"] .activity-status,
-  .activity-row[data-status="running"] .activity-status {
-    color: #70c990;
-  }
 }
 
 .activity-row-title-line {

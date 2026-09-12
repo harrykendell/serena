@@ -682,6 +682,45 @@ async function inlineStaleGlobalsAnimationScenario() {
   }
 }
 
+async function inlineFreshGlobalsRecoveryScenario() {
+  const initial = selected(false);
+  initial.run_id = "inline-fresh-globals";
+  initial.calls = [call(0, false)];
+  initial.tool_count = 1;
+  initial.updated_at = initial.calls[0].finished_at;
+
+  const fresh = structuredClone(initial);
+  fresh.calls.push(call(1, false));
+  fresh.tool_count = 2;
+  fresh.latest_activity = {
+    label: fresh.calls[1].tool_name,
+    detail: fresh.calls[1].detail,
+    scope: fresh.calls[1].scope,
+    status: fresh.calls[1].status,
+    started_at: fresh.calls[1].started_at,
+    finished_at: fresh.calls[1].finished_at,
+  };
+  fresh.updated_at = fresh.calls[1].finished_at;
+
+  const scenario = `
+    setTimeout(() => {
+      window.dispatchEvent(new CustomEvent("openai:set_globals", {
+        detail: { globals: { toolOutput: ${JSON.stringify(fresh)} } },
+      }));
+      setTimeout(() => {
+        const rows = document.querySelectorAll(".activity-row");
+        document.getElementById("smoke-marker").textContent = rows.length === 2
+          ? "SMOKE_PASS inline-fresh-globals-recovery"
+          : "SMOKE_FAIL inline-fresh-globals-recovery rows=" + rows.length;
+      }, 50);
+    }, 50);
+  `;
+  const dom = await runChrome(prepareInlineHtml(initial, scenario, { pollState: initial }), 200);
+  if (!dom.includes("SMOKE_PASS inline-fresh-globals-recovery")) {
+    throw new Error("Inline fresh globals recovery smoke failed");
+  }
+}
+
 async function expandedLiveAnimationContinuityScenario() {
   const live = selected(false);
   live.run_id = "expanded-animation";
@@ -706,11 +745,13 @@ async function expandedLiveAnimationContinuityScenario() {
     const first = ${JSON.stringify(live)};
     testPanel.render(first);
     const firstMarkAnimation = testRoot.querySelector(".activity-logo-mark")?.getAnimations()[0];
+    const firstStatus = testRoot.querySelector('.activity-row[data-status="running"] .activity-status')?.textContent;
     const firstStatusAnimation = testRoot.querySelector('.activity-row[data-status="running"] .activity-status')?.getAnimations()[0];
     const second = structuredClone(first);
     second.updated_at += 0.5;
     testPanel.render(second);
     const secondMarkAnimation = testRoot.querySelector(".activity-logo-mark")?.getAnimations()[0];
+    const secondStatus = testRoot.querySelector('.activity-row[data-status="running"] .activity-status')?.textContent;
     const secondStatusAnimation = testRoot.querySelector('.activity-row[data-status="running"] .activity-status')?.getAnimations()[0];
     const finished = structuredClone(second);
     finished.updated_at += 0.5;
@@ -719,14 +760,17 @@ async function expandedLiveAnimationContinuityScenario() {
     testPanel.render(finished);
     const finishedStatus = testRoot.querySelector('.activity-row[data-status="success"] .activity-status')?.textContent;
     const pass = firstMarkAnimation
-      && firstStatusAnimation
+      && firstStatus === "…"
       && secondMarkAnimation === firstMarkAnimation
-      && secondStatusAnimation === firstStatusAnimation
+      && secondStatus === "…"
+      && !firstStatusAnimation
+      && !secondStatusAnimation
       && finishedStatus === "✓";
     document.getElementById("smoke-marker").textContent = pass
       ? "SMOKE_PASS expanded-live-animation-continuity"
       : "SMOKE_FAIL expanded-live-animation-continuity mark=" + (secondMarkAnimation === firstMarkAnimation)
-        + " status=" + (secondStatusAnimation === firstStatusAnimation)
+        + " status=" + firstStatus + "/" + secondStatus
+        + " animated=" + Boolean(firstStatusAnimation || secondStatusAnimation)
         + " finished=" + finishedStatus;
   `;
   const dom = await runChrome(prepareInlineHtml(live, scenario), 200);
@@ -1885,6 +1929,7 @@ await overviewAnimationContinuityScenario();
 await runningIconAnimationScenario();
 await inlineHiddenTimerScenario();
 await inlineStaleGlobalsAnimationScenario();
+await inlineFreshGlobalsRecoveryScenario();
 await expandedLiveAnimationContinuityScenario();
 await inlineExpandedHeightNotificationScenario();
 await overviewRequestScenario(10);

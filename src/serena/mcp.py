@@ -631,6 +631,12 @@ class SerenaMCPFactory:
         activity_run_manager = self._activity_run_manager
         activity_view = self._activity_view
 
+        def activity_session_id(run_id: str) -> str:
+            run = agent.execution_store.get_activity_run(run_id)
+            if run is None:
+                raise ValueError("Activity run is not available")
+            return run.session_id
+
         @mcp.tool(
             name="show_activity",
             title="Show Serena Activity",
@@ -716,10 +722,10 @@ class SerenaMCPFactory:
             },
             structured_output=True,
         )
-        async def get_activity(run_id: str, mcp_ctx: Context) -> dict[str, Any]:
+        async def get_activity(run_id: str) -> dict[str, Any]:
             snapshot = await asyncio.to_thread(
                 activity_view.for_run,
-                get_mcp_session_id(mcp_ctx),
+                activity_session_id(run_id),
                 run_id,
             )
             return activity_snapshot_payload(snapshot)
@@ -736,8 +742,8 @@ class SerenaMCPFactory:
             },
             structured_output=True,
         )
-        def get_activity_detail(run_id: str, call_id: str, mcp_ctx: Context) -> dict[str, Any]:
-            detail = activity_view.call_detail(get_mcp_session_id(mcp_ctx), run_id, call_id)
+        def get_activity_detail(run_id: str, call_id: str) -> dict[str, Any]:
+            detail = activity_view.call_detail(activity_session_id(run_id), run_id, call_id)
             return activity_call_detail_payload(detail)
 
         @mcp.tool(
@@ -752,8 +758,8 @@ class SerenaMCPFactory:
             },
             structured_output=False,
         )
-        def get_activity_media(run_id: str, call_id: str, mcp_ctx: Context) -> CallToolResult:
-            media = activity_view.call_media(get_mcp_session_id(mcp_ctx), run_id, call_id)
+        def get_activity_media(run_id: str, call_id: str) -> CallToolResult:
+            media = activity_view.call_media(activity_session_id(run_id), run_id, call_id)
             link = ResourceLink(
                 type="resource_link",
                 name=media.name,
@@ -782,10 +788,10 @@ class SerenaMCPFactory:
             },
             structured_output=True,
         )
-        async def get_activity_job_detail(run_id: str, job_id: str, mcp_ctx: Context) -> dict[str, Any]:
+        async def get_activity_job_detail(run_id: str, job_id: str) -> dict[str, Any]:
             detail = await asyncio.to_thread(
                 activity_view.job_detail,
-                get_mcp_session_id(mcp_ctx),
+                activity_session_id(run_id),
                 run_id,
                 job_id,
             )

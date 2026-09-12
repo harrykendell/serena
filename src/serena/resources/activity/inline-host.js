@@ -142,6 +142,7 @@
   function render(next) {
     if (!next?.run_id) return;
     if (runId && next.run_id !== runId) return;
+    if (runId && Number(next.updated_at || 0) < Number(snapshot?.updated_at || 0)) return;
     runId = next.run_id;
     snapshot = next;
     applyInitialCollapsedPolicy(next);
@@ -197,10 +198,11 @@
 
   function acceptGlobals(event) {
     const next = event?.detail?.globals?.toolOutput;
-    if (!next?.run_id || runId) return;
+    if (!next?.run_id) return;
+    if (runId && next.run_id !== runId) return;
+    if (runId && Number(next.updated_at || 0) <= Number(snapshot?.updated_at || 0)) return;
 
-    // seed an iframe that started before ChatGPT supplied its initial tool output;
-    // once a run is known, canonical live state belongs to the get_activity poll.
+    // seed a new iframe, or recover from a newer same-run host snapshot if app polling stalled.
     detailGeneration += 1;
     panel.setExpandedEntryId(null);
     render(next);
