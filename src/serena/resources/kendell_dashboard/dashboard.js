@@ -409,8 +409,6 @@ function renderSerenaOverview(panels) {
   visibleActivityPanels = [];
   selectedSerenaPanel = null;
   selectedSerenaRoot = null;
-  setText("serena-panel-count", panels.length, "0");
-  setSectionDetail("serena", false);
 
   if (!panels.length) {
     for (const { panel } of serenaOverviewPanels.values()) panel.destroy();
@@ -498,8 +496,6 @@ function renderSelectedSerena(snapshot) {
   const container = byId("serena-widgets");
   if (!container || !snapshot) return;
   const summaries = latestOverview?.serena?.panels || [];
-  setSectionDetail("serena", false);
-  setText("serena-panel-count", summaries.length || 1, "1");
   applyActivityView("serena");
 
   if (!selectedSerenaRoot || !selectedSerenaPanel || selectedSerenaRoot.dataset.panelId !== currentRoute.panelId) {
@@ -554,17 +550,12 @@ async function loadDashboardMedia(callId, media) {
   };
 }
 
-function setSectionDetail(kind, selected, title = "") {
-  const titleNode = byId(kind === "serena" ? "serena-activity-title" : "orchestrator-title");
+function setOrchestratorSectionDetail(selected, title = "") {
+  const titleNode = byId("orchestrator-title");
   const noteNode = titleNode?.parentElement?.querySelector(".section-note");
   if (!titleNode || !noteNode) return;
-  if (kind === "serena") {
-    titleNode.textContent = selected ? title : "Serena";
-    noteNode.textContent = selected ? "Selected retained ChatGPT session" : "Retained ChatGPT sessions";
-  } else {
-    titleNode.textContent = selected ? title : "Orchestrator";
-    noteNode.textContent = selected ? "Selected retained orchestration" : "Retained orchestrations";
-  }
+  titleNode.textContent = selected ? title : "Orchestrator";
+  noteNode.textContent = selected ? "Selected retained orchestration" : "Retained orchestrations";
 }
 
 function emptyCard(message) {
@@ -593,7 +584,7 @@ function renderOrchestratorOverview(panels) {
   if (!container) return;
   container.replaceChildren();
   setText("orchestrator-panel-count", panels.length, "0");
-  setSectionDetail("orchestrator", false);
+  setOrchestratorSectionDetail(false);
   if (!panels.length) {
     container.append(emptyCard("No orchestration activity recorded yet."));
     return;
@@ -626,7 +617,7 @@ function renderSelectedOrchestrator(documentState) {
   if (!container || !documentState) return;
   container.replaceChildren();
   visibleActivityPanels = [];
-  setSectionDetail("orchestrator", true, documentState.display_name || "Orchestrator");
+  setOrchestratorSectionDetail(true, documentState.display_name || "Orchestrator");
   setText("orchestrator-panel-count", "1", "1");
   applyActivityView("orchestrator");
   container.append(selectedBackButton("All orchestrations"));
