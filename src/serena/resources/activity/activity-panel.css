@@ -307,6 +307,7 @@
   line-height: 1;
 }
 
+.activity-row[data-status="starting"] .activity-status,
 .activity-row[data-status="running"] .activity-status {
   color: #00491e;
   animation: activity-running-pulse 1.4s ease-in-out infinite;
@@ -324,6 +325,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .activity-row[data-status="starting"] .activity-status,
   .activity-row[data-status="running"] .activity-status {
     animation: none;
   }
@@ -343,6 +345,7 @@
 }
 
 @media (prefers-color-scheme: dark) {
+  .activity-row[data-status="starting"] .activity-status,
   .activity-row[data-status="running"] .activity-status {
     color: #70c990;
   }

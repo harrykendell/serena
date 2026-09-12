@@ -23,7 +23,8 @@
   }
 
   function isRunning(item) {
-    return status(item?.status) === "running";
+    const current = status(item?.status);
+    return current === "starting" || current === "running";
   }
 
   function hasRunningActivity(next) {

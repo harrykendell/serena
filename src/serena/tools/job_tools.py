@@ -147,7 +147,7 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
             if wait_for is not None:
                 raise UserFacingError("wait_for requires job_id")
             snapshots = self._job_manager.list_job_snapshots()
-            running_jobs = sum(snapshot.record.status is JobStatus.RUNNING for snapshot in snapshots)
+            running_jobs = sum(not snapshot.record.status.is_terminal for snapshot in snapshots)
             jobs: list[dict[str, object]] = []
             for snapshot in snapshots:
                 record = snapshot.record
@@ -162,8 +162,8 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
             }
 
         snapshot = self._job_manager.get_job(job_id, cursor, output_mode=output)
-        if wait_for is not None and snapshot.record.status is JobStatus.RUNNING:
-            while snapshot.record.status is JobStatus.RUNNING:
+        if wait_for is not None and not snapshot.record.status.is_terminal:
+            while not snapshot.record.status.is_terminal:
                 if deadline is None:
                     sleep_seconds = 0.25
                 else:

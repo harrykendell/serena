@@ -28,6 +28,7 @@ from serena.retention import JobRetentionState
 
 DEFAULT_MAX_CONCURRENT_JOBS = 12
 DEFAULT_OUTPUT_CHAR_LIMIT = 12_000
+_STARTUP_GRACE_SECONDS = 5.0
 _MAX_CURSOR_LENGTH = 4096
 _JOB_UNIT_PREFIX = "serena-job-"
 _ANSI_ESCAPE_RE = re.compile(r"(?:\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\\\))")
@@ -57,6 +58,7 @@ _INHERITED_ENVIRONMENT_VARIABLES = (
 class JobStatus(str, Enum):
     """Lifecycle state of a Serena background job."""
 
+    STARTING = "starting"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -66,7 +68,7 @@ class JobStatus(str, Enum):
     @property
     def is_terminal(self) -> bool:
         """:return: whether no further execution is expected for this state."""
-        return self is not JobStatus.RUNNING
+        return self not in (JobStatus.STARTING, JobStatus.RUNNING)
 
 
 class JobRetentionObserver(Protocol):
@@ -854,21 +856,52 @@ class JobStore:
                 if row is None:
                     raise UserFacingError(f"Unknown job ID {job_id!r}")
                 updated = replace(self._record_from_row(row), **changes)
-                self._connection.execute(
-                    """
-                    UPDATE jobs
-                    SET unit_name = ?, project_root = ?, cwd = ?, status = ?, created_at = ?,
-                        session_id = ?, project_name = ?, label = ?, timeout_seconds = ?,
-                        process_group_id = ?, finished_at = ?, return_code = ?, status_message = ?
-                    WHERE job_id = ?
-                    """,
-                    (*self._record_values(updated)[1:], job_id),
-                )
+                self._write_record(updated)
                 self._connection.commit()
                 return updated
             except Exception:
                 self._connection.rollback()
                 raise
+
+    def transition_status(
+        self,
+        job_id: str,
+        expected_status: JobStatus,
+        status: JobStatus,
+        **changes: object,
+    ) -> JobRecord:
+        """Atomically transition one job from ``expected_status`` and otherwise return its current record."""
+        self.validate_job_id(job_id)
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+                if row is None:
+                    raise UserFacingError(f"Unknown job ID {job_id!r}")
+                current = self._record_from_row(row)
+                if current.status is not expected_status:
+                    self._connection.rollback()
+                    return current
+                updated = replace(current, status=status, **changes)
+                self._write_record(updated)
+                self._connection.commit()
+                return updated
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    def _write_record(self, record: JobRecord) -> None:
+        """Persist the complete mutable row for one job inside the caller's transaction."""
+        self._connection.execute(
+            """
+            UPDATE jobs
+            SET unit_name = ?, project_root = ?, cwd = ?, status = ?, created_at = ?,
+                session_id = ?, project_name = ?, label = ?, timeout_seconds = ?,
+                process_group_id = ?, finished_at = ?, return_code = ?, status_message = ?
+            WHERE job_id = ?
+            """,
+            (*self._record_values(record)[1:], record.job_id),
+        )
 
     def list_records(self) -> list[JobRecord]:
         """:return: all persisted job records."""
@@ -877,11 +910,11 @@ class JobStore:
             return [self._record_from_row(row) for row in rows]
 
     def list_running_records(self) -> list[JobRecord]:
-        """:return: jobs whose persisted lifecycle is still running via the status index."""
+        """:return: jobs whose persisted lifecycle is still non-terminal via the status index."""
         with self._lock:
             rows = self._connection.execute(
-                "SELECT * FROM jobs WHERE status = ? ORDER BY created_at DESC",
-                (JobStatus.RUNNING.value,),
+                "SELECT * FROM jobs WHERE status IN (?, ?) ORDER BY created_at DESC",
+                (JobStatus.STARTING.value, JobStatus.RUNNING.value),
             ).fetchall()
             return [self._record_from_row(row) for row in rows]
 
@@ -1038,7 +1071,7 @@ class JobManager:
             JobRetentionState(
                 job_id=record.job_id,
                 session_id=record.session_id,
-                is_running=record.status is JobStatus.RUNNING,
+                is_running=not record.status.is_terminal,
                 finished_at=(datetime.fromisoformat(record.finished_at).timestamp() if record.finished_at else None),
             )
             for record in current_records
@@ -1080,14 +1113,14 @@ class JobManager:
             raise UserFacingError("timeout_seconds must be positive when provided")
         resolved_cwd = self._resolve_cwd(project_root, cwd)
 
-        # serialise starts across ChatGPT chats and Serena processes so the six-job limit is strict
+        # serialise starts across ChatGPT chats and Serena processes so the concurrency limit is strict
         with self._store.start_lock():
             self._store.cleanup_orphan_command_files()
             records = [self._reconcile_record(record) for record in self._store.list_records()]
-            running = [record for record in records if record.status is JobStatus.RUNNING]
-            if len(running) >= self._max_concurrent_jobs:
+            live = [record for record in records if not record.status.is_terminal]
+            if len(live) >= self._max_concurrent_jobs:
                 self._sync_retention_observer(records)
-                active_ids = ", ".join(record.job_id for record in running)
+                active_ids = ", ".join(record.job_id for record in live)
                 raise JobLimitError(
                     f"Cannot start another job: the limit of {self._max_concurrent_jobs} concurrent jobs is already in use. "
                     f"Running job IDs: {active_ids}. Check them with job_status or cancel one explicitly."
@@ -1100,13 +1133,13 @@ class JobManager:
                 unit_name=f"{_JOB_UNIT_PREFIX}{job_id}.service",
                 project_root=str(Path(project_root).resolve()),
                 cwd=str(resolved_cwd),
-                status=JobStatus.RUNNING,
+                status=JobStatus.STARTING,
                 created_at=now,
                 session_id=session_id,
                 project_name=project_name,
                 label=label,
                 timeout_seconds=timeout_seconds,
-                status_message="Job started and is running independently of the Serena MCP process.",
+                status_message="Job launch is being established.",
             )
             self._store.create(record)
 
@@ -1114,14 +1147,21 @@ class JobManager:
             try:
                 command_file = self._store.create_command_file(job_id, command)
                 self._backend.start(record, command_file, self._store.state_file(job_id))
+                record = self._store.transition_status(
+                    job_id,
+                    JobStatus.STARTING,
+                    JobStatus.RUNNING,
+                    status_message="Job started and is running independently of the Serena MCP process.",
+                )
             except Exception as error:
                 if command_file is not None:
                     command_file.unlink(missing_ok=True)
                 status_message = str(error) if isinstance(error, UserFacingError) else "Job could not be started."
                 try:
-                    failed_record = self._store.update(
+                    failed_record = self._store.transition_status(
                         job_id,
-                        status=JobStatus.FAILED,
+                        JobStatus.STARTING,
+                        JobStatus.FAILED,
                         finished_at=datetime.now(UTC).isoformat(),
                         status_message=status_message,
                     )
@@ -1131,7 +1171,8 @@ class JobManager:
                 raise
 
             self._sync_retention_observer([*records, record])
-            return record, len(running) + 1
+            live_count = len(live) + (0 if record.status.is_terminal else 1)
+            return record, live_count
 
     def get_job(
         self,
@@ -1149,7 +1190,7 @@ class JobManager:
         """Returns lightweight current metadata for one job without runtime telemetry or output."""
         stored = self._store.read(job_id)
         record = self._reconcile_record(stored)
-        if stored.status is JobStatus.RUNNING and record.status.is_terminal:
+        if not stored.status.is_terminal and record.status.is_terminal:
             self._sync_retention_observer()
         return record
 
@@ -1165,21 +1206,21 @@ class JobManager:
             except KeyError:
                 continue
             record = self._reconcile_record(stored)
-            lifecycle_changed = lifecycle_changed or (stored.status is JobStatus.RUNNING and record.status.is_terminal)
+            lifecycle_changed = lifecycle_changed or (not stored.status.is_terminal and record.status.is_terminal)
             records.append(record)
         if lifecycle_changed:
             self._sync_retention_observer()
         return records
 
     def list_running_jobs(self) -> list[JobRecord]:
-        """Returns current running-job metadata from the indexed running set."""
+        """Returns current non-terminal job metadata from the indexed live set."""
         stored_records = self._store.list_running_records()
         running: list[JobRecord] = []
         lifecycle_changed = False
         for stored in stored_records:
             current = self._reconcile_record(stored)
             lifecycle_changed = lifecycle_changed or current.status.is_terminal
-            if current.status is JobStatus.RUNNING:
+            if not current.status.is_terminal:
                 running.append(current)
         if lifecycle_changed:
             self._sync_retention_observer()
@@ -1192,7 +1233,7 @@ class JobManager:
         return JobSnapshot(record=record, runtime=self._backend.runtime_info(record), output=output)
 
     def list_jobs(self, limit: int = 20) -> list[JobRecord]:
-        """List all running jobs followed by recent terminal jobs."""
+        """List all non-terminal jobs followed by recent terminal jobs."""
         if limit <= 0:
             raise ValueError("limit must be positive")
 
@@ -1200,7 +1241,7 @@ class JobManager:
         records = [self._reconcile_record(record) for record in self._store.list_records()]
         self._sync_retention_observer(records)
         running = sorted(
-            (record for record in records if record.status is JobStatus.RUNNING),
+            (record for record in records if not record.status.is_terminal),
             key=lambda record: record.created_at,
             reverse=True,
         )
@@ -1216,7 +1257,7 @@ class JobManager:
         """List jobs with lightweight telemetry but without retrieving their output."""
         records = self.list_jobs(limit=limit)
         if running_only:
-            records = [record for record in records if record.status is JobStatus.RUNNING]
+            records = [record for record in records if not record.status.is_terminal]
         return [JobSnapshot(record=record, runtime=self._backend.runtime_info(record)) for record in records]
 
     def cancel_job(self, job_id: str) -> JobRecord:
@@ -1246,41 +1287,79 @@ class JobManager:
         return updated
 
     def _reconcile_record(self, record: JobRecord) -> JobRecord:
-        if record.status is not JobStatus.RUNNING:
+        if record.status.is_terminal:
             self._store.delete_command_file(record.job_id)
             return record
+
+        # accept an active backend as authoritative evidence that launch succeeded
         if self._backend.is_running(record):
+            if record.status is JobStatus.STARTING:
+                return self._store.transition_status(
+                    record.job_id,
+                    JobStatus.STARTING,
+                    JobStatus.RUNNING,
+                    status_message="Job started and is running independently of the Serena MCP process.",
+                )
             return record
 
-        # re-read after querying systemd because the runner may have written its terminal state concurrently
+        # re-read after querying systemd because the runner may have written a new lifecycle state concurrently
         current = self._store.read(record.job_id)
-        if current.status is not JobStatus.RUNNING:
+        if current.status.is_terminal:
             self._store.delete_command_file(record.job_id)
             return current
 
-        # Clean up any process-group descendants that escaped the systemd cgroup before recording the terminal state.
-        self._backend.cancel(current)
-
         now = datetime.now(UTC)
         created_at = datetime.fromisoformat(current.created_at)
-        timed_out = current.timeout_seconds is not None and (now - created_at).total_seconds() >= current.timeout_seconds
-        if timed_out:
-            updated = self._store.update(
+        age_seconds = (now - created_at).total_seconds()
+        if current.status is JobStatus.STARTING:
+            if age_seconds < _STARTUP_GRACE_SECONDS:
+                return current
+
+            # one final backend check avoids failing a launch that became active at the grace boundary
+            if self._backend.is_running(current):
+                return self._store.transition_status(
+                    current.job_id,
+                    JobStatus.STARTING,
+                    JobStatus.RUNNING,
+                    status_message="Job started and is running independently of the Serena MCP process.",
+                )
+
+            self._backend.cancel(current)
+            updated = self._store.transition_status(
                 current.job_id,
-                status=JobStatus.TIMED_OUT,
+                JobStatus.STARTING,
+                JobStatus.FAILED,
+                finished_at=now.isoformat(),
+                status_message=(f"Job did not finish starting within {_STARTUP_GRACE_SECONDS:g} seconds."),
+            )
+            if updated.status.is_terminal:
+                self._store.delete_command_file(current.job_id)
+            return updated
+
+        # clean up any process-group descendants that escaped the systemd cgroup before recording the terminal state
+        self._backend.cancel(current)
+
+        timed_out = current.timeout_seconds is not None and age_seconds >= current.timeout_seconds
+        if timed_out:
+            updated = self._store.transition_status(
+                current.job_id,
+                JobStatus.RUNNING,
+                JobStatus.TIMED_OUT,
                 finished_at=now.isoformat(),
                 status_message=f"Job exceeded its {current.timeout_seconds}-second runtime limit.",
             )
         else:
-            updated = self._store.update(
+            updated = self._store.transition_status(
                 current.job_id,
-                status=JobStatus.FAILED,
+                JobStatus.RUNNING,
+                JobStatus.FAILED,
                 finished_at=now.isoformat(),
                 status_message=(
                     "The job process disappeared before recording a result, for example because of a reboot or external termination."
                 ),
             )
-        self._store.delete_command_file(current.job_id)
+        if updated.status.is_terminal:
+            self._store.delete_command_file(current.job_id)
         return updated
 
     @staticmethod

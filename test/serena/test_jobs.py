@@ -137,6 +137,40 @@ class FailingJobBackend(FakeJobBackend):
         raise RuntimeError("backend start failed")
 
 
+class PollingStartBackend(FakeJobBackend):
+    """Fake backend that exposes a status poll during its launch window."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.manager: JobManager | None = None
+        self.observed_status: JobStatus | None = None
+
+    def start(self, record: JobRecord, command_file: Path, state_file: Path) -> None:
+        assert self.manager is not None
+        self.observed_status = self.manager.get_job_record(record.job_id).status
+        super().start(record, command_file, state_file)
+
+
+class CompletingStartBackend(FakeJobBackend):
+    """Fake backend whose runner reaches a terminal state before launch acknowledgement returns."""
+
+    def __init__(self, store: JobStore) -> None:
+        super().__init__()
+        self._store = store
+
+    def start(self, record: JobRecord, command_file: Path, state_file: Path) -> None:
+        assert state_file.exists()
+        command_file.unlink()
+        self.output[record.job_id] = []
+        self._store.update(
+            record.job_id,
+            status=JobStatus.COMPLETED,
+            finished_at=datetime.now(UTC).isoformat(),
+            return_code=0,
+            status_message="Job completed successfully.",
+        )
+
+
 def _manager(
     tmp_path: Path,
     backend: FakeJobBackend,
@@ -221,6 +255,102 @@ def test_failed_start_becomes_terminal_and_removes_private_command(tmp_path: Pat
     assert len(records) == 1
     assert records[0].status is JobStatus.FAILED
     assert list(jobs_dir.glob(".*.command")) == []
+
+
+def test_starting_job_survives_status_poll_during_backend_launch(tmp_path: Path) -> None:
+    backend = PollingStartBackend()
+    manager = _manager(tmp_path, backend)
+    backend.manager = manager
+
+    record, running_jobs = manager.start_job("echo hello", str(tmp_path), label="launch race")
+
+    assert backend.observed_status is JobStatus.STARTING
+    assert record.status is JobStatus.RUNNING
+    assert running_jobs == 1
+
+
+def test_active_starting_job_recovers_to_running_after_manager_restart(tmp_path: Path) -> None:
+    backend = FakeJobBackend()
+    store = JobStore(tmp_path / "jobs")
+    job_id = "0123456789abcdef0123456789abcdef"
+    store.create(
+        JobRecord(
+            job_id=job_id,
+            unit_name=f"serena-job-{job_id}.service",
+            project_root=str(tmp_path),
+            cwd=str(tmp_path),
+            status=JobStatus.STARTING,
+            created_at=(datetime.now(UTC) - timedelta(seconds=10)).isoformat(),
+            label="recover launch",
+        )
+    )
+    backend.running.add(job_id)
+    manager = JobManager(store=store, backend=backend)
+
+    recovered = manager.get_job_record(job_id)
+
+    assert recovered.status is JobStatus.RUNNING
+
+
+def test_stale_starting_job_fails_and_releases_capacity(tmp_path: Path) -> None:
+    backend = FakeJobBackend()
+    store = JobStore(tmp_path / "jobs")
+    job_id = "0123456789abcdef0123456789abcdef"
+    store.create(
+        JobRecord(
+            job_id=job_id,
+            unit_name=f"serena-job-{job_id}.service",
+            project_root=str(tmp_path),
+            cwd=str(tmp_path),
+            status=JobStatus.STARTING,
+            created_at=(datetime.now(UTC) - timedelta(seconds=10)).isoformat(),
+            label="stuck launch",
+        )
+    )
+    command_file = store.create_command_file(job_id, "echo never-started")
+    manager = JobManager(store=store, backend=backend, max_concurrent_jobs=1)
+
+    failed = manager.get_job_record(job_id)
+    replacement, running_jobs = manager.start_job("echo replacement", str(tmp_path), label="replacement")
+
+    assert failed.status is JobStatus.FAILED
+    assert "did not finish starting" in (failed.status_message or "")
+    assert not command_file.exists()
+    assert replacement.status is JobStatus.RUNNING
+    assert running_jobs == 1
+
+
+def test_starting_job_counts_towards_concurrency_limit(tmp_path: Path) -> None:
+    backend = FakeJobBackend()
+    store = JobStore(tmp_path / "jobs")
+    job_id = "0123456789abcdef0123456789abcdef"
+    store.create(
+        JobRecord(
+            job_id=job_id,
+            unit_name=f"serena-job-{job_id}.service",
+            project_root=str(tmp_path),
+            cwd=str(tmp_path),
+            status=JobStatus.STARTING,
+            created_at=datetime.now(UTC).isoformat(),
+            label="launching",
+        )
+    )
+    manager = JobManager(store=store, backend=backend, max_concurrent_jobs=1)
+
+    with pytest.raises(JobLimitError, match="limit of 1"):
+        manager.start_job("echo blocked", str(tmp_path), label="blocked")
+
+
+def test_fast_terminal_result_wins_over_starting_promotion(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs")
+    backend = CompletingStartBackend(store)
+    manager = JobManager(store=store, backend=backend)
+
+    record, running_jobs = manager.start_job("true", str(tmp_path), label="instant completion")
+
+    assert record.status is JobStatus.COMPLETED
+    assert record.return_code == 0
+    assert running_jobs == 0
 
 
 def test_manager_removes_orphaned_command_for_terminal_job(tmp_path: Path) -> None:

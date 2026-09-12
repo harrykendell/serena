@@ -4,6 +4,7 @@
   const STATUS_LABELS = {
     succeeded: "Completed",
     completed: "Completed",
+    starting: "Starting",
     running: "Running",
     failed: "Failed",
     cancelled: "Cancelled",
@@ -63,7 +64,7 @@
 
   function statusIcon(status) {
     const normalized = normalizeStatus(status);
-    if (normalized === "running") return "●";
+    if (normalized === "starting" || normalized === "running") return "●";
     if (normalized === "failed" || normalized === "timed_out") return "!";
     if (normalized === "cancelled") return "×";
     if (normalized === "queued" || normalized === "pending" || normalized === "waiting") return "○";
@@ -71,7 +72,8 @@
   }
 
   function isRunning(status) {
-    return normalizeStatus(status) === "running";
+    const normalized = normalizeStatus(status);
+    return normalized === "starting" || normalized === "running";
   }
 
   function appendText(parent, text, className = "") {

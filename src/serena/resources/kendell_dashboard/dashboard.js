@@ -85,7 +85,7 @@ function setConnection(state, label) {
 
 function isSerenaActive(documentState) {
   return [...(documentState?.calls || []), ...(documentState?.jobs || [])]
-    .some(item => String(item?.status || "").toLowerCase() === "running");
+    .some(item => ["starting", "running"].includes(String(item?.status || "").toLowerCase()));
 }
 
 function isOrchestratorActive(documentState) {
@@ -105,7 +105,7 @@ function documentHasActiveWork(documentState = currentDocument) {
 function hasExpandedRunningJob() {
   if (currentRoute.kind !== "serena" || !currentRoute.expandedEntryId) return false;
   return (currentDocument?.jobs || []).some(
-    job => job.job_id === currentRoute.expandedEntryId && job.status === "running",
+    job => job.job_id === currentRoute.expandedEntryId && ["starting", "running"].includes(job.status),
   );
 }
 
