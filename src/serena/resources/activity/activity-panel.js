@@ -172,6 +172,7 @@
       this.expandedEntryId = options.expandedEntryId || null;
       this.otherJobsExpanded = false;
       this.mediaCache = new Map();
+      this.expandedCallDetailKey = null;
       this.liveNodes = [];
       this.hasRenderedRows = false;
       this.retired = false;
@@ -281,6 +282,8 @@
       this.options = { ...this.options, ...options, summaryMode: true };
       this.collapsed = true;
       this.expandedEntryId = null;
+      this.expandedCallDetailKey = null;
+      this._clearMediaCache();
       this.otherJobsExpanded = false;
       this.liveNodes = [];
       this.hasRenderedRows = false;
@@ -305,6 +308,8 @@
       if (this.expandedEntryId === next) return;
       const previous = this.expandedEntryId;
       this.expandedEntryId = next;
+      this.expandedCallDetailKey = null;
+      if (previous !== next) this._releaseMedia(previous);
       if (!this.collapsed && !this.options.summaryMode && this.hasRenderedRows) {
         this._patchExpandedRow(previous, false);
         this._patchExpandedRow(next, true);
@@ -351,6 +356,9 @@
       if (row.dataset.kind === "job") {
         const detail = this.snapshot?.expanded_job;
         if (detail?.job_id === this.expandedEntryId && this._refreshJobDetail(detailContainer, detail)) return;
+      } else {
+        const detail = this.snapshot?.expanded_call;
+        if (detail?.call_id === this.expandedEntryId && JSON.stringify(detail) === this.expandedCallDetailKey) return;
       }
 
       detailContainer.replaceChildren();
@@ -415,11 +423,25 @@
       this._notifyHeight();
     }
 
+_releaseMedia(callId) {
+      if (!callId) return;
+      const asset = this.mediaCache.get(callId);
+      if (!asset) return;
+      this.mediaCache.delete(callId);
+      Promise.resolve(asset)
+        .then(resolved => resolved?.dispose?.())
+        .catch(() => {});
+    }
+
+    _clearMediaCache() {
+      for (const callId of [...this.mediaCache.keys()]) this._releaseMedia(callId);
+    }
+
     destroy() {
       if (this.summaryFlashTimer !== null) window.clearTimeout(this.summaryFlashTimer);
       this.summaryFlashTimer = null;
       this.liveNodes = [];
-      this.mediaCache.clear();
+      this._clearMediaCache();
       this.root.replaceChildren();
     }
 
@@ -493,6 +515,49 @@
       }, 1000);
     }
 
+    _rowKey(kind, item) {
+      const startedAt = number(item.started_at ?? item.submitted_at);
+      const finishedAt = number(item.finished_at);
+      if (kind === "job") {
+        return JSON.stringify([
+          "job",
+          item.job_id,
+          item.label,
+          item.project,
+          normalizeStatus(item.status),
+          item.status_message,
+          startedAt,
+          finishedAt,
+        ]);
+      }
+      return JSON.stringify([
+        "call",
+        item.call_id,
+        item.tool_name,
+        normalizeStatus(item.status),
+        item.scope || item.project_name || "",
+        item.detail,
+        startedAt,
+        finishedAt,
+      ]);
+    }
+
+    _reconcileRows(list, desiredRows) {
+      let cursor = list.firstChild;
+      for (const row of desiredRows) {
+        if (row === cursor) {
+          cursor = cursor.nextSibling;
+          continue;
+        }
+        list.insertBefore(row, cursor);
+      }
+      while (cursor) {
+        const next = cursor.nextSibling;
+        cursor.remove();
+        cursor = next;
+      }
+    }
+
     _rowsKey(snapshot) {
       const calls = Array.isArray(snapshot?.calls) ? snapshot.calls : [];
       const jobs = Array.isArray(snapshot?.jobs) ? snapshot.jobs : [];
@@ -504,6 +569,7 @@
           call.scope,
           call.project_name,
           call.detail,
+          call.job_id,
           number(call.started_at ?? call.submitted_at),
           number(call.finished_at),
         ]),
@@ -524,6 +590,9 @@
     _renderRows() {
       const previousScroll = this.list.scrollTop;
       const followLatest = !this.hasRenderedRows || this.list.scrollHeight - this.list.scrollTop - this.list.clientHeight <= 32;
+      const focusedElement = this.root.contains(document.activeElement) ? document.activeElement : null;
+      const focusedRow = focusedElement?.closest?.(".activity-row") || null;
+      const focusedEntryId = focusedRow?.dataset.entryId || null;
       this.liveNodes = [];
 
       const snapshot = this.snapshot || {};
@@ -531,16 +600,38 @@
       const jobs = Array.isArray(snapshot.jobs) ? snapshot.jobs : [];
       const runMode = Boolean(snapshot.run_id);
       const primaryJobs = runMode ? jobs.filter(job => job.current_turn) : jobs;
+      const primaryJobIds = new Set(primaryJobs.map(job => job.job_id));
+      const visibleCalls = calls.filter(call => !(call.tool_name === "start_job" && call.job_id && primaryJobIds.has(call.job_id)));
       const backgroundJobs = runMode ? jobs.filter(job => !job.current_turn && isRunning(job.status)) : [];
       const primary = [
-        ...calls.map(call => ({ kind: "call", id: call.call_id, item: call })),
+        ...visibleCalls.map(call => ({ kind: "call", id: call.call_id, item: call })),
         ...primaryJobs.map(job => ({ kind: "job", id: job.job_id, item: job })),
       ].sort((a, b) => (number(a.item.started_at ?? a.item.submitted_at) ?? 0) - (number(b.item.started_at ?? b.item.submitted_at) ?? 0));
 
+      const existingRows = new Map();
+      for (const list of [this.list, this.otherJobsList]) {
+        for (const row of list.children) {
+          if (!row.dataset?.entryId || !row.dataset?.kind) continue;
+          existingRows.set(`${row.dataset.kind}:${row.dataset.entryId}`, row);
+        }
+      }
+      const rowFor = (kind, id, item) => {
+        const existing = existingRows.get(`${kind}:${id}`) || null;
+        const renderKey = this._rowKey(kind, item);
+        if (!existing || existing.dataset.renderKey !== renderKey) return this._renderRow(kind, id, item);
+
+        const startedAt = number(item.started_at ?? item.submitted_at);
+        const finishedAt = number(item.finished_at);
+        if (startedAt !== null && isRunning(item.status) && finishedAt === null) {
+          const elapsed = existing.querySelector(".activity-row-elapsed");
+          if (elapsed) this.liveNodes.push({ node: elapsed, startedAt });
+        }
+        return existing;
+      };
+
       this.empty.hidden = primary.length > 0 || backgroundJobs.length > 0;
-      const primaryFragment = document.createDocumentFragment();
-      for (const entry of primary) primaryFragment.append(this._renderRow(entry.kind, entry.id, entry.item));
-      this.list.replaceChildren(primaryFragment);
+      const primaryRows = primary.map(entry => rowFor(entry.kind, entry.id, entry.item));
+      this._reconcileRows(this.list, primaryRows);
       if (followLatest) this.list.scrollTop = this.list.scrollHeight;
       else this.list.scrollTop = Math.min(previousScroll, Math.max(0, this.list.scrollHeight - this.list.clientHeight));
       this.hasRenderedRows = true;
@@ -549,11 +640,15 @@
       this.otherJobsButton.textContent = backgroundJobs.length === 1 ? "1 other job running" : `${backgroundJobs.length} other jobs running`;
       this.otherJobsButton.setAttribute("aria-expanded", String(this.otherJobsExpanded));
       this.otherJobsList.hidden = !this.otherJobsExpanded || backgroundJobs.length === 0;
-      const backgroundFragment = document.createDocumentFragment();
-      if (this.otherJobsExpanded) {
-        for (const job of backgroundJobs) backgroundFragment.append(this._renderRow("job", job.job_id, job));
+      const backgroundRows = this.otherJobsExpanded
+        ? backgroundJobs.map(job => rowFor("job", job.job_id, job))
+        : [];
+      this._reconcileRows(this.otherJobsList, backgroundRows);
+      this._refreshExpandedDetail();
+
+      if (focusedElement && !focusedElement.isConnected && focusedEntryId) {
+        this._findRow(focusedEntryId)?.querySelector(".activity-row-button")?.focus({ preventScroll: true });
       }
-      this.otherJobsList.replaceChildren(backgroundFragment);
     }
 
     _renderRow(kind, id, item) {
@@ -561,6 +656,7 @@
       row.className = "activity-row";
       row.dataset.entryId = id;
       row.dataset.kind = kind;
+      row.dataset.renderKey = this._rowKey(kind, item);
       const normalizedStatus = normalizeStatus(item.status);
       row.dataset.status = normalizedStatus;
 
@@ -583,7 +679,7 @@
       appendText(titleLine, label, "activity-row-title");
       const scope = kind === "job" ? (item.project || "") : (item.scope || item.project_name || "");
       if (scope) appendText(titleLine, scope, "activity-row-scope");
-      const detail = kind === "job" ? (item.status_message || "durable job") : (item.detail || "");
+      const detail = kind === "job" ? (item.status_message || "JOB") : (item.detail || "");
       const detailNode = appendText(copy, detail, "activity-row-detail");
       copy.prepend(titleLine);
 
@@ -620,12 +716,18 @@
       const detail = kind === "call" ? snapshot.expanded_call : snapshot.expanded_job;
       const detailId = kind === "call" ? detail?.call_id : detail?.job_id;
       if (!detail || detailId !== id) {
+        if (kind === "call") this.expandedCallDetailKey = null;
         container.textContent = "Loading…";
         return;
       }
 
-      if (kind === "call") this._renderCallDetail(container, detail);
-      else this._renderJobDetail(container, detail);
+      if (kind === "call") {
+        this._renderCallDetail(container, detail);
+        this.expandedCallDetailKey = JSON.stringify(detail);
+      } else {
+        this.expandedCallDetailKey = null;
+        this._renderJobDetail(container, detail);
+      }
     }
 
     _renderCallDetail(container, detail) {
@@ -733,17 +835,19 @@
         container.textContent = media.name || media.mime_type || "Media available";
         return;
       }
+      let asset = this.mediaCache.get(callId);
+      if (!asset) {
+        asset = Promise.resolve(this.options.loadMedia(callId, media));
+        this.mediaCache.set(callId, asset);
+      }
+
       try {
-        let asset = this.mediaCache.get(callId);
-        if (!asset) {
-          asset = Promise.resolve(this.options.loadMedia(callId, media));
-          this.mediaCache.set(callId, asset);
-        }
         const resolved = await asset;
         if (this.expandedEntryId !== callId || !container.isConnected) return;
         container.replaceChildren(this._mediaNode(resolved, media));
         this._notifyHeight();
       } catch (error) {
+        if (this.mediaCache.get(callId) === asset) this.mediaCache.delete(callId);
         container.textContent = error instanceof Error ? error.message : "Could not load media";
       }
     }

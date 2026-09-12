@@ -21,11 +21,10 @@ let latestOverviewEtag = null;
 let latestTools = [];
 let latestJobs = { jobs: [], running_jobs: 0, max_concurrent_jobs: 0 };
 let visibleActivityPanels = [];
-let serenaOverviewSnapshots = new Map();
+let serenaOverviewPanels = new Map();
 let visibleElapsedNodes = [];
 let selectedSerenaPanel = null;
 let selectedSerenaRoot = null;
-let objectUrls = [];
 let pendingNotificationTarget = currentRoute.notificationTarget;
 let changeStream = null;
 let changeStreamConnected = false;
@@ -67,11 +66,6 @@ function routePath(route = currentRoute) {
 
 function dashboardAssetUrl(name) {
   return `/dashboard/${name}${DASHBOARD_ASSET_VERSION ? `?v=${encodeURIComponent(DASHBOARD_ASSET_VERSION)}` : ""}`;
-}
-
-function clearObjectUrls() {
-  for (const url of objectUrls) URL.revokeObjectURL(url);
-  objectUrls = [];
 }
 
 function setText(id, value, fallback = "—") {
@@ -148,6 +142,32 @@ function setupChangeStream() {
   });
 }
 
+class DashboardHttpError extends Error {
+  constructor(status, statusText) {
+    super(`${status} ${statusText}`);
+    this.name = "DashboardHttpError";
+    this.status = status;
+  }
+}
+
+function recoverRouteError(error) {
+  if (!(error instanceof DashboardHttpError) || currentRoute.kind === "overview") return false;
+
+  if (error.status === 400 && currentRoute.expandedEntryId) {
+    pendingNotificationTarget = null;
+    navigate({ ...currentRoute, expandedEntryId: null, notificationTarget: null }, { replace: true });
+    return true;
+  }
+
+  if (error.status === 404) {
+    pendingNotificationTarget = null;
+    navigate({ kind: "overview", notificationTarget: null }, { replace: true });
+    return true;
+  }
+
+  return false;
+}
+
 async function fetchCurrentDocument(path, etag) {
   const headers = { Accept: "application/json" };
   if (etag) headers["If-None-Match"] = etag;
@@ -156,7 +176,7 @@ async function fetchCurrentDocument(path, etag) {
     if (!etag) throw new Error("304 response without a reusable dashboard document");
     return { unchanged: true, etag };
   }
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  if (!response.ok) throw new DashboardHttpError(response.status, response.statusText);
   const data = await response.json();
   if (data?.status === "error") throw new Error(data.message || "Serena API error");
   return { unchanged: false, etag: response.headers.get("ETag"), data };
@@ -208,8 +228,12 @@ async function refresh() {
     setConnection("connected", "Connected");
   } catch (error) {
     if (generation === routeGeneration) {
-      console.error("Dashboard refresh failed", error);
-      setConnection("error", "Disconnected");
+      if (recoverRouteError(error)) {
+        setConnection("connected", "Connected");
+      } else {
+        console.error("Dashboard refresh failed", error);
+        setConnection("error", "Disconnected");
+      }
     }
   } finally {
     refreshInFlight = false;
@@ -233,7 +257,6 @@ function navigate(route, { replace = false, preserveOverviewDom = false } = {}) 
   routeGeneration += 1;
   currentDocument = null;
   currentEtag = currentRoute.kind === "overview" ? latestOverviewEtag : null;
-  clearObjectUrls();
 
   const url = new URL(window.location.href);
   url.search = "";
@@ -303,7 +326,6 @@ function restoreViewport(viewport) {
 
 function renderCurrentDocument({ preserveViewport = false } = {}) {
   const viewport = preserveViewport ? { x: window.scrollX, y: window.scrollY } : null;
-  clearObjectUrls();
   visibleElapsedNodes = [];
   if (currentRoute.kind === "serena") renderSelectedSerena(currentDocument);
   else if (currentRoute.kind === "orchestrator") renderSelectedOrchestrator(currentDocument);
@@ -341,7 +363,7 @@ function activitySummarySnapshot(panel) {
   };
 }
 
-function openSerenaSummaryPanel(panel, root, summary) {
+function openSerenaSummaryPanel(panel, root, panelId) {
   if (selectedSerenaPanel && selectedSerenaPanel !== panel) {
     const previousPanelId = selectedSerenaRoot?.dataset.panelId || null;
     const previousSummary = latestOverview?.serena?.panels?.find(item => item.panel_id === previousPanelId) || null;
@@ -351,7 +373,7 @@ function openSerenaSummaryPanel(panel, root, summary) {
 
   selectedSerenaPanel = panel;
   selectedSerenaRoot = root;
-  navigate({ kind: "serena", panelId: summary.panel_id, expandedEntryId: null });
+  navigate({ kind: "serena", panelId, expandedEntryId: null });
 }
 
 function sessionDay(timestampSeconds) {
@@ -391,13 +413,14 @@ function renderSerenaOverview(panels) {
   setSectionDetail("serena", false);
 
   if (!panels.length) {
-    serenaOverviewSnapshots = new Map();
+    for (const { panel } of serenaOverviewPanels.values()) panel.destroy();
+    serenaOverviewPanels = new Map();
     container.replaceChildren(emptyCard("No Serena session activity recorded yet."));
     return;
   }
 
-  const nextSnapshots = new Map();
-  const fragment = document.createDocumentFragment();
+  const nextPanels = new Map();
+  const desiredNodes = [];
   let previousDayKey = null;
   for (const summary of panels) {
     const day = sessionDay(summary.started_at);
@@ -405,26 +428,48 @@ function renderSerenaOverview(panels) {
       const separator = document.createElement("div");
       separator.className = "session-day-separator";
       separator.textContent = sessionDayLabel(day.date);
-      fragment.append(separator);
+      desiredNodes.push(separator);
     }
     if (day) previousDayKey = day.key;
 
     const snapshot = activitySummarySnapshot(summary);
-    const root = document.createElement("div");
-    root.dataset.panelId = summary.panel_id;
-    fragment.append(root);
-    let panel = null;
-    panel = new window.SerenaActivity.ActivityPanel(root, {
-      initialCollapsed: true,
-      summaryMode: true,
-      previousSnapshot: serenaOverviewSnapshots.get(summary.panel_id) || null,
-      onOpen: () => openSerenaSummaryPanel(panel, root, summary),
-    });
+    const existing = serenaOverviewPanels.get(summary.panel_id);
+    let root = existing?.root || null;
+    let panel = existing?.panel || null;
+    if (!root || !panel) {
+      root = document.createElement("div");
+      root.dataset.panelId = summary.panel_id;
+      panel = new window.SerenaActivity.ActivityPanel(root, {
+        initialCollapsed: true,
+        summaryMode: true,
+        onOpen: () => openSerenaSummaryPanel(panel, root, summary.panel_id),
+      });
+    } else {
+      panel.demote();
+    }
     panel.render(snapshot);
-    nextSnapshots.set(summary.panel_id, snapshot);
+    nextPanels.set(summary.panel_id, { root, panel });
+    desiredNodes.push(root);
   }
-  serenaOverviewSnapshots = nextSnapshots;
-  container.replaceChildren(fragment);
+
+  for (const [panelId, entry] of serenaOverviewPanels) {
+    if (!nextPanels.has(panelId)) entry.panel.destroy();
+  }
+  serenaOverviewPanels = nextPanels;
+
+  let cursor = container.firstChild;
+  for (const node of desiredNodes) {
+    if (node === cursor) {
+      cursor = cursor.nextSibling;
+      continue;
+    }
+    container.insertBefore(node, cursor);
+  }
+  while (cursor) {
+    const next = cursor.nextSibling;
+    cursor.remove();
+    cursor = next;
+  }
 }
 
 function selectedBackButton(label) {
@@ -458,27 +503,33 @@ function renderSelectedSerena(snapshot) {
   applyActivityView("serena");
 
   if (!selectedSerenaRoot || !selectedSerenaPanel || selectedSerenaRoot.dataset.panelId !== currentRoute.panelId) {
-    const matchingRoot = Array.from(container.children).find(
-      child => child instanceof HTMLElement && child.dataset.panelId === currentRoute.panelId,
-    );
-    if (!matchingRoot && summaries.length) {
-      renderSerenaOverview(summaries);
+    if (selectedSerenaPanel && selectedSerenaRoot?.dataset.panelId !== currentRoute.panelId) {
+      const previousPanelId = selectedSerenaRoot?.dataset.panelId || null;
+      const previousSummary = summaries.find(item => item.panel_id === previousPanelId) || null;
+      selectedSerenaPanel.demote();
+      if (previousSummary) selectedSerenaPanel.render(activitySummarySnapshot(previousSummary));
     }
 
-    selectedSerenaRoot = Array.from(container.children).find(
-      child => child instanceof HTMLElement && child.dataset.panelId === currentRoute.panelId,
-    ) || null;
-    if (!selectedSerenaRoot) {
+    let entry = serenaOverviewPanels.get(currentRoute.panelId) || null;
+    if (!entry && summaries.length) {
+      renderSerenaOverview(summaries);
+      entry = serenaOverviewPanels.get(currentRoute.panelId) || null;
+    }
+
+    if (entry) {
+      selectedSerenaRoot = entry.root;
+      selectedSerenaPanel = entry.panel;
+    } else {
       selectedSerenaRoot = document.createElement("div");
       selectedSerenaRoot.dataset.panelId = currentRoute.panelId;
       container.append(selectedSerenaRoot);
+      selectedSerenaPanel = new window.SerenaActivity.ActivityPanel(selectedSerenaRoot, {
+        initialCollapsed: false,
+        expandedEntryId: currentRoute.expandedEntryId,
+        ...selectedSerenaPanelOptions(),
+      });
+      serenaOverviewPanels.set(currentRoute.panelId, { root: selectedSerenaRoot, panel: selectedSerenaPanel });
     }
-
-    selectedSerenaPanel = new window.SerenaActivity.ActivityPanel(selectedSerenaRoot, {
-      initialCollapsed: false,
-      expandedEntryId: currentRoute.expandedEntryId,
-      ...selectedSerenaPanelOptions(),
-    });
   }
 
   selectedSerenaPanel.promote(selectedSerenaPanelOptions());
@@ -495,8 +546,12 @@ async function loadDashboardMedia(callId, media) {
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
-  objectUrls.push(url);
-  return { type: media?.media_type || (blob.type.startsWith("image/") ? "image" : blob.type.startsWith("audio/") ? "audio" : "file"), src: url, name: media?.name };
+  return {
+    type: media?.media_type || (blob.type.startsWith("image/") ? "image" : blob.type.startsWith("audio/") ? "audio" : "file"),
+    src: url,
+    name: media?.name,
+    dispose: () => URL.revokeObjectURL(url),
+  };
 }
 
 function setSectionDetail(kind, selected, title = "") {
@@ -702,13 +757,25 @@ function applyActivityView(forceView = null) {
 }
 
 function setupActivityViewTabs() {
-  for (const button of document.querySelectorAll("[data-activity-view-tab]")) {
+  const buttons = Array.from(document.querySelectorAll("[data-activity-view-tab]"));
+  for (const [index, button] of buttons.entries()) {
     button.addEventListener("click", () => {
       const view = button.dataset.activityViewTab;
       if (view !== "serena" && view !== "orchestrator") return;
       if (currentRoute.kind !== "overview") returnToOverview();
       activeOverviewView = view;
       applyActivityView();
+    });
+    button.addEventListener("keydown", event => {
+      let nextIndex = null;
+      if (event.key === "ArrowRight") nextIndex = (index + 1) % buttons.length;
+      else if (event.key === "ArrowLeft") nextIndex = (index - 1 + buttons.length) % buttons.length;
+      else if (event.key === "Home") nextIndex = 0;
+      else if (event.key === "End") nextIndex = buttons.length - 1;
+      if (nextIndex === null) return;
+      event.preventDefault();
+      buttons[nextIndex]?.focus();
+      buttons[nextIndex]?.click();
     });
   }
 }
@@ -740,18 +807,20 @@ function renderRunningJobs() {
     return;
   }
   for (const job of jobs) {
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = "resource-row resource-row-button";
+    const row = document.createElement(job.panel_id ? "button" : "div");
+    if (job.panel_id) row.type = "button";
+    row.className = job.panel_id ? "resource-row resource-row-button" : "resource-row";
     const label = document.createElement("strong");
     label.textContent = job.label || job.job_id;
     const meta = document.createElement("span");
     meta.textContent = job.project || job.status || "running";
     row.append(label, meta);
-    row.addEventListener("click", () => {
-      byId("jobs-dialog")?.close();
-      if (job.panel_id) navigate({ kind: "serena", panelId: job.panel_id, expandedEntryId: job.job_id });
-    });
+    if (job.panel_id) {
+      row.addEventListener("click", () => {
+        byId("jobs-dialog")?.close();
+        navigate({ kind: "serena", panelId: job.panel_id, expandedEntryId: job.job_id });
+      });
+    }
     container.append(row);
   }
 }

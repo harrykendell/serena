@@ -284,6 +284,20 @@
   background: color-mix(in srgb, CanvasText 4%, transparent);
 }
 
+.activity-row[data-kind="job"] .activity-row-button {
+  position: relative;
+}
+
+.activity-row[data-kind="job"] .activity-row-button::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 38px;
+  border-left: 2px solid color-mix(in srgb, var(--serena-activity-green) 72%, transparent);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--serena-activity-green) 12%, transparent), transparent);
+  pointer-events: none;
+}
+
 .activity-status {
   width: 15px;
   justify-self: center;
@@ -398,6 +412,7 @@
 }
 
 .activity-pre {
+  box-sizing: border-box;
   max-width: 100%;
   margin: 0;
   padding: 7px 8px;
@@ -408,6 +423,10 @@
   font: 11px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.activity-pre-wrap > .activity-pre {
+  padding-right: 56px;
 }
 
 .activity-error {

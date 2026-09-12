@@ -289,7 +289,7 @@ function fetchMockScript(state) {
         await new Promise(resolve => { window.__releaseStateFetch = resolve; });
       }
       let payload;
-      if (url.pathname === "/dashboard/api/state") payload = ${JSON.stringify(state)};
+      if (url.pathname === "/dashboard/api/state") payload = window.__overviewPayload ? structuredClone(window.__overviewPayload) : ${JSON.stringify(state)};
       else if (url.pathname === "/dashboard/api/serena/sessions/panel-0") {
         if (window.__selectedPayload) payload = structuredClone(window.__selectedPayload);
         else if (url.searchParams.get("expanded") === "job-0") payload = ${JSON.stringify(selectedJob(true))};
@@ -425,6 +425,96 @@ async function sessionDaySeparatorsScenario() {
   `;
   const dom = await runChrome(prepareHtml(state, scenario), 200);
   if (!dom.includes("SMOKE_PASS session-day-separators")) throw new Error("Session day separator smoke failed");
+}
+
+async function durableJobDeduplicationScenario() {
+  const snapshot = selected(false);
+  snapshot.calls = [{
+    call_id: "start-job-call",
+    tool_name: "start_job",
+    detail: "Smoke background job",
+    scope: "serena",
+    project_name: "serena",
+    started_at: 1000,
+    finished_at: 1000.1,
+    status: "completed",
+    job_id: "job-0",
+    job_label: "Smoke background job",
+  }];
+  snapshot.jobs = [{
+    job_id: "job-0",
+    label: "Smoke background job",
+    project: "serena",
+    status: "running",
+    started_at: 1000,
+    finished_at: null,
+    current_turn: true,
+    panel_id: snapshot.panel_id,
+  }];
+  snapshot.tool_count = 1;
+  snapshot.job_count = 1;
+
+  const scenario = `
+    const testRoot = document.createElement("div");
+    document.body.append(testRoot);
+    const panel = new window.SerenaActivity.ActivityPanel(testRoot, { initialCollapsed: false });
+    panel.render(${JSON.stringify(snapshot)});
+    const rows = [...testRoot.querySelectorAll(".activity-row")];
+    const jobButton = rows[0]?.querySelector(".activity-row-button");
+    const jobAccent = jobButton ? getComputedStyle(jobButton, "::before") : null;
+    const jobDetail = rows[0]?.querySelector(".activity-row-detail");
+    const pass = rows.length === 1
+      && rows[0]?.dataset.kind === "job"
+      && rows[0]?.dataset.entryId === "job-0"
+      && jobDetail?.textContent === "JOB"
+      && jobAccent?.backgroundImage?.includes("linear-gradient")
+      && !testRoot.textContent.includes("start_job");
+    document.getElementById("smoke-marker").textContent = pass
+      ? "SMOKE_PASS durable-job-deduplication"
+      : "SMOKE_FAIL durable-job-deduplication rows=" + rows.length + " text=" + testRoot.textContent;
+  `;
+  const dom = await runChrome(prepareInlineHtml(snapshot, scenario), 200);
+  if (!dom.includes("SMOKE_PASS durable-job-deduplication")) throw new Error("Durable-job deduplication smoke failed");
+}
+
+async function overviewAnimationContinuityScenario() {
+  const state = overview(2);
+  const updated = structuredClone(state);
+  updated.serena.panels[0].tool_count = 2;
+  updated.serena.panels[0].latest_activity = {
+    ...updated.serena.panels[0].latest_activity,
+    detail: "updated activity",
+    started_at: updated.serena.panels[0].latest_activity.started_at + 0.5,
+  };
+
+  const scenario = `
+    let beforeRoot = null;
+    let beforeHeader = null;
+    let beforeAnimation = null;
+    setTimeout(() => {
+      beforeRoot = document.querySelector('#serena-widgets [data-panel-id="panel-0"]');
+      beforeHeader = beforeRoot?.querySelector(".activity-header");
+      beforeAnimation = beforeRoot?.querySelector(".activity-logo-mark")?.getAnimations()[0];
+      beforeHeader?.focus();
+      window.__overviewPayload = ${JSON.stringify(updated)};
+      window.dispatchEvent(new Event("focus"));
+    }, 80);
+    setTimeout(() => {
+      const afterRoot = document.querySelector('#serena-widgets [data-panel-id="panel-0"]');
+      const afterAnimation = afterRoot?.querySelector(".activity-logo-mark")?.getAnimations()[0];
+      const pass = beforeRoot === afterRoot
+        && beforeAnimation
+        && afterAnimation === beforeAnimation
+        && document.activeElement === beforeHeader;
+      document.getElementById("smoke-marker").textContent = pass
+        ? "SMOKE_PASS overview-animation-continuity"
+        : "SMOKE_FAIL overview-animation-continuity root=" + (beforeRoot === afterRoot)
+          + " animation=" + (afterAnimation === beforeAnimation)
+          + " focus=" + (document.activeElement === beforeHeader);
+    }, 220);
+  `;
+  const dom = await runChrome(prepareHtml(state, scenario), 350);
+  if (!dom.includes("SMOKE_PASS overview-animation-continuity")) throw new Error("Overview animation continuity smoke failed");
 }
 
 async function runningIconAnimationScenario() {
@@ -1092,6 +1182,137 @@ async function jobOutputScrollStabilityScenario() {
 }
 
 
+async function structuredValueReadabilityScenario() {
+  const snapshot = selected(true);
+  snapshot.calls[0].status = "completed";
+  snapshot.calls[0].finished_at = 1001;
+  snapshot.expanded_call.status = "completed";
+  snapshot.expanded_call.structured_result = {
+    files: ["README.md"],
+    result: [{ name_path: "durableJobDeduplicationScenario", relative_path: "scripts/smoke_activity_ui.mjs" }],
+    lines: "first line\nsecond line",
+  };
+
+  const scenario = `
+    const testRoot = document.createElement("div");
+    document.body.append(testRoot);
+    const panel = new window.SerenaActivity.ActivityPanel(testRoot, {
+      initialCollapsed: false,
+      expandedEntryId: "call-0",
+    });
+    panel.render(${JSON.stringify(snapshot)});
+    const result = testRoot.querySelector(".activity-detail-result");
+    const visibleLeaf = [...result.querySelectorAll("dt, dd")].find(node => node.textContent.includes("durableJobDeduplicationScenario"));
+    const pre = testRoot.querySelector(".activity-pre-wrap > .activity-pre");
+    const style = pre ? getComputedStyle(pre) : null;
+    const pass = result?.innerText.includes("README.md")
+      && result.innerText.includes("durableJobDeduplicationScenario")
+      && visibleLeaf?.getClientRects().length > 0
+      && style?.boxSizing === "border-box"
+      && parseFloat(style.paddingRight) >= 50;
+    document.getElementById("smoke-marker").textContent = pass
+      ? "SMOKE_PASS structured-value-disclosure"
+      : "SMOKE_FAIL structured-value-disclosure text=" + result?.innerText
+        + " visible=" + Boolean(visibleLeaf?.getClientRects().length)
+        + " padding=" + style?.paddingRight + " box=" + style?.boxSizing;
+  `;
+  const dom = await runChrome(prepareInlineHtml(snapshot, scenario), 200);
+  if (!dom.includes("SMOKE_PASS structured-value-disclosure")) throw new Error("Structured-value disclosure smoke failed");
+}
+
+async function selectedRowIdentityScenario() {
+  const snapshot = selected(true);
+  snapshot.calls = [
+    { ...call(0, false), status: "completed" },
+    { ...call(1, true), status: "running" },
+  ];
+  snapshot.tool_count = 2;
+  snapshot.expanded_call.status = "completed";
+  snapshot.expanded_call.structured_result = { ok: true, detail: "stable detail" };
+
+  const scenario = `
+    const testRoot = document.createElement("div");
+    document.body.append(testRoot);
+    const panel = new window.SerenaActivity.ActivityPanel(testRoot, {
+      initialCollapsed: false,
+      expandedEntryId: "call-0",
+    });
+    const first = ${JSON.stringify(snapshot)};
+    panel.render(first);
+    const stableRow = testRoot.querySelector('[data-entry-id="call-0"]');
+    const stableDetail = stableRow?.querySelector(".activity-detail");
+    const changingButton = testRoot.querySelector('[data-entry-id="call-1"] .activity-row-button');
+    changingButton?.focus();
+
+    const second = structuredClone(first);
+    second.calls[1].status = "completed";
+    second.calls[1].finished_at = second.calls[1].started_at + 1;
+    panel.render(second);
+
+    const nextStableRow = testRoot.querySelector('[data-entry-id="call-0"]');
+    const nextStableDetail = nextStableRow?.querySelector(".activity-detail");
+    const nextChangingButton = testRoot.querySelector('[data-entry-id="call-1"] .activity-row-button');
+    const pass = stableRow === nextStableRow
+      && stableDetail === nextStableDetail
+      && document.activeElement === nextChangingButton;
+    document.getElementById("smoke-marker").textContent = pass
+      ? "SMOKE_PASS selected-row-identity"
+      : "SMOKE_FAIL selected-row-identity row=" + (stableRow === nextStableRow)
+        + " detail=" + (stableDetail === nextStableDetail)
+        + " focus=" + (document.activeElement === nextChangingButton);
+  `;
+  const dom = await runChrome(prepareInlineHtml(snapshot, scenario), 200);
+  if (!dom.includes("SMOKE_PASS selected-row-identity")) throw new Error("Selected row identity smoke failed");
+}
+
+async function mediaLifetimeAndRetryScenario() {
+  const snapshot = selected(true);
+  snapshot.calls[0].status = "completed";
+  snapshot.calls[0].finished_at = 1001;
+  snapshot.expanded_call.status = "completed";
+  snapshot.expanded_call.media = {
+    media_type: "file",
+    name: "result.txt",
+    mime_type: "text/plain",
+  };
+
+  const scenario = `
+    const testRoot = document.createElement("div");
+    document.body.append(testRoot);
+    let attempts = 0;
+    let disposals = 0;
+    const panel = new window.SerenaActivity.ActivityPanel(testRoot, {
+      initialCollapsed: false,
+      expandedEntryId: "call-0",
+      loadMedia: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("transient media failure");
+        return { type: "file", src: "#media-result", name: "result.txt", dispose: () => { disposals += 1; } };
+      },
+    });
+    const state = ${JSON.stringify(snapshot)};
+    panel.render(state);
+    setTimeout(() => {
+      panel.render(structuredClone(state));
+      setTimeout(() => {
+        const link = testRoot.querySelector(".activity-file");
+        panel.render(structuredClone(state));
+        setTimeout(() => {
+          const cached = attempts === 2 && testRoot.querySelector(".activity-file")?.getAttribute("href") === "#media-result";
+          panel.setExpandedEntryId(null);
+          panel.destroy();
+          const pass = link && cached && disposals === 1;
+          document.getElementById("smoke-marker").textContent = pass
+            ? "SMOKE_PASS media-lifetime-retry"
+            : "SMOKE_FAIL media-lifetime-retry attempts=" + attempts + " disposals=" + disposals + " cached=" + cached;
+        }, 20);
+      }, 20);
+    }, 20);
+  `;
+  const dom = await runChrome(prepareInlineHtml(snapshot, scenario), 150);
+  if (!dom.includes("SMOKE_PASS media-lifetime-retry")) throw new Error("Media lifetime/retry smoke failed");
+}
+
 async function activitySummaryFlashScenario() {
   const state = overview(0, { active: false });
   const initial = selected(false);
@@ -1272,6 +1493,63 @@ async function returnToOverviewScenario() {
   if (!dom.includes("SMOKE_PASS return-overview")) throw new Error("Return-to-overview smoke failed");
 }
 
+async function staleRouteRecoveryScenario() {
+  const state = overview(2);
+  const staleJobPrelude = `
+    const baseFetch = window.fetch;
+    window.fetch = async input => {
+      const url = new URL(String(input), location.href);
+      if (url.pathname === "/dashboard/api/serena/sessions/panel-0" && url.searchParams.get("expanded") === "missing-job") {
+        return new Response("", { status: 400, statusText: "Bad Request" });
+      }
+      return baseFetch(input);
+    };
+  `;
+  const staleJobScenario = `
+    setTimeout(() => {
+      const selectedPanel = document.querySelector('#serena-widgets [data-panel-id="panel-0"] .serena-activity-panel');
+      const connection = document.getElementById("connection-state")?.dataset.state;
+      const pass = location.search === "?panel=panel-0" && selectedPanel && connection === "connected";
+      document.getElementById("smoke-marker").textContent = pass
+        ? "SMOKE_PASS stale-job-route-recovery"
+        : "SMOKE_FAIL stale-job-route-recovery search=" + location.search + " connection=" + connection;
+    }, 350);
+  `;
+  const staleJobDom = await runChrome(
+    prepareHtml(state, staleJobScenario, { preludeScript: staleJobPrelude }),
+    500,
+    { initialPath: "/?panel=panel-0&job=missing-job" },
+  );
+  if (!staleJobDom.includes("SMOKE_PASS stale-job-route-recovery")) throw new Error("Stale job route recovery smoke failed");
+
+  const stalePanelPrelude = `
+    const baseFetch = window.fetch;
+    window.fetch = async input => {
+      const url = new URL(String(input), location.href);
+      if (url.pathname === "/dashboard/api/serena/sessions/missing-panel") {
+        return new Response("", { status: 404, statusText: "Not Found" });
+      }
+      return baseFetch(input);
+    };
+  `;
+  const stalePanelScenario = `
+    setTimeout(() => {
+      const panels = document.querySelectorAll("#serena-widgets .serena-activity-panel").length;
+      const connection = document.getElementById("connection-state")?.dataset.state;
+      const pass = location.search === "" && panels === 2 && connection === "connected";
+      document.getElementById("smoke-marker").textContent = pass
+        ? "SMOKE_PASS stale-panel-route-recovery"
+        : "SMOKE_FAIL stale-panel-route-recovery search=" + location.search + " panels=" + panels + " connection=" + connection;
+    }, 350);
+  `;
+  const stalePanelDom = await runChrome(
+    prepareHtml(state, stalePanelScenario, { preludeScript: stalePanelPrelude }),
+    500,
+    { initialPath: "/?panel=missing-panel" },
+  );
+  if (!stalePanelDom.includes("SMOKE_PASS stale-panel-route-recovery")) throw new Error("Stale panel route recovery smoke failed");
+}
+
 async function notificationDeepLinkScenario() {
   const state = overview(1, { active: false });
   const scenario = `
@@ -1297,6 +1575,43 @@ async function notificationDeepLinkScenario() {
   `;
   const dom = await runChrome(prepareHtml(state, scenario), 10300, { initialPath: "/?panel=panel-0&job=job-0" });
   if (!dom.includes("SMOKE_PASS notification-deep-link")) throw new Error("Notification deep-link smoke failed");
+}
+
+async function secondaryInteractionScenario() {
+  const state = overview(1, { orchestratorPanels: [orchestratorPanel()] });
+  state.jobs = {
+    status: "success",
+    jobs: [{
+      job_id: "orphan-job",
+      label: "Unowned smoke job",
+      project: "serena",
+      status: "running",
+      panel_id: null,
+    }],
+    running_jobs: 1,
+    max_concurrent_jobs: 12,
+  };
+
+  const scenario = `
+    setTimeout(() => {
+      document.getElementById("jobs-button")?.click();
+      const orphan = document.querySelector("#jobs-dialog-content .resource-row");
+      const serenaTab = document.querySelector('[data-activity-view-tab="serena"]');
+      serenaTab?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+      const orchestratorTab = document.querySelector('[data-activity-view-tab="orchestrator"]');
+      const activeView = document.getElementById("activity-columns")?.dataset.activeView;
+      const pass = orphan?.tagName === "DIV"
+        && !orphan.classList.contains("resource-row-button")
+        && orchestratorTab?.getAttribute("aria-selected") === "true"
+        && activeView === "orchestrator";
+      document.getElementById("smoke-marker").textContent = pass
+        ? "SMOKE_PASS secondary-interactions"
+        : "SMOKE_FAIL secondary-interactions orphan=" + orphan?.tagName
+          + " selected=" + orchestratorTab?.getAttribute("aria-selected") + " view=" + activeView;
+    }, 120);
+  `;
+  const dom = await runChrome(prepareHtml(state, scenario), 250);
+  if (!dom.includes("SMOKE_PASS secondary-interactions")) throw new Error("Secondary interaction smoke failed");
 }
 
 async function notificationOptInScenario() {
@@ -1550,6 +1865,8 @@ async function serviceWorkerScenario() {
 
 await initialOverviewLoadScenario();
 await sessionDaySeparatorsScenario();
+await durableJobDeduplicationScenario();
+await overviewAnimationContinuityScenario();
 await runningIconAnimationScenario();
 await inlineHiddenTimerScenario();
 await inlineStaleGlobalsAnimationScenario();
@@ -1567,10 +1884,15 @@ await directSelectedSessionLoadScenario();
 await selectedSessionLiveRefreshScenario();
 await expandedRunningJobLiveOutputScenario();
 await jobOutputScrollStabilityScenario();
+await structuredValueReadabilityScenario();
+await selectedRowIdentityScenario();
+await mediaLifetimeAndRetryScenario();
 await activitySummaryFlashScenario();
 await selectedSessionScenario();
 await returnToOverviewScenario();
+await staleRouteRecoveryScenario();
 await notificationDeepLinkScenario();
+await secondaryInteractionScenario();
 await notificationOptInScenario();
 await orchestratorScenario();
 await directOrchestratorLoadScenario();
