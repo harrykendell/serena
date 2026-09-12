@@ -300,7 +300,11 @@
 
 .activity-status {
   width: 15px;
+  height: 15px;
+  align-self: center;
   justify-self: center;
+  display: grid;
+  place-items: center;
   text-align: center;
   opacity: .78;
   font-size: larger;
@@ -310,6 +314,16 @@
 .activity-row[data-status="starting"] .activity-status,
 .activity-row[data-status="running"] .activity-status {
   color: var(--serena-activity-text-muted);
+}
+
+.activity-row[data-status="starting"] .activity-status::before,
+.activity-row[data-status="running"] .activity-status::before {
+  content: "";
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: -5px 0 currentColor, 5px 0 currentColor;
 }
 
 .activity-row[data-status="completed"] .activity-status {

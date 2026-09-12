@@ -563,18 +563,25 @@ async function runningIconAnimationScenario() {
       const status = panel?.querySelector('.activity-row[data-status="running"] .activity-status');
       const elapsed = panel?.querySelector('.activity-row[data-status="running"] .activity-row-elapsed');
       const animation = mark ? getComputedStyle(mark).animationName : "";
-      const statusAnimation = status ? getComputedStyle(status).animationName : "";
+      const statusStyle = status ? getComputedStyle(status) : null;
+      const markerStyle = status ? getComputedStyle(status, "::before") : null;
       const elapsedBefore = elapsed?.textContent || "";
       setTimeout(() => {
         const elapsedAfter = elapsed?.textContent || "";
         const pass = panel?.classList.contains("activity-running")
           && animation === "serena-logo-quarter-turn"
-          && statusAnimation === "activity-running-pulse"
+          && status?.textContent === ""
+          && statusStyle?.display === "grid"
+          && statusStyle?.alignSelf === "center"
+          && markerStyle?.width === "3px"
+          && markerStyle?.height === "3px"
           && elapsedBefore !== elapsedAfter;
         document.getElementById("smoke-marker").textContent = pass
           ? "SMOKE_PASS running-icon-job"
           : "SMOKE_FAIL running-icon-job animation=" + animation
-            + " status=" + statusAnimation + " elapsed=" + elapsedBefore + "/" + elapsedAfter;
+            + " display=" + statusStyle?.display + " align=" + statusStyle?.alignSelf
+            + " marker=" + markerStyle?.width + "x" + markerStyle?.height
+            + " elapsed=" + elapsedBefore + "/" + elapsedAfter;
       }, 300);
     }, 100);
   `;
@@ -760,9 +767,9 @@ async function expandedLiveAnimationContinuityScenario() {
     testPanel.render(finished);
     const finishedStatus = testRoot.querySelector('.activity-row[data-status="success"] .activity-status')?.textContent;
     const pass = firstMarkAnimation
-      && firstStatus === "…"
+      && firstStatus === ""
       && secondMarkAnimation === firstMarkAnimation
-      && secondStatus === "…"
+      && secondStatus === ""
       && !firstStatusAnimation
       && !secondStatusAnimation
       && finishedStatus === "✓";
