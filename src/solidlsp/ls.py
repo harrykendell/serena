@@ -347,6 +347,8 @@ class SolidLanguageServer(ABC):
     change :meth:`_document_symbols_cache_fingerprint` instead.
     """
     DOCUMENT_SYMBOL_CACHE_FILENAME = "document_symbols.pkl"
+    MAX_PERSISTED_SYMBOL_CACHE_BYTES = 256 * 1024 * 1024
+    """Maximum on-disk size of one persisted symbol cache that will be deserialised at startup."""
 
     # Directories that should always be ignored regardless of language:
     # VCS internals, virtual environments, caches, and serena's own data.
@@ -2970,7 +2972,11 @@ class SolidLanguageServer(ABC):
         if cache_file.exists():
             log.info("Loading document symbols cache from %s", cache_file)
             try:
-                saved_cache = load_cache(str(cache_file), self._raw_document_symbols_cache_version())
+                saved_cache = load_cache(
+                    str(cache_file),
+                    self._raw_document_symbols_cache_version(),
+                    max_bytes=self.MAX_PERSISTED_SYMBOL_CACHE_BYTES,
+                )
                 if saved_cache is not None:
                     self._raw_document_symbols_cache = saved_cache
                     log.info(f"Loaded {len(self._raw_document_symbols_cache)} entries from raw document symbols cache.")
@@ -3005,7 +3011,11 @@ class SolidLanguageServer(ABC):
         if cache_file.exists():
             log.info("Loading document symbols cache from %s", cache_file)
             try:
-                saved_cache = load_cache(str(cache_file), self._document_symbols_cache_version())
+                saved_cache = load_cache(
+                    str(cache_file),
+                    self._document_symbols_cache_version(),
+                    max_bytes=self.MAX_PERSISTED_SYMBOL_CACHE_BYTES,
+                )
                 if saved_cache is not None:
                     self._document_symbols_cache = saved_cache
                     log.info(f"Loaded {len(self._document_symbols_cache)} entries from document symbols cache.")
