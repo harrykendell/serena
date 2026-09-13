@@ -4,7 +4,7 @@ import re
 import subprocess
 
 from serena.errors import UserFacingError
-from serena.tools.tools_base import Tool, ToolMarkerCanEdit
+from serena.tools.tools_base import Tool, ToolMarkerCanEdit, ToolMarkerDestructive, ToolMarkerOpenWorld
 
 
 class _GitTool(Tool):
@@ -59,7 +59,7 @@ class GitStatusTool(_GitTool):
         return self._run_git(["status", "--short", "--branch"])
 
 
-class GitFetchTool(_GitTool, ToolMarkerCanEdit):
+class GitFetchTool(_GitTool, ToolMarkerCanEdit, ToolMarkerOpenWorld):
     """Fetches updates from a named Git remote without changing the working tree."""
 
     def apply(self, remote: str = "origin") -> str:
@@ -110,7 +110,7 @@ class GitDiffTool(_GitTool):
         return self._run_git(args)
 
 
-class GitBranchTool(_GitTool, ToolMarkerCanEdit):
+class GitBranchTool(_GitTool, ToolMarkerCanEdit, ToolMarkerDestructive):
     """Lists, creates, switches, or safely deletes local Git branches."""
 
     def apply(self, action: str, name: str | None = None, start_point: str | None = None) -> str:
@@ -165,7 +165,7 @@ class GitCommitTool(_GitTool, ToolMarkerCanEdit):
         return self._run_git(["commit", "--only", "-m", message, "--", *paths])
 
 
-class GitPullTool(_GitTool, ToolMarkerCanEdit):
+class GitPullTool(_GitTool, ToolMarkerCanEdit, ToolMarkerOpenWorld):
     """Pulls from a remote using fast-forward-only semantics."""
 
     def apply(self, remote: str = "origin", branch: str | None = None) -> str:
@@ -182,7 +182,7 @@ class GitPullTool(_GitTool, ToolMarkerCanEdit):
         return self._run_git(args)
 
 
-class GitPushTool(_GitTool, ToolMarkerCanEdit):
+class GitPushTool(_GitTool, ToolMarkerCanEdit, ToolMarkerOpenWorld):
     """Pushes the current branch without force or deletion semantics."""
 
     def apply(self, remote: str = "origin", set_upstream: bool = False) -> str:

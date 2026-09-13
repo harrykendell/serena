@@ -39,7 +39,7 @@ from serena.execution import ExecutionAccess, bind_execution_id, get_current_exe
 from serena.execution_metadata import ExecutionResultMetadata, extract_execution_result_metadata
 from serena.result_presentation import ToolResultPresentation, ToolResultPresenter
 from serena.session import get_mcp_session_id
-from serena.tools import Tool, ToolMarkerExplicitResultPaging
+from serena.tools import Tool, ToolMarkerDestructive, ToolMarkerExplicitResultPaging, ToolMarkerOpenWorld
 from serena.tools.media_tools import read_result_file_link, register_file_export_resource
 from serena.util.exception import show_fatal_exception_safe
 
@@ -157,7 +157,8 @@ class SerenaFastMCPTool(FastMCPTool):
         annotations = ToolAnnotations(
             title=tool_title,
             readOnlyHint=not can_edit,
-            destructiveHint=can_edit,
+            destructiveHint=isinstance(tool, ToolMarkerDestructive),
+            openWorldHint=isinstance(tool, ToolMarkerOpenWorld),
         )
 
         super().__init__(
@@ -648,7 +649,7 @@ class SerenaMCPFactory:
                 "since the user's latest message, never call it again in that response, including after tool results, progress "
                 "updates, errors, retries, reconnects, or context compaction. Do not call it for a single quick lookup."
             ),
-            annotations=ToolAnnotations(title="Show Serena Activity", readOnlyHint=True, destructiveHint=False),
+            annotations=ToolAnnotations(title="Show Serena Activity", readOnlyHint=True, destructiveHint=False, openWorldHint=False),
             meta={
                 "ui": {"resourceUri": ACTIVITY_RESOURCE_URI, "visibility": ["model", "app"]},
                 "openai/outputTemplate": ACTIVITY_RESOURCE_URI,
@@ -714,7 +715,7 @@ class SerenaMCPFactory:
             name="get_activity",
             title="Get Serena Activity",
             description="Returns the current state of one Serena activity panel. Intended for the activity app only.",
-            annotations=ToolAnnotations(title="Get Serena Activity", readOnlyHint=True, destructiveHint=False),
+            annotations=ToolAnnotations(title="Get Serena Activity", readOnlyHint=True, destructiveHint=False, openWorldHint=False),
             meta={
                 "ui": {"visibility": ["app"]},
                 "openai/widgetAccessible": True,
@@ -734,7 +735,7 @@ class SerenaMCPFactory:
             name="get_activity_detail",
             title="Get Serena Activity Detail",
             description="Returns parameters and the persisted canonical result for one Serena tool call. Intended for the activity app only.",
-            annotations=ToolAnnotations(title="Get Serena Activity Detail", readOnlyHint=True, destructiveHint=False),
+            annotations=ToolAnnotations(title="Get Serena Activity Detail", readOnlyHint=True, destructiveHint=False, openWorldHint=False),
             meta={
                 "ui": {"visibility": ["app"]},
                 "openai/widgetAccessible": True,
@@ -750,7 +751,7 @@ class SerenaMCPFactory:
             name="get_activity_media",
             title="Get Serena Activity Media",
             description="Returns retained image, audio, or file content for one Serena tool call. Intended for the activity app only.",
-            annotations=ToolAnnotations(title="Get Serena Activity Media", readOnlyHint=True, destructiveHint=False),
+            annotations=ToolAnnotations(title="Get Serena Activity Media", readOnlyHint=True, destructiveHint=False, openWorldHint=False),
             meta={
                 "ui": {"visibility": ["app"]},
                 "openai/widgetAccessible": True,
@@ -780,7 +781,9 @@ class SerenaMCPFactory:
             name="get_activity_job_detail",
             title="Get Serena Activity Job Detail",
             description="Returns runtime metadata and bounded output for one Serena job. Intended for the activity app only.",
-            annotations=ToolAnnotations(title="Get Serena Activity Job Detail", readOnlyHint=True, destructiveHint=False),
+            annotations=ToolAnnotations(
+                title="Get Serena Activity Job Detail", readOnlyHint=True, destructiveHint=False, openWorldHint=False
+            ),
             meta={
                 "ui": {"visibility": ["app"]},
                 "openai/widgetAccessible": True,

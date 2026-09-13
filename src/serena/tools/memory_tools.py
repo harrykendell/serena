@@ -3,12 +3,12 @@ from typing import Literal
 
 from serena.errors import UserFacingError
 from serena.result_metadata import ResultIdentityText
-from serena.tools import SUCCESS_RESULT, Tool, ToolMarkerCanEdit
+from serena.tools import SUCCESS_RESULT, Tool, ToolMarkerCanEdit, ToolMarkerDestructive
 
 log = logging.getLogger(__name__)
 
 
-class WriteMemoryTool(Tool, ToolMarkerCanEdit):
+class WriteMemoryTool(Tool, ToolMarkerCanEdit, ToolMarkerDestructive):
     """
     Write some information (utf-8-encoded) about this project that can be useful for future tasks to a memory in md format.
     The memory name should be meaningful.
@@ -67,7 +67,7 @@ class ListMemoriesTool(Tool):
         return {key: [ResultIdentityText(name) for name in names] for key, names in listing.items()}
 
 
-class DeleteMemoryTool(Tool, ToolMarkerCanEdit):
+class DeleteMemoryTool(Tool, ToolMarkerCanEdit, ToolMarkerDestructive):
     """
     Delete a memory file.
     """
@@ -80,7 +80,7 @@ class DeleteMemoryTool(Tool, ToolMarkerCanEdit):
         return SUCCESS_RESULT
 
 
-class RenameMemoryTool(Tool, ToolMarkerCanEdit):
+class RenameMemoryTool(Tool, ToolMarkerCanEdit, ToolMarkerDestructive):
     """
     Renames or moves a memory, updating references that are marked with the `mem:` prefix.
     """
@@ -99,7 +99,7 @@ class RenameMemoryTool(Tool, ToolMarkerCanEdit):
         return SUCCESS_RESULT
 
 
-class EditMemoryTool(Tool, ToolMarkerCanEdit):
+class EditMemoryTool(Tool, ToolMarkerCanEdit, ToolMarkerDestructive):
     """
     Replaces content matching a regular expression in a memory.
     """

@@ -15,7 +15,7 @@ from typing import Literal
 
 from serena.errors import UserFacingError
 from serena.result_metadata import ResultIdentityText
-from serena.tools import SUCCESS_RESULT, EditedFileContext, EditingToolWithDiagnostics, Tool
+from serena.tools import SUCCESS_RESULT, EditedFileContext, EditingToolWithDiagnostics, Tool, ToolMarkerDestructive
 from serena.util.file_system import scan_directory
 from serena.util.text_utils import (
     ContentReplacer,
@@ -52,7 +52,7 @@ class ReadFileTool(Tool):
         return "\n".join(selected)
 
 
-class CreateTextFileTool(EditingToolWithDiagnostics):
+class CreateTextFileTool(EditingToolWithDiagnostics, ToolMarkerDestructive):
     """
     Creates/overwrites a file in the project directory.
     """
@@ -156,7 +156,7 @@ class FindFileTool(Tool):
         return {"files": [ResultIdentityText(path) for path in files]}
 
 
-class ReplaceContentTool(EditingToolWithDiagnostics):
+class ReplaceContentTool(EditingToolWithDiagnostics, ToolMarkerDestructive):
     """
     Replaces content in a file (optionally using regular expressions).
     """
@@ -210,7 +210,7 @@ class ReplaceContentTool(EditingToolWithDiagnostics):
             return diagnostics_context.format_result(SUCCESS_RESULT)
 
 
-class ReplaceInFilesTool(EditingToolWithDiagnostics):
+class ReplaceInFilesTool(EditingToolWithDiagnostics, ToolMarkerDestructive):
     """
     Replaces occurrences of a pattern across multiple files, with dry-run preview and per-occurrence selection.
     """

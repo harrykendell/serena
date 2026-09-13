@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict
 
 from serena.errors import UserFacingError
 from serena.file_snapshots import FILE_EXPORT_MAX_SIZE, FileSnapshotStore
-from serena.tools.tools_base import Tool, ToolMarkerCanEdit
+from serena.tools.tools_base import Tool, ToolMarkerCanEdit, ToolMarkerDestructive, ToolMarkerOpenWorld
 
 _FILE_RESOURCE_URI_TEMPLATE = "serena-file://export/{token}"
 
@@ -149,7 +149,7 @@ class DownloadFileTool(Tool):
         return CallToolResult(content=[result])
 
 
-class UploadFileTool(Tool, ToolMarkerCanEdit):
+class UploadFileTool(Tool, ToolMarkerCanEdit, ToolMarkerDestructive, ToolMarkerOpenWorld):
     """Uploads one ChatGPT file into the active Serena project."""
 
     _MAX_REDIRECTS = 4

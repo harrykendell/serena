@@ -5,11 +5,11 @@ Tools supporting the execution of (external) commands
 import os.path
 
 from serena.errors import UserFacingError
-from serena.tools import Tool, ToolMarkerCanEdit
+from serena.tools import Tool, ToolMarkerCanEdit, ToolMarkerDestructive, ToolMarkerOpenWorld
 from serena.util.shell import execute_shell_command
 
 
-class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit):
+class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit, ToolMarkerDestructive, ToolMarkerOpenWorld):
     """
     Executes a shell command.
     """

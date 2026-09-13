@@ -10,6 +10,7 @@ from mcp.server.fastmcp.tools.base import Tool as MCPTool
 from serena.agent import Tool, ToolRegistry
 from serena.execution_store import ExecutionStore
 from serena.mcp import SerenaMCPFactory
+from serena.tools import MCP_TOOL_CLASSES
 
 make_tool = SerenaMCPFactory.make_mcp_tool
 
@@ -356,3 +357,40 @@ def test_make_tool_all_tools(tool_class) -> None:
 
     # The description should be a string (either from docstring or default)
     assert isinstance(mcp_tool.description, str)
+
+
+def test_mcp_catalogue_advertises_explicit_risk_hints() -> None:
+    """Test that Serena's public MCP catalogue advertises the intended risk semantics."""
+    destructive_tools = {
+        "cancel_job",
+        "create_text_file",
+        "delete_memory",
+        "edit_memory",
+        "execute_shell_command",
+        "git_branch",
+        "rename_memory",
+        "rename_symbol",
+        "replace_content",
+        "replace_in_files",
+        "replace_symbol_body",
+        "safe_delete_symbol",
+        "start_job",
+        "upload_file",
+        "write_memory",
+    }
+    open_world_tools = {
+        "execute_shell_command",
+        "git_fetch",
+        "git_pull",
+        "git_push",
+        "start_job",
+        "upload_file",
+    }
+
+    for tool_class in MCP_TOOL_CLASSES:
+        mcp_tool = make_tool(tool_class(MockAgent()))
+        annotations = mcp_tool.annotations
+        assert annotations is not None
+        assert annotations.readOnlyHint is (not tool_class.can_edit()), mcp_tool.name
+        assert annotations.destructiveHint is (mcp_tool.name in destructive_tools), mcp_tool.name
+        assert annotations.openWorldHint is (mcp_tool.name in open_world_tools), mcp_tool.name

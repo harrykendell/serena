@@ -7,7 +7,13 @@ from typing import Literal
 
 from serena.errors import UserFacingError
 from serena.jobs import JobRecord, JobRuntimeInfo, JobSnapshot, JobStatus
-from serena.tools.tools_base import Tool, ToolMarkerCanEdit, ToolMarkerDoesNotRequireActiveProject
+from serena.tools.tools_base import (
+    Tool,
+    ToolMarkerCanEdit,
+    ToolMarkerDestructive,
+    ToolMarkerDoesNotRequireActiveProject,
+    ToolMarkerOpenWorld,
+)
 
 
 class _JobTool(Tool):
@@ -65,7 +71,7 @@ class _JobTool(Tool):
         return payload
 
 
-class StartJobTool(_JobTool, ToolMarkerCanEdit):
+class StartJobTool(_JobTool, ToolMarkerCanEdit, ToolMarkerDestructive, ToolMarkerOpenWorld):
     """Starts one of up to six durable non-interactive commands and returns immediately with a job ID."""
 
     def apply(
@@ -212,7 +218,7 @@ class JobStatusTool(_JobTool, ToolMarkerDoesNotRequireActiveProject):
         return payload
 
 
-class CancelJobTool(_JobTool, ToolMarkerCanEdit, ToolMarkerDoesNotRequireActiveProject):
+class CancelJobTool(_JobTool, ToolMarkerCanEdit, ToolMarkerDestructive, ToolMarkerDoesNotRequireActiveProject):
     """Cancels one Serena job and its complete process tree."""
 
     def apply(self, job_id: str) -> dict[str, object]:

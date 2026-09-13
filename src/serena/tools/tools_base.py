@@ -79,6 +79,14 @@ class ToolMarkerCanEdit(ToolMarker):
     """
 
 
+class ToolMarkerDestructive(ToolMarker):
+    """Marker class for tools that may destructively replace, remove, or cancel state."""
+
+
+class ToolMarkerOpenWorld(ToolMarker):
+    """Marker class for tools that may interact with entities outside the local Serena runtime."""
+
+
 class ToolMarkerDoesNotRequireActiveProject(ToolMarker):
     pass
 

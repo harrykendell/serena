@@ -14,6 +14,7 @@ from serena.tools import (
     SUCCESS_RESULT,
     EditingToolWithDiagnostics,
     Tool,
+    ToolMarkerDestructive,
     ToolMarkerSymbolicEdit,
     ToolMarkerSymbolicRead,
 )
@@ -515,7 +516,7 @@ class GetDiagnosticsForFileTool(Tool, ToolMarkerSymbolicRead):
         return result_dict
 
 
-class ReplaceSymbolBodyTool(EditingToolWithDiagnostics):
+class ReplaceSymbolBodyTool(EditingToolWithDiagnostics, ToolMarkerDestructive):
     """
     Replaces the full definition of a symbol using the language server backend.
     """
@@ -600,7 +601,7 @@ class InsertBeforeSymbolTool(EditingToolWithDiagnostics):
             return diagnostics_context.format_result(SUCCESS_RESULT)
 
 
-class RenameSymbolTool(Tool, ToolMarkerSymbolicEdit):
+class RenameSymbolTool(Tool, ToolMarkerSymbolicEdit, ToolMarkerDestructive):
     """
     Renames a symbol throughout the codebase using language server refactoring capabilities.
     For JB, we use a separate tool.
@@ -628,7 +629,7 @@ class RenameSymbolTool(Tool, ToolMarkerSymbolicEdit):
         return status_message
 
 
-class SafeDeleteSymbol(Tool, ToolMarkerSymbolicEdit):
+class SafeDeleteSymbol(Tool, ToolMarkerSymbolicEdit, ToolMarkerDestructive):
     def apply(
         self,
         name_path_pattern: str,
