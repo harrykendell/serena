@@ -918,6 +918,17 @@ class JobStore:
             ).fetchall()
             return [self._record_from_row(row) for row in rows]
 
+    def list_recent_terminal_records(self, limit: int) -> list[JobRecord]:
+        """Returns the most recently finished jobs via the finished-time index."""
+        if limit <= 0:
+            return []
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM jobs WHERE finished_at IS NOT NULL ORDER BY finished_at DESC, created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [self._record_from_row(row) for row in rows]
+
     def prune_unretained_terminal_jobs(self, retained_job_ids: set[str]) -> None:
         """Delete terminal job metadata no longer owned by a retained session."""
         terminal_values = tuple(status.value for status in JobStatus if status.is_terminal)
@@ -1225,6 +1236,12 @@ class JobManager:
         if lifecycle_changed:
             self._sync_retention_observer()
         return sorted(running, key=lambda record: record.created_at, reverse=True)
+
+    def list_recent_terminal_jobs(self, limit: int = 20) -> list[JobRecord]:
+        """Returns recent terminal jobs without scanning retained job history."""
+        if limit <= 0:
+            return []
+        return self._store.list_recent_terminal_records(limit)
 
     def get_job_output_before(self, job_id: str, cursor: str) -> JobSnapshot:
         """Return bounded output immediately preceding ``cursor`` for one job."""

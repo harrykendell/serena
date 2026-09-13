@@ -133,12 +133,13 @@ def activity_snapshot_payload(snapshot: ActivitySnapshot) -> dict[str, Any]:
 
 
 def activity_running_jobs_payload(running: ActivityRunningJobs) -> dict[str, Any]:
-    """Returns compact global durable-job metadata for dashboard chrome."""
-    jobs = [activity_job_payload(job) for job in running.running_jobs]
+    """Returns compact global durable-job metadata for dashboard chrome and jobs panel."""
+    active = [activity_job_payload(job) for job in running.running_jobs]
+    terminal = [activity_job_payload(job) for job in running.recent_terminal_jobs]
     return {
         "status": "success",
-        "jobs": jobs,
-        "running_jobs": len(jobs),
+        "jobs": [*active, *terminal],
+        "running_jobs": len(active),
         "max_concurrent_jobs": running.max_concurrent_jobs,
     }
 
@@ -163,6 +164,7 @@ def activity_overview_payload(overview: ActivityOverview) -> tuple[dict[str, Any
     ]
     running = ActivityRunningJobs(
         running_jobs=overview.running_jobs,
+        recent_terminal_jobs=overview.recent_terminal_jobs,
         max_concurrent_jobs=overview.max_concurrent_jobs,
     )
     return {"status": "success", "panels": panels}, activity_running_jobs_payload(running)

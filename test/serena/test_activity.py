@@ -99,7 +99,12 @@ class _FakeJobSource:
         self.max_concurrent_jobs = 12
 
     def list_running_jobs(self) -> list[JobRecord]:
-        return [record for record in self.records if record.status is JobStatus.RUNNING]
+        return [record for record in self.records if not record.status.is_terminal]
+
+    def list_recent_terminal_jobs(self, limit: int = 20) -> list[JobRecord]:
+        terminal = [record for record in self.records if record.status.is_terminal]
+        terminal.sort(key=lambda record: record.finished_at or record.created_at, reverse=True)
+        return terminal[:limit]
 
     def get_job_record(self, job_id: str) -> JobRecord:
         try:
@@ -661,6 +666,21 @@ def test_activity_tracker_marks_current_turn_job_and_exposes_other_running_jobs(
     assert snapshot["jobs"][0]["command"] == "python optimise.py --tau 8"
     assert snapshot["calls"][0]["job_id"] == "current-job"
     assert snapshot["calls"][0]["detail"] == "current optimisation"
+
+
+def test_dashboard_jobs_include_recent_terminal_jobs_after_active_jobs() -> None:
+    source = _FakeJobSource(
+        [
+            _job_record("finished-job", "finished optimisation", JobStatus.COMPLETED),
+            _job_record("running-job", "running optimisation", JobStatus.RUNNING),
+        ]
+    )
+    tracker = _ActivityHarness(source)
+
+    jobs = tracker.view.dashboard_jobs()
+
+    assert [job.job_id for job in jobs.running_jobs] == ["running-job"]
+    assert [job.job_id for job in jobs.recent_terminal_jobs] == ["finished-job"]
 
 
 def test_activity_tracker_exposes_job_runtime_and_output_on_demand() -> None:

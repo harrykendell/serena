@@ -20,6 +20,10 @@ let latestOverview = null;
 let latestOverviewEtag = null;
 let latestTools = [];
 let latestJobs = { jobs: [], running_jobs: 0, max_concurrent_jobs: 0 };
+let jobsDialogPanel = null;
+let jobsDialogRoot = null;
+let jobsDialogExpandedJob = null;
+let jobsDialogDetailGeneration = 0;
 let visibleActivityPanels = [];
 let serenaOverviewPanels = new Map();
 let visibleElapsedNodes = [];
@@ -352,7 +356,11 @@ function renderOverviewMetadata(session, jobs) {
   setText("max-jobs-count", latestJobs.max_concurrent_jobs || 0);
   byId("tools-button")?.setAttribute("aria-label", `${latestTools.length} active tools`);
   byId("jobs-button")?.setAttribute("aria-label", `${latestJobs.running_jobs || 0} of ${latestJobs.max_concurrent_jobs || 0} Serena jobs running`);
-  if (byId("jobs-dialog")?.open) renderRunningJobs();
+  if (byId("jobs-dialog")?.open) {
+    renderRunningJobs();
+    const expandedJobId = jobsDialogPanel?.expandedEntryId || null;
+    if (expandedJobId) void refreshRunningJobDetail(expandedJobId);
+  }
 }
 
 function activitySummarySnapshot(panel) {
@@ -788,32 +796,127 @@ function consumeNotificationTarget(snapshot) {
   });
 }
 
+function runningJobsSnapshot() {
+  const jobs = Array.isArray(latestJobs.jobs) ? latestJobs.jobs : [];
+  const startedAt = jobs.reduce((earliest, job) => {
+    const started = Number(job.started_at);
+    if (!Number.isFinite(started)) return earliest;
+    return earliest === null ? started : Math.min(earliest, started);
+  }, null);
+  const latest = jobs[0] || null;
+  return {
+    run_id: null,
+    session_title: "Jobs",
+    started_at: startedAt,
+    updated_at: Date.now() / 1000,
+    submission_span_seconds: null,
+    tool_count: 0,
+    job_count: jobs.length,
+    latest_activity: latest
+      ? {
+          label: latest.label || latest.job_id,
+          detail: "",
+          scope: latest.project || "",
+          status: latest.status,
+          started_at: latest.started_at,
+          finished_at: latest.finished_at,
+        }
+      : null,
+    calls: [],
+    jobs,
+    expanded_call: null,
+    expanded_job: jobsDialogExpandedJob,
+  };
+}
+
+function runningJobSummaryDetail(job) {
+  const startedAt = Number(job?.started_at);
+  return {
+    job_id: job.job_id,
+    label: job.label || job.job_id,
+    project: job.project || "",
+    command: job.command || "",
+    status: job.status || "running",
+    elapsed_seconds: Number.isFinite(startedAt) ? Math.max(0, Date.now() / 1000 - startedAt) : null,
+    output: "",
+  };
+}
+
+async function refreshRunningJobDetail(jobId, knownJob = null) {
+  if (!jobId) return;
+  const job = knownJob || (latestJobs.jobs || []).find(item => item.job_id === jobId) || null;
+  if (!job) return;
+
+  const generation = ++jobsDialogDetailGeneration;
+  if (!job.panel_id) {
+    jobsDialogExpandedJob = runningJobSummaryDetail(job);
+    renderRunningJobs();
+    return;
+  }
+
+  try {
+    const response = await fetchCurrentDocument(
+      `/serena/sessions/${encodeURIComponent(job.panel_id)}?expanded=${encodeURIComponent(jobId)}`,
+      null,
+    );
+    if (generation !== jobsDialogDetailGeneration || jobsDialogPanel?.expandedEntryId !== jobId) return;
+    const detail = response.data?.expanded_job || null;
+    if (detail?.job_id !== jobId) throw new Error("Expanded job detail did not match the requested job");
+    jobsDialogExpandedJob = detail;
+    renderRunningJobs();
+  } catch (error) {
+    if (generation !== jobsDialogDetailGeneration || jobsDialogPanel?.expandedEntryId !== jobId) return;
+    console.warn("Could not load active job detail", error);
+    jobsDialogExpandedJob = runningJobSummaryDetail(job);
+    renderRunningJobs();
+  }
+}
+
 function renderRunningJobs() {
   const container = byId("jobs-dialog-content");
   if (!container) return;
-  container.replaceChildren();
-  const jobs = latestJobs.jobs || [];
+
+  const jobs = Array.isArray(latestJobs.jobs) ? latestJobs.jobs : [];
   if (!jobs.length) {
-    container.append(emptyCard("No Serena jobs are currently running."));
+    jobsDialogDetailGeneration += 1;
+    jobsDialogExpandedJob = null;
+    jobsDialogPanel?.destroy();
+    jobsDialogPanel = null;
+    jobsDialogRoot = null;
+    container.replaceChildren(emptyCard("No Serena jobs recorded."));
     return;
   }
-  for (const job of jobs) {
-    const row = document.createElement(job.panel_id ? "button" : "div");
-    if (job.panel_id) row.type = "button";
-    row.className = job.panel_id ? "resource-row resource-row-button" : "resource-row";
-    const label = document.createElement("strong");
-    label.textContent = job.label || job.job_id;
-    const meta = document.createElement("span");
-    meta.textContent = job.project || job.status || "running";
-    row.append(label, meta);
-    if (job.panel_id) {
-      row.addEventListener("click", () => {
-        byId("jobs-dialog")?.close();
-        navigate({ kind: "serena", panelId: job.panel_id, expandedEntryId: job.job_id });
-      });
-    }
-    container.append(row);
+
+  if (!jobsDialogPanel || !jobsDialogRoot || !jobsDialogRoot.isConnected) {
+    jobsDialogPanel?.destroy();
+    container.replaceChildren();
+    jobsDialogRoot = document.createElement("div");
+    jobsDialogRoot.className = "jobs-activity-root";
+    container.append(jobsDialogRoot);
+    jobsDialogPanel = new window.SerenaActivity.ActivityPanel(jobsDialogRoot, {
+      initialCollapsed: false,
+      onExpandedChange: (entryId, entry) => {
+        jobsDialogExpandedJob = null;
+        if (!entryId) {
+          jobsDialogDetailGeneration += 1;
+          return;
+        }
+        void refreshRunningJobDetail(entryId, entry?.kind === "job" ? entry.item : null);
+      },
+    });
   }
+
+  const activeIds = new Set(jobs.map(job => job.job_id));
+  const expandedJobId = jobsDialogPanel.expandedEntryId || null;
+  if (expandedJobId && !activeIds.has(expandedJobId)) {
+    jobsDialogDetailGeneration += 1;
+    jobsDialogExpandedJob = null;
+    jobsDialogPanel.setExpandedEntryId(null);
+  } else if (jobsDialogExpandedJob && jobsDialogExpandedJob.job_id !== expandedJobId) {
+    jobsDialogExpandedJob = null;
+  }
+
+  jobsDialogPanel.render(runningJobsSnapshot());
 }
 
 function setupJobsDialog() {
@@ -821,11 +924,15 @@ function setupJobsDialog() {
   byId("jobs-button")?.addEventListener("click", () => {
     renderRunningJobs();
     dialog?.showModal();
+    const expandedJobId = jobsDialogPanel?.expandedEntryId || null;
+    if (expandedJobId) void refreshRunningJobDetail(expandedJobId);
+    startClock();
   });
   byId("jobs-dialog-close")?.addEventListener("click", () => dialog?.close());
   dialog?.addEventListener("click", event => {
     if (event.target === dialog) dialog.close();
   });
+  dialog?.addEventListener("close", startClock);
 }
 
 function openResourceDialog() {
@@ -924,6 +1031,7 @@ async function setupPushNotifications() {
 function tickVisibleActivity() {
   const now = Date.now() / 1000;
   for (const panel of visibleActivityPanels) panel.tick(now);
+  if (byId("jobs-dialog")?.open && jobsDialogPanel) jobsDialogPanel.tick(now);
   for (const item of visibleElapsedNodes) item.node.textContent = window.SerenaActivity.formatLiveDuration(now - item.startedAt);
 }
 
@@ -931,6 +1039,7 @@ function startClock() {
   const needsClock = !document.hidden && (
     visibleElapsedNodes.length > 0
     || visibleActivityPanels.some(panel => panel.hasLiveActivity())
+    || (byId("jobs-dialog")?.open && jobsDialogPanel?.hasLiveActivity())
   );
   if (needsClock && clockTimer === null) {
     clockTimer = setInterval(tickVisibleActivity, 1000);

@@ -422,13 +422,18 @@ button { font: inherit; }
   font: 20px/1 ui-sans-serif, system-ui, sans-serif;
 }
 .memory-dialog-close:hover { color: var(--ink); border-color: var(--border-strong); }
-.resource-dialog-content,
-.jobs-dialog-content {
+.resource-dialog-content {
   max-height: min(460px, 60vh);
   overflow: auto;
   padding: 10px;
+  display: grid;
+  gap: 5px;
 }
-.resource-dialog-content { display: grid; gap: 5px; }
+.jobs-dialog-content {
+  padding: 10px;
+  overflow: visible;
+}
+#jobs-dialog { overflow: auto; }
 .resource-row {
   min-width: 0;
   padding: 7px 8px;

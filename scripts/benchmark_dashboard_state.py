@@ -108,6 +108,10 @@ class _CountingJobManager:
         self.snapshot_queries += 1
         return self._manager.list_running_jobs()
 
+    def list_recent_terminal_jobs(self, limit: int = 20) -> list[JobRecord]:
+        """Returns recent terminal metadata through the production indexed path."""
+        return self._manager.list_recent_terminal_jobs(limit)
+
     def get_job_record(self, job_id: str) -> JobRecord:
         """Returns one real lightweight retained job record."""
         return self._manager.get_job_record(job_id)

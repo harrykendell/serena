@@ -1127,7 +1127,7 @@ async function selectedSessionLiveRefreshScenario() {
       document.getElementById("jobs-button")?.click();
       const rows = document.querySelectorAll('#serena-widgets [data-panel-id="panel-0"] .activity-row').length;
       const runningJobs = document.getElementById("running-jobs-count")?.textContent || "";
-      const jobLabel = document.querySelector("#jobs-dialog-content .resource-row strong")?.textContent || "";
+      const jobLabel = document.querySelector("#jobs-dialog-content .activity-row-title")?.textContent || "";
       const overviewFetches = window.__smokeFetches.filter(path => path === "/dashboard/api/state");
       const sessionFetches = window.__smokeFetches.filter(path => path.startsWith("/dashboard/api/serena/sessions/panel-0"));
       const pass = rows === 2
@@ -1664,13 +1664,13 @@ async function secondaryInteractionScenario() {
   const scenario = `
     setTimeout(() => {
       document.getElementById("jobs-button")?.click();
-      const orphan = document.querySelector("#jobs-dialog-content .resource-row");
+      const orphan = document.querySelector("#jobs-dialog-content .activity-row");
       const serenaTab = document.querySelector('[data-activity-view-tab="serena"]');
       serenaTab?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
       const orchestratorTab = document.querySelector('[data-activity-view-tab="orchestrator"]');
       const activeView = document.getElementById("activity-columns")?.dataset.activeView;
-      const pass = orphan?.tagName === "DIV"
-        && !orphan.classList.contains("resource-row-button")
+      const pass = orphan?.tagName === "LI"
+        && Boolean(orphan.querySelector(".activity-row-button"))
         && orchestratorTab?.getAttribute("aria-selected") === "true"
         && activeView === "orchestrator";
       document.getElementById("smoke-marker").textContent = pass
@@ -1681,6 +1681,65 @@ async function secondaryInteractionScenario() {
   `;
   const dom = await runChrome(prepareHtml(state, scenario), 250);
   if (!dom.includes("SMOKE_PASS secondary-interactions")) throw new Error("Secondary interaction smoke failed");
+}
+
+async function runningJobsPanelExpansionScenario() {
+  const state = overview(1, { active: false });
+  state.jobs = {
+    status: "success",
+    jobs: [
+      {
+        job_id: "job-0",
+        label: "Smoke background job",
+        project: "serena",
+        command: "python smoke_job.py --steps 20",
+        status: "running",
+        started_at: 1000,
+        finished_at: null,
+        current_turn: false,
+        panel_id: "panel-0",
+      },
+      {
+        job_id: "job-finished",
+        label: "Finished smoke job",
+        project: "serena",
+        command: "python finished_job.py",
+        status: "completed",
+        started_at: 990,
+        finished_at: 995,
+        current_turn: false,
+        panel_id: null,
+      },
+    ],
+    running_jobs: 1,
+    max_concurrent_jobs: 12,
+  };
+  const prelude = `window.__selectedPayload = ${JSON.stringify(selectedRunningJob("live output"))};`;
+  const scenario = `
+    setTimeout(() => {
+      document.getElementById("jobs-button")?.click();
+      document.querySelector('#jobs-dialog-content [data-entry-id="job-0"] .activity-row-button')?.click();
+      setTimeout(() => {
+        const root = document.getElementById("jobs-dialog-content");
+        const detail = root?.querySelector('[data-entry-id="job-0"] .activity-detail');
+        const command = detail?.querySelector(".activity-job-command")?.textContent || "";
+        const output = detail?.querySelector(".activity-job-output")?.textContent || "";
+        const finishedLabel = root?.querySelector('[data-entry-id="job-finished"] .activity-row-title')?.textContent || "";
+        const sessionFetches = window.__smokeFetches.filter(path => path === "/dashboard/api/serena/sessions/panel-0?expanded=job-0");
+        const pass = root?.querySelectorAll(".activity-row").length === 2
+          && finishedLabel === "Finished smoke job"
+          && command === "python smoke_job.py --steps 20"
+          && output === "live output"
+          && sessionFetches.length === 1
+          && location.search === "";
+        document.getElementById("smoke-marker").textContent = pass
+          ? "SMOKE_PASS running-jobs-panel-expansion"
+          : "SMOKE_FAIL running-jobs-panel-expansion command=" + command + " output=" + output + " finished=" + finishedLabel + " fetches=" + JSON.stringify(window.__smokeFetches);
+      }, 80);
+    }, 80);
+  `;
+  const dom = await runChrome(prepareHtml(state, scenario, { preludeScript: prelude }), 300);
+  if (!dom.includes("SMOKE_PASS running-jobs-panel-expansion")) throw new Error("Running-jobs panel expansion smoke failed");
 }
 
 async function notificationOptInScenario() {
@@ -1963,6 +2022,7 @@ await returnToOverviewScenario();
 await staleRouteRecoveryScenario();
 await notificationDeepLinkScenario();
 await secondaryInteractionScenario();
+await runningJobsPanelExpansionScenario();
 await notificationOptInScenario();
 await orchestratorScenario();
 await directOrchestratorLoadScenario();

@@ -53,6 +53,9 @@ class _EmptyJobSource:
     def list_running_jobs(self) -> list[Any]:
         return []
 
+    def list_recent_terminal_jobs(self, limit: int = 20) -> list[Any]:
+        return []
+
     def get_job_record(self, job_id: str) -> Any:
         raise KeyError(job_id)
 

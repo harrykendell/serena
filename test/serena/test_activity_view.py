@@ -22,6 +22,9 @@ class _OverviewJobSource:
         self.running_queries += 1
         return self.running_records
 
+    def list_recent_terminal_jobs(self, limit: int = 20) -> list[JobRecord]:
+        return []
+
     def get_job_record(self, job_id: str) -> Any:
         raise AssertionError(f"overview unexpectedly read individual job metadata for {job_id}")
 

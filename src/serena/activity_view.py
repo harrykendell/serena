@@ -185,6 +185,10 @@ class ActivityJobSource(Protocol):
         """Returns current running-job metadata without runtime telemetry."""
         ...
 
+    def list_recent_terminal_jobs(self, limit: int = 20) -> list[JobRecord]:
+        """Returns recent terminal-job metadata without runtime telemetry."""
+        ...
+
     def get_job_record(self, job_id: str) -> JobRecord:
         """Returns current lightweight metadata for one job."""
         ...
@@ -322,9 +326,10 @@ class ActivitySessionSummary:
 
 @dataclass(frozen=True)
 class ActivityRunningJobs:
-    """Compact global durable-job metadata for dashboard chrome."""
+    """Compact global durable-job metadata for dashboard chrome and jobs panel."""
 
     running_jobs: tuple[ActivityJobSummary, ...]
+    recent_terminal_jobs: tuple[ActivityJobSummary, ...]
     max_concurrent_jobs: int
 
 
@@ -334,6 +339,7 @@ class ActivityOverview:
 
     sessions: tuple[ActivitySessionSummary, ...]
     running_jobs: tuple[ActivityJobSummary, ...]
+    recent_terminal_jobs: tuple[ActivityJobSummary, ...]
     max_concurrent_jobs: int
 
 
@@ -384,14 +390,21 @@ class ActivityView:
         return ActivityOverview(
             sessions=tuple(sessions),
             running_jobs=running_jobs,
+            recent_terminal_jobs=job_overview.recent_terminal_jobs,
             max_concurrent_jobs=job_overview.max_concurrent_jobs,
         )
 
     def dashboard_jobs(self) -> ActivityRunningJobs:
-        """Returns current global durable-job metadata without scanning retained sessions."""
-        running_jobs = tuple(self._job_summary(record, current_turn=False) for record in self._list_running_jobs_safely())
+        """Returns compact global durable-job metadata without scanning retained sessions."""
+        running_records = self._list_running_jobs_safely()
+        running_jobs = tuple(self._job_summary(record, current_turn=False) for record in running_records)
+        terminal_limit = max(0, 20 - len(running_jobs))
+        recent_terminal_jobs = tuple(
+            self._job_summary(record, current_turn=False) for record in self._list_recent_terminal_jobs_safely(terminal_limit)
+        )
         return ActivityRunningJobs(
             running_jobs=running_jobs,
+            recent_terminal_jobs=recent_terminal_jobs,
             max_concurrent_jobs=self._job_source.max_concurrent_jobs,
         )
 
@@ -653,6 +666,13 @@ class ActivityView:
         """Returns current running-job metadata without letting backend failure break polling."""
         try:
             return self._job_source.list_running_jobs()
+        except (OSError, RuntimeError, ValueError):
+            return []
+
+    def _list_recent_terminal_jobs_safely(self, limit: int) -> list[JobRecord]:
+        """Returns recent terminal-job metadata without letting backend failure break rendering."""
+        try:
+            return self._job_source.list_recent_terminal_jobs(limit)
         except (OSError, RuntimeError, ValueError):
             return []
 
