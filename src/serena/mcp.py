@@ -307,9 +307,15 @@ class SerenaFastMCPTool(FastMCPTool):
             finish_execution(succeeded=False, error=message, project_name=project_name)
             return message
 
-        def detach_worker(worker_task: asyncio.Task[Any], request_error: str) -> None:
-            """Keeps execution live until an abandoned request's worker actually stops."""
-            execution_store.mark_request_abandoned(execution_id, error=request_error)
+        def detach_worker(
+            worker_task: asyncio.Task[Any],
+            request_error: str,
+            *,
+            execution_already_terminal: bool = False,
+        ) -> None:
+            """Consumes an abandoned worker and finalises it later when its execution is still live."""
+            if not execution_already_terminal:
+                execution_store.mark_request_abandoned(execution_id, error=request_error)
 
             def finalize_detached_worker(completed: asyncio.Task[Any]) -> None:
                 try:
@@ -321,6 +327,8 @@ class SerenaFastMCPTool(FastMCPTool):
                         worker_error.__class__.__name__,
                         worker_error,
                     )
+                if execution_already_terminal:
+                    return
                 finish_execution(
                     succeeded=False,
                     error=request_error,
@@ -371,11 +379,36 @@ class SerenaFastMCPTool(FastMCPTool):
                     timeout=self._agent.serena_config.tool_timeout,
                 )
             except TimeoutError:
-                message = f"Tool execution timed out after {self._agent.serena_config.tool_timeout} seconds."
+                timeout = self._agent.serena_config.tool_timeout
+                queued_message = (
+                    f"Tool request timed out after {timeout} seconds while queued for Serena execution. "
+                    "The tool never started and will not run later."
+                )
+                if execution_store.finish_queued_execution(
+                    execution_id,
+                    status="timed_out",
+                    error=queued_message,
+                ):
+                    detach_worker(worker_task, queued_message, execution_already_terminal=True)
+                    raise ToolError(queued_message) from None
+
+                message = f"Tool request timed out after {timeout} seconds after execution had already started."
                 detach_worker(worker_task, message)
                 raise ToolError(message) from None
             except asyncio.CancelledError:
-                message = "MCP request was cancelled while the tool worker was still running."
+                queued_message = (
+                    "MCP request was cancelled while the tool was queued for Serena execution. "
+                    "The tool never started and will not run later."
+                )
+                if execution_store.finish_queued_execution(
+                    execution_id,
+                    status="cancelled",
+                    error=queued_message,
+                ):
+                    detach_worker(worker_task, queued_message, execution_already_terminal=True)
+                    raise
+
+                message = "MCP request was cancelled while the tool worker was already running."
                 detach_worker(worker_task, message)
                 raise
             except UrlElicitationRequiredError:

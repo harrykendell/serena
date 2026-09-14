@@ -545,6 +545,8 @@ class SerenaAgent:
                         runtime.readiness.wait_until_ready()
 
                     def coordinated_call() -> T:
+                        if execution_id is not None and not self._execution_store.mark_execution_running(execution_id):
+                            raise UserFacingError("Tool request ended before execution began; no tool action was performed.")
                         if access is not ExecutionAccess.WRITE or runtime is None or project is None:
                             return call()
                         try:

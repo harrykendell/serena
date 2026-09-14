@@ -212,6 +212,7 @@ class ActivityEntrySummary:
     scope: str
     project_name: str
     started_at: float
+    running_at: float | None
     finished_at: float | None
     status: str
     job_id: str | None = None
@@ -568,6 +569,7 @@ class ActivityView:
             scope=summary.scope,
             project_name=record.project_name,
             started_at=record.started_at,
+            running_at=record.running_at,
             finished_at=record.finished_at,
             status=record.status,
             job_id=record.durable_job_id,

@@ -92,6 +92,11 @@
     return normalized === "starting" || normalized === "running";
   }
 
+  function isActive(status) {
+    const normalized = normalizeStatus(status);
+    return isRunning(normalized) || normalized === "queued" || normalized === "pending" || normalized === "waiting";
+  }
+
   function appendText(parent, text, className = "") {
     const node = document.createElement("span");
     if (className) node.className = className;
@@ -386,9 +391,9 @@
     _hasRunningSessionActivity() {
       if (!this.snapshot) return false;
       if (this.snapshot.active) return true;
-      if ((this.snapshot.calls || []).some(call => isRunning(call.status))) return true;
+      if ((this.snapshot.calls || []).some(call => isActive(call.status))) return true;
       return (this.snapshot.jobs || []).some(job => {
-        if (!isRunning(job.status)) return false;
+        if (!isActive(job.status)) return false;
         if (job.panel_id) return job.panel_id === this.snapshot.panel_id;
         return Boolean(job.current_turn);
       });
@@ -535,6 +540,7 @@ _releaseMedia(callId) {
 
     _rowKey(kind, item) {
       const startedAt = number(item.started_at ?? item.submitted_at);
+      const runningAt = number(item.running_at);
       const finishedAt = number(item.finished_at);
       if (kind === "job") {
         return JSON.stringify([
@@ -557,6 +563,7 @@ _releaseMedia(callId) {
         item.scope || item.project_name || "",
         item.detail,
         startedAt,
+        runningAt,
         finishedAt,
       ]);
     }
@@ -639,11 +646,11 @@ _releaseMedia(callId) {
         const renderKey = this._rowKey(kind, item);
         if (!existing || existing.dataset.renderKey !== renderKey) return this._renderRow(kind, id, item);
 
-        const startedAt = number(item.started_at ?? item.submitted_at);
+        const runningAt = number(item.running_at ?? item.started_at ?? item.submitted_at);
         const finishedAt = number(item.finished_at);
-        if (startedAt !== null && isRunning(item.status) && finishedAt === null) {
+        if (runningAt !== null && isRunning(item.status) && finishedAt === null) {
           const elapsed = existing.querySelector(".activity-row-elapsed");
-          if (elapsed) this.liveNodes.push({ node: elapsed, startedAt });
+          if (elapsed) this.liveNodes.push({ node: elapsed, startedAt: runningAt });
         }
         return existing;
       };
@@ -704,16 +711,20 @@ _releaseMedia(callId) {
 
       const timing = document.createElement("span");
       timing.className = "activity-row-timing";
-      const startedAt = number(item.started_at ?? item.submitted_at);
-      appendText(timing, formatClock(startedAt), "activity-row-clock");
+      const submittedAt = number(item.started_at ?? item.submitted_at);
+      const runningAt = number(item.running_at);
+      appendText(timing, formatClock(submittedAt), "activity-row-clock");
       const elapsed = appendText(timing, "", "activity-row-elapsed");
       const finishedAt = number(item.finished_at);
-      if (startedAt !== null) {
-        if (isRunning(normalizedStatus) && finishedAt === null) {
-          this.liveNodes.push({ node: elapsed, startedAt });
-        } else if (finishedAt !== null) {
-          elapsed.textContent = formatDuration(finishedAt - startedAt);
-        }
+      if (normalizedStatus === "queued") {
+        elapsed.textContent = "Queued";
+      } else if (runningAt !== null && isRunning(normalizedStatus) && finishedAt === null) {
+        this.liveNodes.push({ node: elapsed, startedAt: runningAt });
+      } else if (finishedAt !== null && runningAt !== null) {
+        elapsed.textContent = formatDuration(finishedAt - runningAt);
+      } else if (finishedAt !== null && submittedAt !== null) {
+        const queuedFor = formatDuration(finishedAt - submittedAt);
+        elapsed.textContent = normalizedStatus === "timed_out" || normalizedStatus === "cancelled" ? `Queued ${queuedFor}` : queuedFor;
       }
 
       const chevron = appendText(button, this.expandedEntryId === id ? "⌄" : "›", "activity-row-chevron");
@@ -921,7 +932,7 @@ _releaseMedia(callId) {
       if (!this.snapshot) return [];
       const entries = [...(this.snapshot.calls || []), ...(this.snapshot.jobs || [])];
       if (this.snapshot.latest_activity) entries.push(this.snapshot.latest_activity);
-      return entries.filter(item => isRunning(item.status));
+      return entries.filter(item => isActive(item.status));
     }
 
     _notifyHeight() {

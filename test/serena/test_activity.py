@@ -731,7 +731,7 @@ def test_activity_tracker_supersedes_previous_panel_in_same_conversation() -> No
 
     assert tracker.get_run("conversation-a", first["run_id"])["superseded"] is True
     assert second_state["superseded"] is False
-    assert [(call["call_id"], call["status"]) for call in second_state["calls"]] == [(call_id, "running")]
+    assert [(call["call_id"], call["status"]) for call in second_state["calls"]] == [(call_id, "queued")]
 
     tracker.finish_tool(call_id, succeeded=True)
     assert tracker.get_run("conversation-a", first["run_id"])["calls"][0]["status"] == "completed"
@@ -849,7 +849,7 @@ def test_mcp_tool_wrapper_keeps_activity_polling_responsive_during_blocking_tool
 
         snapshot = tracker.get_run("global", run["run_id"])
         assert invocation.done() is False
-        assert [call["status"] for call in snapshot["calls"]] == ["running"]
+        assert [call["status"] for call in snapshot["calls"]] == ["queued"]
 
         result = await invocation
         terminal = tracker.get_run("global", run["run_id"])

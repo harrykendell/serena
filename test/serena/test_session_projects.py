@@ -1512,6 +1512,212 @@ def test_same_project_write_waits_for_active_read(
     assert (roots["project_a"] / "written.txt").read_text() == "written"
 
 
+def test_ordinary_read_does_not_bypass_writer_waiting_for_ordinary_read(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "session-read-a", "project_a")
+    _activate(agent, "session-write", "project_a")
+    _activate(agent, "session-read-b", "project_a")
+
+    read_tool = agent.get_tool(ReadFileTool)
+    write_tool = agent.get_tool(CreateTextFileTool)
+    first_read_entered = threading.Event()
+    second_read_entered = threading.Event()
+    release_first_read = threading.Event()
+    write_entered = threading.Event()
+    release_write = threading.Event()
+
+    def blocking_read(relative_path: str, start_line: int = 0, end_line: int | None = None) -> str:
+        del start_line, end_line
+        if relative_path == "first.txt":
+            first_read_entered.set()
+            assert release_first_read.wait(timeout=5)
+        else:
+            second_read_entered.set()
+        return "read"
+
+    def blocking_write(relative_path: str, content: str) -> str:
+        del relative_path, content
+        write_entered.set()
+        assert release_write.wait(timeout=5)
+        return "OK"
+
+    monkeypatch.setattr(read_tool, "apply", blocking_read)
+    monkeypatch.setattr(write_tool, "apply", blocking_write)
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        first_read = executor.submit(
+            read_tool.apply_ex,
+            relative_path="first.txt",
+            mcp_ctx=_mcp_context("session-read-a"),
+        )
+        assert first_read_entered.wait(timeout=5)
+
+        writer = executor.submit(
+            write_tool.apply_ex,
+            relative_path="written.txt",
+            content="written",
+            mcp_ctx=_mcp_context("session-write"),
+        )
+        assert not write_entered.wait(timeout=0.25)
+
+        second_read = executor.submit(
+            read_tool.apply_ex,
+            relative_path="second.txt",
+            mcp_ctx=_mcp_context("session-read-b"),
+        )
+        assert not second_read_entered.wait(timeout=0.25)
+
+        release_first_read.set()
+        assert first_read.result(timeout=5) == "read"
+        assert write_entered.wait(timeout=1)
+        assert not second_read_entered.is_set()
+
+        release_write.set()
+        assert writer.result(timeout=5) == "OK"
+        assert second_read.result(timeout=5) == "read"
+
+    assert second_read_entered.is_set()
+
+
+def test_ordinary_read_bypasses_writer_waiting_for_symbolic_read(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "session-symbol", "project_a")
+    _activate(agent, "session-write", "project_a")
+    _activate(agent, "session-read", "project_a")
+
+    symbol_tool = agent.get_tool(FindSymbolTool)
+    write_tool = agent.get_tool(CreateTextFileTool)
+    read_tool = agent.get_tool(ReadFileTool)
+    symbol_entered = threading.Event()
+    release_symbol = threading.Event()
+    write_entered = threading.Event()
+    read_entered = threading.Event()
+
+    def blocking_symbol(**kwargs: Any) -> list[Any]:
+        del kwargs
+        symbol_entered.set()
+        assert release_symbol.wait(timeout=5)
+        return []
+
+    def tracking_write(relative_path: str, content: str) -> str:
+        del relative_path, content
+        write_entered.set()
+        return "OK"
+
+    def tracking_read(relative_path: str, start_line: int = 0, end_line: int | None = None) -> str:
+        del relative_path, start_line, end_line
+        read_entered.set()
+        return "read"
+
+    monkeypatch.setattr(symbol_tool, "apply", blocking_symbol)
+    monkeypatch.setattr(write_tool, "apply", tracking_write)
+    monkeypatch.setattr(read_tool, "apply", tracking_read)
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        symbol_future = executor.submit(
+            symbol_tool.apply_ex,
+            name_path_pattern="SlowSymbol",
+            mcp_ctx=_mcp_context("session-symbol"),
+        )
+        assert symbol_entered.wait(timeout=5)
+
+        write_future = executor.submit(
+            write_tool.apply_ex,
+            relative_path="written.txt",
+            content="written",
+            mcp_ctx=_mcp_context("session-write"),
+        )
+        assert not write_entered.wait(timeout=0.25)
+
+        read_future = executor.submit(
+            read_tool.apply_ex,
+            relative_path="value.txt",
+            mcp_ctx=_mcp_context("session-read"),
+        )
+        assert read_entered.wait(timeout=1)
+        assert read_future.result(timeout=1) == "read"
+        assert not write_entered.is_set()
+
+        release_symbol.set()
+        assert symbol_future.result(timeout=5) == []
+        assert write_future.result(timeout=5) == "OK"
+
+    assert write_entered.is_set()
+
+
+def test_symbolic_read_does_not_bypass_writer_waiting_for_symbolic_read(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, _ = multi_project_agent
+    _activate(agent, "session-symbol-a", "project_a")
+    _activate(agent, "session-write", "project_a")
+    _activate(agent, "session-symbol-b", "project_a")
+
+    symbol_tool = agent.get_tool(FindSymbolTool)
+    write_tool = agent.get_tool(CreateTextFileTool)
+    first_symbol_entered = threading.Event()
+    second_symbol_entered = threading.Event()
+    release_first_symbol = threading.Event()
+    write_entered = threading.Event()
+    release_write = threading.Event()
+
+    def blocking_symbol(name_path_pattern: str, **kwargs: Any) -> list[Any]:
+        del kwargs
+        if name_path_pattern == "FirstSymbol":
+            first_symbol_entered.set()
+            assert release_first_symbol.wait(timeout=5)
+        else:
+            second_symbol_entered.set()
+        return []
+
+    def blocking_write(relative_path: str, content: str) -> str:
+        del relative_path, content
+        write_entered.set()
+        assert release_write.wait(timeout=5)
+        return "OK"
+
+    monkeypatch.setattr(symbol_tool, "apply", blocking_symbol)
+    monkeypatch.setattr(write_tool, "apply", blocking_write)
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        first_symbol = executor.submit(
+            symbol_tool.apply_ex,
+            name_path_pattern="FirstSymbol",
+            mcp_ctx=_mcp_context("session-symbol-a"),
+        )
+        assert first_symbol_entered.wait(timeout=5)
+
+        writer = executor.submit(
+            write_tool.apply_ex,
+            relative_path="written.txt",
+            content="written",
+            mcp_ctx=_mcp_context("session-write"),
+        )
+        assert not write_entered.wait(timeout=0.25)
+
+        second_symbol = executor.submit(
+            symbol_tool.apply_ex,
+            name_path_pattern="SecondSymbol",
+            mcp_ctx=_mcp_context("session-symbol-b"),
+        )
+        assert not second_symbol_entered.wait(timeout=0.25)
+
+        release_first_symbol.set()
+        assert first_symbol.result(timeout=5) == []
+        assert write_entered.wait(timeout=1)
+        assert not second_symbol_entered.is_set()
+
+        release_write.set()
+        assert writer.result(timeout=5) == "OK"
+        assert second_symbol.result(timeout=5) == []
+
+    assert second_symbol_entered.is_set()
+
+
 def test_different_project_writes_can_overlap(
     multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1754,6 +1960,74 @@ def test_mcp_timeout_returns_before_worker_without_releasing_write_exclusion(
         assert first_record.request_finished_at is not None
         assert first_record.finished_at >= first_record.request_finished_at
         assert first_record.error == first_record.request_error
+
+    asyncio.run(scenario())
+
+
+def test_mcp_timeout_while_queued_reports_queue_and_never_runs(
+    multi_project_agent: tuple[SerenaAgent, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, roots = multi_project_agent
+    _activate(agent, "session-a", "project_a")
+    _activate(agent, "session-b", "project_a")
+
+    tool = agent.get_tool(CreateTextFileTool)
+    original_apply = tool.apply
+    first_entered = threading.Event()
+    second_entered = threading.Event()
+    release_first = threading.Event()
+
+    def blocking_apply(relative_path: str, content: str) -> str:
+        if relative_path == "first.txt":
+            first_entered.set()
+            assert release_first.wait(timeout=5)
+        elif relative_path == "queued.txt":
+            second_entered.set()
+        return original_apply(relative_path=relative_path, content=content)
+
+    monkeypatch.setattr(tool, "apply", blocking_apply)
+    mcp_tool = SerenaMCPFactory.make_mcp_tool(tool)
+
+    async def scenario() -> None:
+        agent.serena_config.tool_timeout = 2
+        first = asyncio.create_task(
+            mcp_tool.run(
+                {"relative_path": "first.txt", "content": "first"},
+                context=_mcp_context("session-a"),
+            )
+        )
+        assert await asyncio.to_thread(first_entered.wait, 5)
+
+        agent.serena_config.tool_timeout = 0.15
+        second = asyncio.create_task(
+            mcp_tool.run(
+                {"relative_path": "queued.txt", "content": "second"},
+                context=_mcp_context("session-b"),
+            )
+        )
+        await asyncio.sleep(0.05)
+        queued_record = agent.execution_store.list_session_executions("session-b")[-1]
+        assert queued_record.status == "queued"
+        assert queued_record.running_at is None
+        assert not second_entered.is_set()
+
+        with pytest.raises(ToolError, match="while queued for Serena execution") as exc_info:
+            await second
+        assert "never started and will not run later" in str(exc_info.value)
+
+        timed_out_record = agent.execution_store.list_session_executions("session-b")[-1]
+        assert timed_out_record.status == "timed_out"
+        assert timed_out_record.running_at is None
+        assert timed_out_record.finished_at is not None
+        assert timed_out_record.request_finished_at == timed_out_record.finished_at
+        assert timed_out_record.error == timed_out_record.request_error
+        assert not second_entered.is_set()
+
+        release_first.set()
+        await first
+        await asyncio.sleep(0.05)
+        assert not second_entered.is_set()
+        assert not (roots["project_a"] / "queued.txt").exists()
 
     asyncio.run(scenario())
 

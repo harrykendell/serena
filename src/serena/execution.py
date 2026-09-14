@@ -31,14 +31,16 @@ T = TypeVar("T")
 class ProjectExecutionCoordinator:
     """Coordinates concurrent execution within one project runtime.
 
-    Reads may overlap, writes are exclusive, and waiting writers prevent later reads from
-    overtaking them. Symbolic reads additionally share one conservative service lock until
-    SolidLSP's higher-level request/cache path is proven safe for concurrent use.
+    Reads may overlap and writes are exclusive. Symbolic reads additionally share one conservative
+    service lock and queue behind waiting writers. Ordinary reads may overtake a waiting writer only
+    while an active symbolic read is already preventing that writer from proceeding. This prevents one
+    slow symbol lookup from head-of-line blocking unrelated reads while retaining normal writer preference.
     """
 
     def __init__(self) -> None:
         self._condition = threading.Condition()
         self._active_readers = 0
+        self._active_symbolic_readers = 0
         self._writer_active = False
         self._waiting_writers = 0
         self._symbolic_read_lock = threading.Lock()
@@ -50,25 +52,29 @@ class ProjectExecutionCoordinator:
 
         if symbolic_read and access is ExecutionAccess.READ:
             with self._symbolic_read_lock:
-                with self._access(access):
+                with self._access(access, symbolic_read=True):
                     return call()
 
-        with self._access(access):
+        with self._access(access, symbolic_read=False):
             return call()
 
     @contextmanager
-    def _access(self, access: ExecutionAccess) -> Iterator[None]:
+    def _access(self, access: ExecutionAccess, *, symbolic_read: bool) -> Iterator[None]:
         if access is ExecutionAccess.READ:
             with self._condition:
-                while self._writer_active or self._waiting_writers > 0:
+                while self._writer_active or (self._waiting_writers > 0 and (symbolic_read or self._active_symbolic_readers == 0)):
                     self._condition.wait()
                 self._active_readers += 1
+                if symbolic_read:
+                    self._active_symbolic_readers += 1
             try:
                 yield
             finally:
                 with self._condition:
                     self._active_readers -= 1
-                    if self._active_readers == 0:
+                    if symbolic_read:
+                        self._active_symbolic_readers -= 1
+                    if self._active_readers == 0 or self._active_symbolic_readers == 0:
                         self._condition.notify_all()
             return
 

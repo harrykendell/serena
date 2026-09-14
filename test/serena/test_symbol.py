@@ -241,6 +241,50 @@ class TestLanguageServerSymbolRetriever:
         create_user_method_symbol_info = symbol_retriever.request_info_for_symbol(create_user_method_symbol)
         assert "Create a new user and store it" in create_user_method_symbol_info
 
+    @pytest.mark.parametrize("project_with_ls", PYTHON_BACKEND_LANGUAGES, indirect=True)
+    def test_find_directory_scope_preserves_symbol_results(self, project_with_ls: Project):
+        symbol_retriever = LanguageServerSymbolRetriever(project_with_ls)
+
+        matches = symbol_retriever.find("UserService/create_user", within_relative_path="test_repo")
+
+        assert [match.get_name_path() for match in matches] == ["UserService/create_user"]
+        assert [match.relative_path for match in matches] == ["test_repo/services.py"]
+
+
+class TestLanguageServerSymbolRetrieverPrefilter:
+    @staticmethod
+    def _mock_project(tmp_path, source_files: list[str]) -> tuple[MagicMock, MagicMock]:
+        project = MagicMock(spec=Project)
+        project.project_root = str(tmp_path)
+        project.project_config = MagicMock(encoding="utf-8")
+        project.gather_source_files.return_value = source_files
+        manager = MagicMock()
+        project.get_language_server_manager_or_raise.return_value = manager
+        return project, manager
+
+    def test_find_requests_symbols_only_for_files_containing_name_path_components(self, tmp_path) -> None:
+        (tmp_path / "candidate.py").write_text("class Target:\n    def method(self):\n        pass\n")
+        (tmp_path / "unrelated.py").write_text("class Target:\n    pass\n")
+        project, manager = self._mock_project(tmp_path, ["candidate.py", "unrelated.py"])
+        language_server = MagicMock()
+        language_server.request_document_symbols.return_value = MagicMock(root_symbols=[])
+        manager.get_language_server.return_value = language_server
+
+        result = LanguageServerSymbolRetriever(project).find("Target/method")
+
+        assert result == []
+        manager.get_language_server.assert_called_once_with("candidate.py")
+        language_server.request_document_symbols.assert_called_once_with("candidate.py")
+
+    def test_find_miss_avoids_language_server_startup(self, tmp_path) -> None:
+        (tmp_path / "module.py").write_text("class Existing:\n    pass\n")
+        project, manager = self._mock_project(tmp_path, ["module.py"])
+
+        result = LanguageServerSymbolRetriever(project).find("MissingSymbol")
+
+        assert result == []
+        manager.get_language_server.assert_not_called()
+
 
 class TestSymbolDictTypes:
     @staticmethod

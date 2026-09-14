@@ -49,7 +49,7 @@ from solidlsp.lsp_protocol_handler.server import (
     StringDict,
 )
 from solidlsp.settings import SolidLSPSettings
-from solidlsp.util.cache import load_cache, save_cache
+from solidlsp.util.cache import CacheSizeLimitExceeded, SerializedCacheBudget, load_cache, save_cache
 
 RawDocumentSymbol = Union[DocumentSymbol, SymbolInformation]
 """
@@ -347,8 +347,10 @@ class SolidLanguageServer(ABC):
     change :meth:`_document_symbols_cache_fingerprint` instead.
     """
     DOCUMENT_SYMBOL_CACHE_FILENAME = "document_symbols.pkl"
-    MAX_PERSISTED_SYMBOL_CACHE_BYTES = 256 * 1024 * 1024
-    """Maximum on-disk size of one persisted symbol cache that will be deserialised at startup."""
+    MAX_LIVE_SYMBOL_CACHE_BYTES = 128 * 1024 * 1024
+    """Maximum serialized-size estimate retained by each live raw or processed symbol cache."""
+    MAX_PERSISTED_SYMBOL_CACHE_BYTES = MAX_LIVE_SYMBOL_CACHE_BYTES + 8 * 1024 * 1024
+    """Maximum on-disk cache size accepted before deserialisation, including pickle/container overhead."""
 
     # Directories that should always be ignored regardless of language:
     # VCS internals, virtual environments, caches, and serena's own data.
@@ -517,11 +519,13 @@ class SolidLanguageServer(ABC):
         self._ls_specific_raw_document_symbols_cache_version = cache_version_raw_document_symbols
         self._raw_document_symbols_cache: dict[str, tuple[str, list[DocumentSymbol] | list[SymbolInformation] | None]] = {}
         """maps relative file paths to a tuple of (file_content_hash, raw_root_symbols)"""
+        self._raw_document_symbols_cache_budget = SerializedCacheBudget(self.MAX_LIVE_SYMBOL_CACHE_BYTES)
         self._raw_document_symbols_cache_is_modified: bool = False
         self._load_raw_document_symbols_cache()
         # * high-level document symbols cache
         self._document_symbols_cache: dict[str, tuple[str, DocumentSymbols]] = {}
         """maps relative file paths to a tuple of (file_content_hash, document_symbols)"""
+        self._document_symbols_cache_budget = SerializedCacheBudget(self.MAX_LIVE_SYMBOL_CACHE_BYTES)
         self._document_symbols_cache_is_modified: bool = False
         self._load_document_symbols_cache()
 
@@ -1818,7 +1822,14 @@ class SolidLanguageServer(ABC):
             # has not yet finished indexing or building the project (e.g. Lean 4 before `lake build`),
             # and caching it would permanently serve stale data even after the project is ready.
             if response:
-                self._raw_document_symbols_cache[cache_key] = (fd.content_hash, response)
+                cache_value = (fd.content_hash, response)
+                self._reserve_live_symbol_cache_entry(
+                    self._raw_document_symbols_cache_budget,
+                    relative_file_path,
+                    cache_value,
+                    "raw document-symbol",
+                )
+                self._raw_document_symbols_cache[cache_key] = cache_value
                 self._raw_document_symbols_cache_is_modified = True
 
             return response
@@ -1974,8 +1985,15 @@ class SolidLanguageServer(ABC):
 
             # update cache
             content_hash = file_data.content_hash
+            cache_value = (content_hash, document_symbols)
             log.debug("Updating cached document symbols for %s (hash=%s)", relative_file_path, content_hash)
-            self._document_symbols_cache[cache_key] = (content_hash, document_symbols)
+            self._reserve_live_symbol_cache_entry(
+                self._document_symbols_cache_budget,
+                relative_file_path,
+                cache_value,
+                "processed document-symbol",
+            )
+            self._document_symbols_cache[cache_key] = cache_value
             self._document_symbols_cache_is_modified = True
 
             return document_symbols
@@ -2891,6 +2909,32 @@ class SolidLanguageServer(ABC):
             version.append(raw_fingerprint)
         return version[0] if len(version) == 1 else tuple(version)
 
+    def _reserve_live_symbol_cache_entry(
+        self,
+        budget: SerializedCacheBudget,
+        relative_file_path: str,
+        value: Any,
+        cache_label: str,
+    ) -> None:
+        """Reserves live symbol-cache capacity or raises a concise operational error.
+
+        :param budget: live cache budget to update
+        :param relative_file_path: source file whose symbols are being retained
+        :param value: complete cache value that would be stored for the file
+        :param cache_label: human-readable cache name used in the user-facing error
+        """
+        try:
+            budget.admit(relative_file_path, value)
+        except CacheSizeLimitExceeded as error:
+            limit_mib = error.max_bytes / (1024 * 1024)
+            current_mib = error.current_bytes / (1024 * 1024)
+            raise LanguageServerOperationError(
+                f"Live {cache_label} cache limit of {limit_mib:.0f} MiB reached while processing "
+                f"'{relative_file_path}' (already retaining about {current_mib:.1f} MiB). "
+                "Serena stopped this symbol lookup before retaining more symbols. Narrow relative_path or exclude large "
+                "generated/data files from the project."
+            ) from None
+
     def _save_raw_document_symbols_cache(self) -> None:
         cache_file = self.cache_dir / self.RAW_DOCUMENT_SYMBOL_CACHE_FILENAME
 
@@ -2959,6 +3003,7 @@ class SolidLanguageServer(ABC):
                             migrated_cache[new_cache_key] = (file_hash, root_symbols)
                             num_symbols_migrated += len(all_symbols)
                     log.info("Migrated %d document symbols from legacy cache", num_symbols_migrated)
+                    self._raw_document_symbols_cache_budget.reset(migrated_cache)
                     self._raw_document_symbols_cache = migrated_cache
                     self._raw_document_symbols_cache_is_modified = True
                     self._save_raw_document_symbols_cache()
@@ -2978,6 +3023,7 @@ class SolidLanguageServer(ABC):
                     max_bytes=self.MAX_PERSISTED_SYMBOL_CACHE_BYTES,
                 )
                 if saved_cache is not None:
+                    self._raw_document_symbols_cache_budget.reset(saved_cache)
                     self._raw_document_symbols_cache = saved_cache
                     log.info(f"Loaded {len(self._raw_document_symbols_cache)} entries from raw document symbols cache.")
             except Exception as e:
@@ -3017,6 +3063,7 @@ class SolidLanguageServer(ABC):
                     max_bytes=self.MAX_PERSISTED_SYMBOL_CACHE_BYTES,
                 )
                 if saved_cache is not None:
+                    self._document_symbols_cache_budget.reset(saved_cache)
                     self._document_symbols_cache = saved_cache
                     log.info(f"Loaded {len(self._document_symbols_cache)} entries from document symbols cache.")
             except Exception as e:

@@ -49,6 +49,32 @@ class _CountingGitMetricsSource:
         raise AssertionError(f"overview unexpectedly refreshed Git metrics for {project_name}")
 
 
+def test_activity_view_exposes_queued_then_running_execution_state(tmp_path: Path) -> None:
+    store = ExecutionStore(tmp_path / "execution-store")
+    submitted_at = time.time()
+    store.start_execution(
+        execution_id="execution-a",
+        session_id="session-a",
+        project_name="serena",
+        tool_name="find_symbol",
+        arguments={"name_path_pattern": "Target"},
+        started_at=submitted_at,
+    )
+    view = ActivityView(store, _OverviewJobSource([]), _CountingGitMetricsSource())
+    panel_id = ExecutionStore.panel_id_for_session("session-a")
+
+    queued = view.for_session(panel_id).calls[0]
+    assert queued.status == "queued"
+    assert queued.started_at == submitted_at
+    assert queued.running_at is None
+
+    running_at = submitted_at + 2.0
+    assert store.mark_execution_running("execution-a", running_at=running_at)
+    running = view.for_session(panel_id).calls[0]
+    assert running.status == "running"
+    assert running.running_at == running_at
+
+
 def test_dashboard_overview_scales_from_lightweight_indexes_without_history_expansion(
     tmp_path: Path,
     monkeypatch,

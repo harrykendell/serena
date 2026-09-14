@@ -4,7 +4,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from time import perf_counter
@@ -190,6 +190,10 @@ class NamePathMatcher(ToStringMixin):
         self._components = [
             self.PatternComponent.from_string(x) for x in name_path_pattern.lstrip(NAME_PATH_SEP).rstrip(NAME_PATH_SEP).split(NAME_PATH_SEP)
         ]
+
+    def get_source_search_terms(self) -> tuple[str, ...]:
+        """Returns distinct literal symbol-name components that must occur in any matching source file."""
+        return tuple(dict.fromkeys(component.name for component in self._components if component.name))
 
     def _tostring_includes(self) -> list[str]:
         return ["_expr"]
@@ -731,6 +735,42 @@ class LanguageServerSymbolRetriever:
         """:param relative_path: relative path to a file"""
         return self._ls_manager.get_language_server(relative_path)
 
+    _SOURCE_SCAN_CHUNK_BYTES = 1024 * 1024
+
+    def _source_file_contains_terms(self, relative_file_path: str, encoded_terms: tuple[bytes, ...]) -> bool:
+        """Returns whether one source file contains every literal name-path component.
+
+        Read failures are treated conservatively as candidates so the prefilter cannot hide an otherwise retrievable symbol.
+        """
+        if not encoded_terms:
+            return True
+
+        remaining = set(encoded_terms)
+        overlap_bytes = max(len(term) for term in encoded_terms) - 1
+        tail = b""
+        try:
+            with open(os.path.join(self.project.project_root, relative_file_path), "rb") as source_file:
+                while chunk := source_file.read(self._SOURCE_SCAN_CHUNK_BYTES):
+                    searchable = tail + chunk
+                    remaining = {term for term in remaining if term not in searchable}
+                    if not remaining:
+                        return True
+                    tail = searchable[-overlap_bytes:] if overlap_bytes > 0 else b""
+        except OSError as error:
+            log.debug("Could not prefilter symbol candidate file %s: %s", relative_file_path, error)
+            return True
+        return False
+
+    def _candidate_source_files(self, matcher: NamePathMatcher, within_relative_path: str | None) -> list[str]:
+        """Returns source files that can contain every literal component of the requested symbol path."""
+        source_files = self.project.gather_source_files(relative_path=within_relative_path or "")
+        search_terms = matcher.get_source_search_terms()
+        try:
+            encoded_terms = tuple(term.encode(self.project.project_config.encoding) for term in search_terms)
+        except UnicodeEncodeError:
+            return []
+        return [relative_path for relative_path in source_files if self._source_file_contains_terms(relative_path, encoded_terms)]
+
     def find(
         self,
         name_path_pattern: str,
@@ -742,25 +782,28 @@ class LanguageServerSymbolRetriever:
         """
         Finds all symbols that match the given name path pattern (see class :class:`NamePathMatcher` for details),
         optionally limited to a specific file and filtered by kind.
+
+        Directory and project-wide searches first perform a cheap literal source scan for every component of the
+        requested name path. Document-symbol requests are then issued only for files that can contain the symbol,
+        avoiding full-project symbol-tree construction for misses and narrowly targeted lookups.
         """
-        symbols: list[LanguageServerSymbol] = []
+        matcher = NamePathMatcher(name_path_pattern, substring_matching)
         if within_relative_path and os.path.isfile(os.path.join(self.project.project_root, within_relative_path)):
-            """
-            For a specific file, use get_language_server to select the best LS for the file type
-            (consistent with get_symbol_overview). This ensures e.g. PHP files are served by the
-            PHP language server rather than being rejected by all LSes via is_ignored_path.
-            """
-            lang_servers: Iterable[SolidLanguageServer] = [self._ls_manager.get_language_server(within_relative_path)]
-        elif within_relative_path:
-            lang_servers = self._ls_manager.ensure_language_servers_for_path(within_relative_path)
+            source_files = [within_relative_path]
         else:
-            lang_servers = self._ls_manager.ensure_all_language_servers()
-        for lang_server in lang_servers:
-            symbol_roots = lang_server.request_full_symbol_tree(within_relative_path=within_relative_path)
-            for root in symbol_roots:
+            source_files = self._candidate_source_files(matcher, within_relative_path)
+
+        symbols: list[LanguageServerSymbol] = []
+        for relative_file_path in source_files:
+            lang_server = self.get_language_server(relative_file_path)
+            document_symbols = lang_server.request_document_symbols(relative_file_path)
+            for root_symbol in document_symbols.root_symbols:
                 symbols.extend(
-                    LanguageServerSymbol(root).find(
-                        name_path_pattern, include_kinds=include_kinds, exclude_kinds=exclude_kinds, substring_matching=substring_matching
+                    LanguageServerSymbol(root_symbol).find(
+                        name_path_pattern,
+                        include_kinds=include_kinds,
+                        exclude_kinds=exclude_kinds,
+                        substring_matching=substring_matching,
                     )
                 )
         return symbols

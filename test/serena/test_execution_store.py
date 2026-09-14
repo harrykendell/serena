@@ -53,6 +53,68 @@ def test_execution_store_survives_restart_and_pins_file_snapshots(tmp_path: Path
     assert ExecutionStore.retained_file_tokens_from_disk() == {token}
 
 
+def test_execution_store_tracks_queue_and_running_timestamps(tmp_path: Path) -> None:
+    store = ExecutionStore(tmp_path / "execution-store")
+    submitted_at = time.time()
+    running_at = submitted_at + 3.0
+    finished_at = running_at + 2.5
+
+    submitted = store.start_execution(
+        execution_id="execution-a",
+        session_id="chat-a",
+        project_name="project-a",
+        tool_name="read_file",
+        arguments={"relative_path": "notes.txt"},
+        started_at=submitted_at,
+    )
+    assert submitted.status == "queued"
+    assert submitted.running_at is None
+
+    assert store.mark_execution_running("execution-a", running_at=running_at)
+    running = store.get_execution("execution-a")
+    assert running is not None
+    assert running.status == "running"
+    assert running.started_at == submitted_at
+    assert running.running_at == running_at
+
+    store.finish_execution("execution-a", succeeded=True, result="done", finished_at=finished_at)
+    completed = store.get_execution("execution-a")
+    assert completed is not None
+    assert completed.status == "completed"
+    assert completed.running_at == running_at
+    assert completed.finished_at == finished_at
+
+
+def test_execution_store_queue_timeout_prevents_late_start(tmp_path: Path) -> None:
+    store = ExecutionStore(tmp_path / "execution-store")
+    store.start_execution(
+        execution_id="execution-a",
+        session_id="chat-a",
+        project_name="project-a",
+        tool_name="create_text_file",
+        arguments={"relative_path": "notes.txt"},
+        started_at=100.0,
+    )
+
+    message = "Tool request timed out while queued."
+    assert store.finish_queued_execution(
+        "execution-a",
+        status="timed_out",
+        error=message,
+        finished_at=102.0,
+    )
+    assert not store.mark_execution_running("execution-a", running_at=103.0)
+
+    timed_out = store.get_execution("execution-a")
+    assert timed_out is not None
+    assert timed_out.status == "timed_out"
+    assert timed_out.running_at is None
+    assert timed_out.finished_at == 102.0
+    assert timed_out.request_finished_at == 102.0
+    assert timed_out.error == message
+    assert timed_out.request_error == message
+
+
 def test_execution_store_upgrades_session_git_snapshot_columns(tmp_path: Path) -> None:
     root = tmp_path / "execution-store"
     root.mkdir()
@@ -88,6 +150,74 @@ def test_execution_store_upgrades_session_git_snapshot_columns(tmp_path: Path) -
     migrated = restarted.get_session_by_panel_id(ExecutionStore.panel_id_for_session("chat-a"))
     assert migrated is not None
     assert migrated.git_metrics == expected
+
+
+def test_execution_store_upgrades_execution_running_timestamp_column(tmp_path: Path) -> None:
+    root = tmp_path / "execution-store"
+    root.mkdir()
+    database = sqlite3.connect(root / "state.sqlite3")
+    database.execute(
+        """
+        CREATE TABLE sessions (
+            session_id TEXT PRIMARY KEY,
+            panel_id TEXT NOT NULL UNIQUE,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            display_name TEXT NOT NULL DEFAULT '',
+            project_name TEXT NOT NULL DEFAULT '',
+            git_additions INTEGER NOT NULL DEFAULT 0,
+            git_deletions INTEGER NOT NULL DEFAULT 0,
+            git_ahead_commits INTEGER
+        )
+        """
+    )
+    database.execute(
+        """
+        CREATE TABLE executions (
+            execution_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            project_name TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            arguments_json TEXT NOT NULL,
+            started_at REAL NOT NULL,
+            status TEXT NOT NULL,
+            finished_at REAL,
+            request_finished_at REAL,
+            request_error TEXT,
+            result TEXT,
+            error TEXT,
+            retained_output_id TEXT,
+            retained_output_chars INTEGER,
+            media_json TEXT,
+            durable_job_id TEXT,
+            durable_job_label TEXT
+        )
+        """
+    )
+    database.execute(
+        "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("chat-a", ExecutionStore.panel_id_for_session("chat-a"), 1.0, 1.0, "Chat A", "serena", 0, 0, None),
+    )
+    database.execute(
+        """
+        INSERT INTO executions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("execution-a", "chat-a", "serena", "read_file", "{}", 1.0, "completed", 2.0, 2.0, None, "ok", None, None, None, None, None, None),
+    )
+    database.execute("PRAGMA user_version=2")
+    database.commit()
+    database.close()
+
+    store = ExecutionStore(root)
+    restored = store.get_execution("execution-a")
+    assert restored is not None
+    assert restored.running_at is None
+
+    with sqlite3.connect(root / "state.sqlite3") as upgraded:
+        columns = {row[1] for row in upgraded.execute("PRAGMA table_info(executions)").fetchall()}
+        version = upgraded.execute("PRAGMA user_version").fetchone()[0]
+    assert "running_at" in columns
+    assert version == 3
 
 
 def test_execution_store_persists_operator_conversation_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

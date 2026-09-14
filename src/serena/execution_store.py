@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from serena.git_metrics import GitLineMetrics
 from serena.retention import (
@@ -47,7 +47,8 @@ class ExecutionRecord:
     tool_name: str
     arguments: dict[str, Any]
     started_at: float
-    status: str = "running"
+    running_at: float | None = None
+    status: str = "queued"
     finished_at: float | None = None
     request_finished_at: float | None = None
     request_error: str | None = None
@@ -70,6 +71,7 @@ class ExecutionSummaryRecord:
     tool_name: str
     arguments: dict[str, Any]
     started_at: float
+    running_at: float | None
     status: str
     finished_at: float | None
     durable_job_id: str | None
@@ -114,7 +116,7 @@ class ExecutionStore:
     and mutates normalized SQLite rows directly.
     """
 
-    _DATABASE_SCHEMA_VERSION = 2
+    _DATABASE_SCHEMA_VERSION = 3
     _DATABASE_FILENAME = "state.sqlite3"
     _BUSY_TIMEOUT_MS = 5_000
 
@@ -246,7 +248,7 @@ class ExecutionStore:
         arguments: dict[str, Any],
         started_at: float | None = None,
     ) -> ExecutionRecord:
-        """Creates one running execution record in a row-local transaction."""
+        """Creates one queued execution record in a row-local transaction."""
         now = started_at if started_at is not None else time.time()
         record = ExecutionRecord(
             execution_id=execution_id,
@@ -273,10 +275,10 @@ class ExecutionStore:
                 """
                 INSERT INTO executions (
                     execution_id, session_id, project_name, tool_name, arguments_json, started_at,
-                    status, finished_at, request_finished_at, request_error, result, error,
+                    running_at, status, finished_at, request_finished_at, request_error, result, error,
                     retained_output_id, retained_output_chars, media_json, durable_job_id,
                     durable_job_label
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
                 """,
                 (
                     record.execution_id,
@@ -289,6 +291,104 @@ class ExecutionStore:
                 ),
             )
         return record
+
+    def mark_execution_running(self, execution_id: str, *, running_at: float | None = None) -> bool:
+        """Transitions one queued execution to running.
+
+        The transition is conditional so a request that timed out or was cancelled while queued cannot
+        subsequently begin executing when its coordinator permit becomes available.
+
+        :param execution_id: execution to transition
+        :param running_at: optional execution-start timestamp
+        :return: whether the queued execution was successfully started
+        """
+        now = running_at if running_at is not None else time.time()
+        with self._transaction():
+            row = self._connection.execute(
+                """
+                SELECT session_id
+                FROM executions
+                WHERE execution_id = ?
+                  AND status = 'queued'
+                  AND request_finished_at IS NULL
+                """,
+                (execution_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            self._connection.execute(
+                """
+                UPDATE executions
+                SET status = 'running', running_at = ?
+                WHERE execution_id = ?
+                  AND status = 'queued'
+                  AND request_finished_at IS NULL
+                """,
+                (now, execution_id),
+            )
+            self._connection.execute(
+                """
+                UPDATE sessions
+                SET updated_at = MAX(updated_at, ?)
+                WHERE session_id = ?
+                """,
+                (now, str(row["session_id"])),
+            )
+            return True
+
+    def finish_queued_execution(
+        self,
+        execution_id: str,
+        *,
+        status: Literal["timed_out", "cancelled"],
+        error: str,
+        finished_at: float | None = None,
+    ) -> bool:
+        """Terminates one execution only if it has not begun running.
+
+        :param execution_id: execution to terminate
+        :param status: terminal queue outcome
+        :param error: native error recorded for the model-visible request
+        :param finished_at: optional terminal timestamp
+        :return: whether the execution was still queued and was terminated
+        """
+        now = finished_at if finished_at is not None else time.time()
+        with self._transaction():
+            row = self._connection.execute(
+                """
+                SELECT session_id
+                FROM executions
+                WHERE execution_id = ?
+                  AND status = 'queued'
+                  AND request_finished_at IS NULL
+                """,
+                (execution_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            self._connection.execute(
+                """
+                UPDATE executions
+                SET status = ?,
+                    finished_at = ?,
+                    request_finished_at = ?,
+                    request_error = ?,
+                    error = ?
+                WHERE execution_id = ?
+                  AND status = 'queued'
+                  AND request_finished_at IS NULL
+                """,
+                (status, now, now, error, error, execution_id),
+            )
+            self._connection.execute(
+                """
+                UPDATE sessions
+                SET updated_at = MAX(updated_at, ?)
+                WHERE session_id = ?
+                """,
+                (now, str(row["session_id"])),
+            )
+            return True
 
     def mark_request_abandoned(
         self,
@@ -424,7 +524,7 @@ class ExecutionStore:
             row = self._connection.execute(
                 """
                 SELECT execution_id, session_id, project_name, tool_name, arguments_json, started_at,
-                       status, finished_at, durable_job_id, durable_job_label
+                       running_at, status, finished_at, durable_job_id, durable_job_label
                 FROM executions
                 WHERE execution_id = ?
                 """,
@@ -463,7 +563,7 @@ class ExecutionStore:
             rows = self._connection.execute(
                 """
                 SELECT execution_id, session_id, project_name, tool_name, arguments_json, started_at,
-                       status, finished_at, durable_job_id, durable_job_label
+                       running_at, status, finished_at, durable_job_id, durable_job_label
                 FROM executions
                 WHERE session_id = ?
                 ORDER BY started_at ASC, execution_id ASC
@@ -501,11 +601,11 @@ class ExecutionStore:
             latest_rows = self._connection.execute(
                 """
                 SELECT execution_id, session_id, project_name, tool_name, arguments_json, started_at,
-                       status, finished_at, durable_job_id, durable_job_label
+                       running_at, status, finished_at, durable_job_id, durable_job_label
                 FROM (
                     SELECT
                         execution_id, session_id, project_name, tool_name, arguments_json, started_at,
-                        status, finished_at, durable_job_id, durable_job_label,
+                        running_at, status, finished_at, durable_job_id, durable_job_label,
                         ROW_NUMBER() OVER (
                             PARTITION BY session_id
                             ORDER BY started_at DESC, execution_id DESC
@@ -897,6 +997,7 @@ class ExecutionStore:
                 tool_name TEXT NOT NULL,
                 arguments_json TEXT NOT NULL,
                 started_at REAL NOT NULL,
+                running_at REAL,
                 status TEXT NOT NULL,
                 finished_at REAL,
                 request_finished_at REAL,
@@ -960,6 +1061,11 @@ class ExecutionStore:
         ):
             if column_name not in session_columns:
                 self._connection.execute(f"ALTER TABLE sessions ADD COLUMN {column_name} {definition}")
+
+        # add the actual execution-start timestamp separately from submission time
+        execution_columns = {str(row["name"]) for row in self._connection.execute("PRAGMA table_info(executions)").fetchall()}
+        if "running_at" not in execution_columns:
+            self._connection.execute("ALTER TABLE executions ADD COLUMN running_at REAL")
 
         self._connection.execute(f"PRAGMA user_version={self._DATABASE_SCHEMA_VERSION}")
 
@@ -1033,6 +1139,7 @@ class ExecutionStore:
             tool_name=str(row["tool_name"]),
             arguments=cls._load_json_object(str(row["arguments_json"])),
             started_at=float(row["started_at"]),
+            running_at=float(row["running_at"]) if row["running_at"] is not None else None,
             status=str(row["status"]),
             finished_at=float(row["finished_at"]) if row["finished_at"] is not None else None,
             request_finished_at=float(row["request_finished_at"]) if row["request_finished_at"] is not None else None,
@@ -1056,6 +1163,7 @@ class ExecutionStore:
             tool_name=str(row["tool_name"]),
             arguments=cls._load_json_object(str(row["arguments_json"])),
             started_at=float(row["started_at"]),
+            running_at=float(row["running_at"]) if row["running_at"] is not None else None,
             status=str(row["status"]),
             finished_at=float(row["finished_at"]) if row["finished_at"] is not None else None,
             durable_job_id=str(row["durable_job_id"]) if row["durable_job_id"] is not None else None,
@@ -1112,6 +1220,7 @@ class ExecutionStore:
             record.tool_name,
             cls._dump_json(record.arguments),
             record.started_at,
+            record.running_at,
             record.status,
             record.finished_at,
             record.request_finished_at,
