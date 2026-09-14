@@ -37,7 +37,7 @@ uv run serena start-mcp-server \
   --streamable-http-path /serena
 ```
 
-Project activation may be supplied with `--project` or performed later through the MCP tools. Hosted routing, Cloudflare Tunnel configuration, and service supervision are deployment concerns outside this repository.
+Project activation may be supplied with `--project` or performed later through the MCP tools. Hosted routing, Cloudflare Tunnel configuration, and service supervision are deployment concerns outside the runtime itself; the current `mcp.kendell.uk` workstation deployment is documented in [`docs/03-special-guides/cloudflared_deployment.md`](docs/03-special-guides/cloudflared_deployment.md).
 
 ## Development
 
