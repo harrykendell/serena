@@ -68,7 +68,7 @@ class WebPushNotifier:
         if root is None:
             root = Path(SerenaPaths().serena_user_home_dir) / "push"
         if minimum_job_duration_seconds is None:
-            minimum_job_duration_seconds = SerenaConfig.from_config_file().tool_timeout
+            minimum_job_duration_seconds = SerenaConfig.load_tool_timeout_from_config_file()
 
         self._root = root
         self._root.mkdir(parents=True, exist_ok=True, mode=0o700)

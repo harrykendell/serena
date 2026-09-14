@@ -600,8 +600,8 @@ class SerenaConfig(SharedConfig):
         return os.path.join(SerenaPaths().serena_user_home_dir, cls.CONFIG_FILE)
 
     @classmethod
-    def from_config_file(cls, generate_if_missing: bool = True) -> "SerenaConfig":
-        """Loads Serena's current global configuration schema."""
+    def _load_config_file(cls, generate_if_missing: bool = True) -> tuple[str, CommentedMap]:
+        """Loads the raw global configuration mapping without constructing registered projects."""
         config_file_path = cls._determine_config_file_path()
         if not os.path.exists(config_file_path):
             if not generate_if_missing:
@@ -613,6 +613,18 @@ class SerenaConfig(SharedConfig):
             loaded_commented_yaml = load_yaml(config_file_path)
         except Exception as e:
             raise ValueError(f"Error loading Serena configuration from {config_file_path}: {e}") from e
+        return config_file_path, loaded_commented_yaml
+
+    @classmethod
+    def load_tool_timeout_from_config_file(cls, generate_if_missing: bool = True) -> float:
+        """Returns the configured tool timeout without loading registered projects."""
+        _, loaded_commented_yaml = cls._load_config_file(generate_if_missing=generate_if_missing)
+        return loaded_commented_yaml.get("tool_timeout", get_dataclass_default(cls, "tool_timeout"))
+
+    @classmethod
+    def from_config_file(cls, generate_if_missing: bool = True) -> "SerenaConfig":
+        """Loads Serena's current global configuration schema."""
+        config_file_path, loaded_commented_yaml = cls._load_config_file(generate_if_missing=generate_if_missing)
 
         instance = cls(_loaded_commented_yaml=loaded_commented_yaml, _config_file_path=config_file_path)
         for field_name in instance._iter_config_file_mapped_fields_without_type_conversion():

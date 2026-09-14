@@ -349,6 +349,12 @@ class TestSerenaConfigLoadSave:
             body_lines.append(f"  - {p}")
         self.master_config_path.write_text("\n".join(body_lines) + "\n")
 
+    def test_tool_timeout_can_be_loaded_without_project_registry(self):
+        """The job-notification threshold can be read without constructing project registrations."""
+        self.master_config_path.write_text("tool_timeout: 37\n")
+
+        assert SerenaConfig.load_tool_timeout_from_config_file(generate_if_missing=False) == 37
+
     def test_empty_projects_key_is_treated_as_empty_list(self):
         """A bare ``projects:`` key should not abort config loading."""
         self.master_config_path.write_text("projects:\n")
