@@ -43,7 +43,7 @@ select {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 10px;
+  gap: var(--kd-space-5);
 }
 
 .kd-brand-mark,
@@ -67,14 +67,14 @@ select {
 .kd-brand-title,
 .brand-title {
   color: var(--kd-ink);
-  font-size: 16px;
+  font-size: var(--kd-text-brand);
   font-weight: var(--kd-weight-strong);
 }
 
 .kd-brand-subtitle,
 .brand-subtitle {
   color: var(--kd-muted);
-  font-size: 11px;
+  font-size: var(--kd-text-sm);
 }
 
 .kd-site-header,
@@ -98,7 +98,7 @@ select {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 8px;
+  gap: var(--kd-space-4);
 }
 
 .kd-status-led,

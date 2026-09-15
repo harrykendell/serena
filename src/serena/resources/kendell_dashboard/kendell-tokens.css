@@ -31,6 +31,22 @@
   --kd-weight-medium: 600;
   --kd-weight-strong: 700;
 
+  --kd-text-micro: 9px;
+  --kd-text-xs: 10px;
+  --kd-text-sm: 11px;
+  --kd-text-md: 12px;
+  --kd-text-lg: 13px;
+  --kd-text-title: 15px;
+  --kd-text-brand: 16px;
+
+  --kd-space-1: 2px;
+  --kd-space-2: 4px;
+  --kd-space-3: 6px;
+  --kd-space-4: 8px;
+  --kd-space-5: 10px;
+  --kd-space-6: 12px;
+  --kd-space-7: 16px;
+
   --kd-radius-sm: 4px;
   --kd-radius-md: 6px;
   --kd-radius-lg: 8px;
