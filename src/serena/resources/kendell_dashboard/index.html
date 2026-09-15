@@ -40,7 +40,7 @@
           <div class="kd-popover-surface kd-header-menu-panel header-menu-panel">
             <div class="kd-header-menu-heading">
               <span class="kd-header-menu-title" id="access-identity">Cloudflare Access</span>
-              <span class="kd-header-menu-tag">ACCESS</span>
+              <span class="kd-header-menu-tag" id="access-role">USER</span>
             </div>
             <div class="kd-header-menu-section header-menu-diagnostics">
               <div class="kd-header-status" id="connection-state" data-state="loading">
@@ -49,28 +49,26 @@
                   <span class="kd-header-status-title" id="connection-label">Connecting</span>
                 </div>
                 <div class="kd-header-status-times">
-                  <span class="kd-header-status-line" id="last-update">waiting for dashboard state</span>
+                  <span class="kd-header-status-line" id="last-update">updated n/a</span>
+                  <span class="kd-header-status-line" id="last-fetch">fetched n/a</span>
                 </div>
               </div>
             </div>
             <button class="kd-header-menu-row kd-header-menu-row--divided kd-header-menu-action header-menu-resource" id="jobs-button" type="button" aria-haspopup="dialog" aria-controls="jobs-dialog">
               <span class="kd-header-menu-copy">
                 <span class="kd-header-menu-option-title">Jobs</span>
-                <span class="kd-header-menu-option-note">Running / maximum concurrent</span>
               </span>
               <strong class="kd-header-menu-value mono"><span id="running-jobs-count">0</span>/<span id="max-jobs-count">—</span></strong>
             </button>
             <button class="kd-header-menu-row kd-header-menu-row--divided kd-header-menu-action header-menu-resource" id="tools-button" type="button" aria-haspopup="dialog" aria-controls="resource-dialog">
               <span class="kd-header-menu-copy">
                 <span class="kd-header-menu-option-title">Active tools</span>
-                <span class="kd-header-menu-option-note">Available in this session</span>
               </span>
               <strong class="kd-header-menu-value" id="tool-count">—</strong>
             </button>
             <div class="kd-header-menu-row header-menu-notification-row" id="notification-row">
               <span class="kd-header-menu-copy">
                 <span class="kd-header-menu-option-title">Job notifications</span>
-                <span class="kd-header-menu-option-note" id="notification-state-note">Enable completion notifications</span>
               </span>
               <button class="kd-icon-button header-menu-notification-action notification-button" id="notification-button" type="button" aria-label="Enable job notifications" aria-pressed="false" title="Enable job notifications">
                 <svg viewBox="0 0 24 24" aria-hidden="true">

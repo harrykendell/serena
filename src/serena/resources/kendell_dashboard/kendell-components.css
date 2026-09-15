@@ -366,13 +366,16 @@
 }
 
 .kd-header-status {
-  display: grid;
+  display: flex;
   min-width: 0;
-  gap: 5px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   text-align: left;
 }
 
 .kd-header-status > .kd-status-indicator {
+  flex: 0 0 auto;
   justify-content: flex-start;
 }
 
@@ -391,10 +394,12 @@
 
 .kd-header-status-times {
   display: flex;
-  max-width: none;
+  min-width: 0;
+  flex: 1 1 auto;
   flex-wrap: wrap;
-  justify-content: flex-start;
+  justify-content: flex-end;
   gap: 3px 9px;
+  text-align: right;
 }
 
 .kd-header-status-line {
@@ -413,7 +418,7 @@
 .kd-header-menu-row {
   display: flex;
   width: 100%;
-  min-height: 48px;
+  min-height: 38px;
   align-items: center;
   justify-content: space-between;
   gap: 12px;

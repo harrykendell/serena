@@ -34,6 +34,8 @@ let selectedSerenaRoot = null;
 let pendingNotificationTarget = currentRoute.notificationTarget;
 let changeStream = null;
 let changeStreamConnected = false;
+let lastUpdatedAt = null;
+let lastFetchedAt = null;
 
 function byId(id) {
   return document.getElementById(id);
@@ -79,6 +81,41 @@ function setText(id, value, fallback = "—") {
   if (node) node.textContent = value === null || value === undefined || value === "" ? fallback : String(value);
 }
 
+function parseDashboardTimestamp(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  return numeric > 1e12 ? numeric : numeric * 1000;
+}
+
+function timeAgo(value, now = Date.now()) {
+  const parsed = parseDashboardTimestamp(value);
+  if (parsed === null) return "n/a";
+  const seconds = Math.max(0, Math.round((now - parsed) / 1000));
+  if (seconds < 5) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 36) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return `${days}d ago`;
+}
+
+function currentStateUpdatedAt() {
+  if (!currentDocument) return null;
+  if (currentRoute.kind !== "overview") return parseDashboardTimestamp(currentDocument.updated_at);
+  const timestamps = [
+    ...(currentDocument?.serena?.panels || []).map(panel => panel.updated_at),
+    ...(currentDocument?.orchestrator?.panels || []).map(panel => panel.updated_at),
+  ].map(parseDashboardTimestamp).filter(value => value !== null);
+  return timestamps.length ? Math.max(...timestamps) : null;
+}
+
+function renderConnectionTimes(now = Date.now()) {
+  setText("last-update", `updated ${timeAgo(lastUpdatedAt, now)}`, "updated n/a");
+  setText("last-fetch", `fetched ${timeAgo(lastFetchedAt, now)}`, "fetched n/a");
+}
+
 function setConnection(state, label) {
   const node = byId("connection-state");
   if (!node) return;
@@ -92,10 +129,7 @@ function setConnection(state, label) {
     menuButton.setAttribute("aria-label", menuLabel);
     menuButton.title = menuLabel;
   }
-  if (state === "connected") {
-    const updated = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    setText("last-update", `updated ${updated}`, "");
-  }
+  renderConnectionTimes();
 }
 
 function isSerenaActive(documentState) {
@@ -240,7 +274,10 @@ async function refresh() {
       }
       renderCurrentDocument({ preserveViewport });
     }
+    lastFetchedAt = Date.now();
+    lastUpdatedAt = currentStateUpdatedAt();
     setConnection("connected", "Connected");
+    startClock();
   } catch (error) {
     if (generation === routeGeneration) {
       if (recoverRouteError(error)) {
@@ -363,6 +400,11 @@ function renderOverviewMetadata(session, jobs) {
   setText("access-identity", session.access_identity, "Cloudflare Access");
   const signOut = byId("access-sign-out");
   if (signOut) signOut.title = session.access_identity ? `Sign out ${session.access_identity}` : "Sign out of Cloudflare Access";
+  const accessRole = byId("access-role");
+  if (accessRole) {
+    accessRole.textContent = session.access_identity ? "USER" : "";
+    accessRole.hidden = !session.access_identity;
+  }
   const accessIcon = byId("access-role-icon")?.querySelector("svg");
   if (accessIcon) {
     if (session.access_identity) accessIcon.removeAttribute("stroke-dasharray");
@@ -1062,14 +1104,8 @@ function setNotificationButtonState(button, state) {
     : state === "denied"
       ? "Job notifications blocked by browser settings"
       : "Enable job notifications";
-  const note = enabled
-    ? "Enabled"
-    : state === "denied"
-      ? "Blocked by browser settings"
-      : "Enable completion notifications";
   button.setAttribute("aria-label", label);
   button.title = label;
-  setText("notification-state-note", note, "Enable completion notifications");
 }
 
 async function setupPushNotifications() {
@@ -1124,15 +1160,17 @@ async function setupPushNotifications() {
 }
 
 function tickVisibleActivity() {
-  const now = Date.now() / 1000;
-  for (const panel of visibleActivityPanels) panel.tick(now);
-  if (byId("jobs-dialog")?.open && jobsDialogPanel) jobsDialogPanel.tick(now);
-  for (const item of visibleElapsedNodes) item.node.textContent = window.SerenaActivity.formatLiveDuration(now - item.startedAt);
+  const nowSeconds = Date.now() / 1000;
+  for (const panel of visibleActivityPanels) panel.tick(nowSeconds);
+  if (byId("jobs-dialog")?.open && jobsDialogPanel) jobsDialogPanel.tick(nowSeconds);
+  for (const item of visibleElapsedNodes) item.node.textContent = window.SerenaActivity.formatLiveDuration(nowSeconds - item.startedAt);
+  renderConnectionTimes(nowSeconds * 1000);
 }
 
 function startClock() {
   const needsClock = !document.hidden && (
-    visibleElapsedNodes.length > 0
+    lastFetchedAt !== null
+    || visibleElapsedNodes.length > 0
     || visibleActivityPanels.some(panel => panel.hasLiveActivity())
     || (byId("jobs-dialog")?.open && jobsDialogPanel?.hasLiveActivity())
   );

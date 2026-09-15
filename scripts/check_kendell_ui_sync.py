@@ -18,8 +18,6 @@ SHARED_FILES = (
     "kendell-tokens.css",
     "kendell-shell.css",
     "kendell-components.css",
-    "kendell-ui-specimen.html",
-    "kendell-ui-gallery.html",
 )
 
 
