@@ -37,18 +37,25 @@
       </div>
     </div>
     <div class="kd-header-actions">
-      <span class="kd-status-indicator live fixture-header-copy"><span class="kd-status-led"></span>Connected</span>
       <details class="kd-header-menu" open>
-        <summary class="kd-icon-button kd-header-action kd-header-menu-button" aria-label="Example status and options">
+        <summary class="kd-icon-button kd-header-action kd-header-menu-button" data-state="connected" aria-label="Example status and options">
           <span class="kd-header-menu-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><path d="M4 7h7M15 7h5M4 17h3M11 17h9M4 12h11M19 12h1"/><circle cx="13" cy="7" r="2"/><circle cx="9" cy="17" r="2"/><circle cx="17" cy="12" r="2"/></svg>
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.1"/><path d="M5.8 19c.8-4.1 2.9-6.2 6.2-6.2s5.4 2.1 6.2 6.2"/></svg>
           </span>
         </summary>
         <div class="kd-popover-surface kd-header-menu-panel">
           <div class="kd-header-menu-heading"><span class="kd-header-menu-title">user@example.com</span><span class="kd-header-menu-tag">ACCESS</span></div>
-          <div class="kd-header-menu-section"><span class="kd-status-indicator live"><span class="kd-status-led"></span>Connected</span></div>
-          <div class="kd-header-menu-row"><span class="kd-header-menu-copy"><span class="kd-header-menu-option-title">Status menu</span><span class="kd-header-menu-option-note">Shared header dropdown pattern</span></span><strong class="kd-header-menu-value">Ready</strong></div>
-          <div class="kd-header-menu-footer"><button class="kd-header-menu-auth-action" type="button">Sign out</button></div>
+          <div class="kd-header-menu-section">
+            <div class="kd-header-status" data-state="connected">
+              <div class="kd-status-indicator"><span class="kd-status-led"></span><span class="kd-header-status-title">Connected</span></div>
+              <div class="kd-header-status-times"><span class="kd-header-status-line">updated just now</span></div>
+            </div>
+          </div>
+          <div class="kd-header-menu-group">
+            <div class="kd-header-menu-row"><span class="kd-header-menu-copy"><span class="kd-header-menu-option-title">Refresh data</span><span class="kd-header-menu-option-note">Fetch the latest state now</span></span><strong class="kd-header-menu-value">↻</strong></div>
+            <div class="kd-header-menu-row"><span class="kd-header-menu-copy"><span class="kd-header-menu-option-title">Auto refresh</span><span class="kd-header-menu-option-note">Poll periodically</span></span><strong class="kd-header-menu-value">On</strong></div>
+          </div>
+          <div class="kd-header-menu-footer"><div class="kd-header-menu-detail">42 items retained</div><button class="kd-header-menu-footer-action" type="button">Sign out</button></div>
         </div>
       </details>
     </div>

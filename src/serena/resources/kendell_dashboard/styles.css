@@ -1,32 +1,11 @@
 .brand-marks,
-.connection {
+.brand-marks {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
+  gap: 5px;
 }
-.brand-marks { flex: 0 0 auto; gap: 5px; }
 .brand-copy { min-width: 0; }
-.connection { gap: 7px; color: var(--muted); font-size: 11px; white-space: nowrap; }
-.connection[data-state="connected"] { color: var(--live); }
-.connection[data-state="error"] { color: var(--bad); }
-.last-update { color: var(--muted); }
-
-.header-menu-button[data-state="loading"]::after,
-.header-menu-button[data-state="connected"]::after,
-.header-menu-button[data-state="error"]::after {
-  content: "";
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 6px;
-  height: 6px;
-  border: 1px solid var(--surface);
-  border-radius: 50%;
-  background: var(--quiet);
-  box-shadow: 0 0 0 1px color-mix(in srgb, currentColor 12%, transparent);
-}
-.header-menu-button[data-state="connected"]::after { background: var(--live); }
-.header-menu-button[data-state="error"]::after { background: var(--bad); }
-.header-menu-diagnostics .connection { justify-content: flex-start; }
 .header-menu-resource { font: inherit; }
 .header-menu-notification-action {
   width: 31px;

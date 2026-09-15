@@ -33,13 +33,8 @@
       <div class="kd-header-actions header-actions">
         <details class="kd-header-menu header-menu" id="serena-options-menu">
           <summary class="kd-icon-button kd-header-action kd-header-menu-button header-menu-button" id="serena-options-button" data-state="loading" aria-label="Open Serena status and options" title="Serena status and options">
-            <span class="kd-header-menu-icon header-menu-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24">
-                <path d="M4 7h7M15 7h5M4 17h3M11 17h9M4 12h11M19 12h1"/>
-                <circle cx="13" cy="7" r="2"/>
-                <circle cx="9" cy="17" r="2"/>
-                <circle cx="17" cy="12" r="2"/>
-              </svg>
+            <span class="kd-header-menu-icon header-menu-icon" id="access-role-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" stroke-dasharray="2.4 2.2"><circle cx="12" cy="8" r="3.1"/><path d="M5.8 19c.8-4.1 2.9-6.2 6.2-6.2s5.4 2.1 6.2 6.2"/></svg>
             </span>
           </summary>
           <div class="kd-popover-surface kd-header-menu-panel header-menu-panel">
@@ -48,10 +43,14 @@
               <span class="kd-header-menu-tag">ACCESS</span>
             </div>
             <div class="kd-header-menu-section header-menu-diagnostics">
-              <div class="connection" id="connection-state" data-state="loading">
-                <span class="kd-status-led status-led" aria-hidden="true"></span>
-                <span id="connection-label">Connecting</span>
-                <span class="last-update" id="last-update"></span>
+              <div class="kd-header-status" id="connection-state" data-state="loading">
+                <div class="kd-status-indicator">
+                  <span class="kd-status-led" aria-hidden="true"></span>
+                  <span class="kd-header-status-title" id="connection-label">Connecting</span>
+                </div>
+                <div class="kd-header-status-times">
+                  <span class="kd-header-status-line" id="last-update">waiting for dashboard state</span>
+                </div>
               </div>
             </div>
             <button class="kd-header-menu-row kd-header-menu-row--divided kd-header-menu-action header-menu-resource" id="jobs-button" type="button" aria-haspopup="dialog" aria-controls="jobs-dialog">
@@ -68,20 +67,6 @@
               </span>
               <strong class="kd-header-menu-value" id="tool-count">—</strong>
             </button>
-            <div class="kd-header-menu-row kd-header-menu-row--divided">
-              <span class="kd-header-menu-copy">
-                <span class="kd-header-menu-option-title">Runtime</span>
-                <span class="kd-header-menu-option-note">Execution policy</span>
-              </span>
-              <strong class="kd-header-menu-value" id="runtime-policy">—</strong>
-            </div>
-            <div class="kd-header-menu-row kd-header-menu-row--divided">
-              <span class="kd-header-menu-copy">
-                <span class="kd-header-menu-option-title">Version</span>
-                <span class="kd-header-menu-option-note">Serena build</span>
-              </span>
-              <strong class="kd-header-menu-value mono" id="version">—</strong>
-            </div>
             <div class="kd-header-menu-row header-menu-notification-row" id="notification-row">
               <span class="kd-header-menu-copy">
                 <span class="kd-header-menu-option-title">Job notifications</span>
@@ -94,6 +79,7 @@
               </button>
             </div>
             <div class="kd-header-menu-footer">
+              <div class="kd-header-menu-detail">Serena <span class="mono" id="version">—</span></div>
               <a class="kd-header-menu-footer-action" id="access-sign-out" href="/cdn-cgi/access/logout" title="Sign out of Cloudflare Access">Sign out</a>
             </div>
           </div>

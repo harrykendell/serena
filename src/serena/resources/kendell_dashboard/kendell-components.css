@@ -283,6 +283,23 @@
   user-select: none;
 }
 
+.kd-header-menu-button[data-state]::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border: 1px solid var(--kd-surface);
+  border-radius: 50%;
+  background: var(--kd-quiet);
+  box-shadow: 0 0 0 1px color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.kd-header-menu-button[data-state="connected"]::after { background: var(--kd-live); }
+.kd-header-menu-button[data-state="warn"]::after { background: var(--kd-warn); }
+.kd-header-menu-button[data-state="error"]::after { background: var(--kd-bad); }
+
 .kd-header-menu-button[data-tone="warn"] {
   border-color: color-mix(in srgb, var(--kd-warn) 32%, var(--kd-border));
   background: var(--kd-warn-soft);
@@ -345,6 +362,51 @@
 
 .kd-header-menu-section {
   padding: 9px 8px;
+  border-bottom: 1px solid var(--kd-border);
+}
+
+.kd-header-status {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  text-align: left;
+}
+
+.kd-header-status > .kd-status-indicator {
+  justify-content: flex-start;
+}
+
+.kd-header-status[data-state="connected"] > .kd-status-indicator { color: var(--kd-live); }
+.kd-header-status[data-state="warn"] > .kd-status-indicator { color: var(--kd-warn); }
+.kd-header-status[data-state="error"] > .kd-status-indicator { color: var(--kd-bad); }
+.kd-header-status[data-state="loading"] > .kd-status-indicator { color: var(--kd-quiet); }
+
+.kd-header-status-title {
+  margin: 0;
+  color: var(--kd-ink);
+  font-size: 12px;
+  font-weight: var(--kd-weight-strong);
+  line-height: 1;
+}
+
+.kd-header-status-times {
+  display: flex;
+  max-width: none;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 3px 9px;
+}
+
+.kd-header-status-line {
+  margin: 0;
+  color: var(--kd-muted);
+  font-size: 10px;
+  line-height: 1.2;
+  white-space: normal;
+}
+
+.kd-header-menu-group {
+  display: grid;
   border-bottom: 1px solid var(--kd-border);
 }
 
@@ -428,6 +490,18 @@
   margin-top: 4px;
   padding-top: 4px;
   border-top: 1px solid var(--kd-border);
+}
+
+.kd-header-menu-detail {
+  min-width: 0;
+  padding: 2px 8px 1px;
+  overflow: hidden;
+  color: var(--kd-muted);
+  font-size: 9.5px;
+  font-weight: var(--kd-weight-regular);
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .kd-header-menu-footer-action {

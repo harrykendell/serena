@@ -88,13 +88,13 @@ function setConnection(state, label) {
   const menuButton = byId("serena-options-button");
   if (menuButton) {
     menuButton.dataset.state = state;
-    menuButton.dataset.tone = state === "error" ? "bad" : "";
     const menuLabel = `${resolvedLabel}. Open Serena status and options`;
     menuButton.setAttribute("aria-label", menuLabel);
     menuButton.title = menuLabel;
   }
   if (state === "connected") {
-    setText("last-update", new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }), "");
+    const updated = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    setText("last-update", `updated ${updated}`, "");
   }
 }
 
@@ -363,7 +363,11 @@ function renderOverviewMetadata(session, jobs) {
   setText("access-identity", session.access_identity, "Cloudflare Access");
   const signOut = byId("access-sign-out");
   if (signOut) signOut.title = session.access_identity ? `Sign out ${session.access_identity}` : "Sign out of Cloudflare Access";
-  setText("runtime-policy", session.runtime_policy, "ChatGPT");
+  const accessIcon = byId("access-role-icon")?.querySelector("svg");
+  if (accessIcon) {
+    if (session.access_identity) accessIcon.removeAttribute("stroke-dasharray");
+    else accessIcon.setAttribute("stroke-dasharray", "2.4 2.2");
+  }
   setText("version", session.serena_version, "—");
   latestTools = session.active_tools || [];
   latestJobs = jobs || { jobs: [], running_jobs: 0, max_concurrent_jobs: 0 };
