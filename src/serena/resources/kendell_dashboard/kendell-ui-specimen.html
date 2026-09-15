@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <script>
+    const theme = new URLSearchParams(window.location.search).get("theme");
+    if (theme === "light" || theme === "dark") document.documentElement.dataset.kdTheme = theme;
+  </script>
+  <link rel="stylesheet" href="kendell-tokens.css">
+  <link rel="stylesheet" href="kendell-shell.css">
+  <link rel="stylesheet" href="kendell-components.css">
+  <style>
+    body { min-height: 100vh; }
+    .fixture-stack { display: grid; gap: 18px; }
+    .fixture-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .fixture-surface { padding: 12px; }
+    .fixture-copy { margin: 0; color: var(--kd-muted); font-size: 11px; }
+    .fixture-dialogs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .fixture-dialog { padding: 12px; }
+    .fixture-dialog strong { display: block; margin-bottom: 3px; }
+    .fixture-header-copy { min-width: 0; }
+    @media (max-width: 700px) {
+      .fixture-dialogs { grid-template-columns: 1fr; }
+      .fixture-header-copy { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="kd-site-header">
+    <div class="kd-brand">
+      <div class="kd-brand-mark kd-surface" aria-hidden="true"></div>
+      <div>
+        <span class="kd-brand-title">Kendell UI</span>
+        <span class="kd-brand-subtitle">Shared component specimen</span>
+      </div>
+    </div>
+    <div class="kd-header-actions">
+      <span class="kd-status-indicator live fixture-header-copy"><span class="kd-status-led"></span>Connected</span>
+      <details class="kd-header-menu" open>
+        <summary class="kd-icon-button kd-header-action kd-header-menu-button" aria-label="Example status and options">
+          <span class="kd-header-menu-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M4 7h7M15 7h5M4 17h3M11 17h9M4 12h11M19 12h1"/><circle cx="13" cy="7" r="2"/><circle cx="9" cy="17" r="2"/><circle cx="17" cy="12" r="2"/></svg>
+          </span>
+        </summary>
+        <div class="kd-popover-surface kd-header-menu-panel">
+          <div class="kd-header-menu-heading"><span class="kd-header-menu-title">user@example.com</span><span class="kd-header-menu-tag">ACCESS</span></div>
+          <div class="kd-header-menu-section"><span class="kd-status-indicator live"><span class="kd-status-led"></span>Connected</span></div>
+          <div class="kd-header-menu-row"><span class="kd-header-menu-copy"><span class="kd-header-menu-option-title">Status menu</span><span class="kd-header-menu-option-note">Shared header dropdown pattern</span></span><strong class="kd-header-menu-value">Ready</strong></div>
+          <div class="kd-header-menu-footer"><button class="kd-header-menu-auth-action" type="button">Sign out</button></div>
+        </div>
+      </details>
+    </div>
+  </header>
+
+  <main class="kd-shell-main fixture-stack">
+    <section>
+      <div class="kd-section-head">
+        <div>
+          <h1 class="kd-section-title">Navigation</h1>
+          <p class="kd-section-note">Base and compact tab contracts.</p>
+        </div>
+      </div>
+      <nav class="kd-tabs" aria-label="Example tabs">
+        <button class="kd-tab-button" type="button" aria-selected="true">Overview</button>
+        <button class="kd-tab-button" type="button">Activity</button>
+        <button class="kd-tab-button" type="button">Diagnostics</button>
+      </nav>
+      <nav class="kd-tabs kd-tabs--compact" aria-label="Example compact tabs">
+        <button class="kd-tab-button" type="button" aria-selected="true">Overview</button>
+        <button class="kd-tab-button" type="button">Images</button>
+        <button class="kd-tab-button" type="button">Optimise</button>
+        <button class="kd-tab-button" type="button">GUI</button>
+      </nav>
+    </section>
+
+    <section class="kd-surface fixture-surface">
+      <div class="kd-section-head">
+        <div>
+          <h2 class="kd-section-title">Controls and states</h2>
+          <p class="kd-section-note">Typography, geometry and semantic colour are shared.</p>
+        </div>
+      </div>
+      <div class="fixture-row">
+        <button class="kd-button" type="button">Default</button>
+        <button class="kd-button kd-button--compact" type="button">Compact</button>
+        <button class="kd-button kd-button--ghost" type="button">Ghost</button>
+        <button class="kd-icon-button kd-header-action" type="button" aria-label="Icon action">+</button>
+      </div>
+      <div class="fixture-row" style="margin-top:10px">
+        <span class="kd-badge">Quiet</span>
+        <span class="kd-badge live">Live</span>
+        <span class="kd-badge warn">Warning</span>
+        <span class="kd-badge bad">Error</span>
+        <span class="kd-badge accent">Accent</span>
+      </div>
+    </section>
+
+    <details open>
+      <summary class="kd-group-divider">
+        <span class="kd-group-divider-chevron" aria-hidden="true"></span>
+        <span class="kd-group-divider-label">Today</span>
+        <span class="kd-group-divider-count">12</span>
+      </summary>
+      <div class="kd-surface fixture-surface">
+        <p class="fixture-copy">Shared collapsible grouping used by Serena sessions and the ARTIQ experiment ledger.</p>
+      </div>
+    </details>
+
+    <section class="fixture-dialogs">
+      <div class="kd-dialog-surface fixture-dialog">
+        <strong>Dialog surface</strong>
+        <p class="fixture-copy">Raised modal treatment with the shared border, radius and elevation.</p>
+      </div>
+      <div class="kd-popover-surface fixture-dialog">
+        <strong>Popover surface</strong>
+        <p class="fixture-copy">Compact menu treatment used by contextual header controls.</p>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

@@ -39,6 +39,9 @@ def _dashboard_static_assets() -> tuple[str, str, str]:
     html = index_path.read_text(encoding="utf-8")
     assets = (
         "dashboard.js",
+        "kendell-tokens.css",
+        "kendell-shell.css",
+        "kendell-components.css",
         "styles.css",
         "service-worker.js",
         "manifest.webmanifest",
@@ -295,12 +298,14 @@ class CustomDashboard:
         """Sets the retained dashboard name for one ChatGPT conversation."""
         return self._execution_store.set_session_display_name(session_id, display_name)
 
-    def dashboard_state(self) -> dict[str, Any]:
+    def dashboard_state(self, *, access_identity: str | None = None) -> dict[str, Any]:
         """Returns the complete compact dashboard overview document."""
         serena, jobs = activity_overview_payload(self._activity_view.dashboard_overview())
+        session = self._session_overview.get_session()
+        session["access_identity"] = access_identity
         return {
             "status": "success",
-            "session": self._session_overview.get_session(),
+            "session": session,
             "jobs": jobs,
             "serena": serena,
             "orchestrator": self._orchestrator_overview.get_panels(),
@@ -411,7 +416,13 @@ class CustomDashboard:
 
         @app.route("/dashboard/api/state", methods=["GET"])
         def get_dashboard_state() -> Response:
-            return self._conditional_json_response(app, self._overview_revision(), self.dashboard_state)
+            access_identity = (request.headers.get("Cf-Access-Authenticated-User-Email") or "").strip() or None
+            revision = f"{self._overview_revision()}|access:{access_identity or ''}"
+            return self._conditional_json_response(
+                app,
+                revision,
+                lambda: self.dashboard_state(access_identity=access_identity),
+            )
 
         @app.route("/dashboard/api/events", methods=["GET"])
         def get_dashboard_events() -> Response:

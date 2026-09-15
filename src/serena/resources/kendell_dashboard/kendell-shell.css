@@ -1,0 +1,139 @@
+/* Kendell UI foundation. Keep byte-for-byte identical across Kendell dashboards. */
+* {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  min-width: 0;
+  min-height: 100%;
+}
+
+html {
+  background: var(--kd-bg);
+}
+
+body {
+  margin: 0;
+  background: var(--kd-bg);
+  color: var(--kd-ink);
+  font-family: var(--kd-font-sans);
+  line-height: 1.4;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+.kd-shell-main,
+.shell-main {
+  width: min(1200px, 100%);
+  margin: 0 auto;
+  padding: 18px clamp(14px, 2.5vw, 22px) 28px;
+}
+
+.kd-brand,
+.brand {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.kd-brand-mark,
+.brand-mark {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+}
+
+.kd-brand-title,
+.brand-title,
+.kd-brand-subtitle,
+.brand-subtitle {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kd-brand-title,
+.brand-title {
+  color: var(--kd-ink);
+  font-size: 16px;
+  font-weight: var(--kd-weight-strong);
+}
+
+.kd-brand-subtitle,
+.brand-subtitle {
+  color: var(--kd-muted);
+  font-size: 11px;
+}
+
+.kd-site-header,
+.site-header {
+  position: sticky;
+  z-index: 20;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 58px;
+  padding: 8px max(16px, calc((100vw - 1200px) / 2 + 22px));
+  border-bottom: 1px solid var(--kd-border);
+  background: color-mix(in srgb, var(--kd-bg) 92%, transparent);
+  backdrop-filter: blur(12px);
+}
+
+.kd-header-actions,
+.header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.kd-status-led,
+.status-led {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.kd-mono,
+.mono {
+  font-family: var(--kd-font-mono);
+}
+
+@media (max-width: 700px) {
+  .kd-site-header,
+  .site-header {
+    position: static;
+    min-height: 54px;
+    padding: 8px 14px;
+  }
+
+  .kd-shell-main,
+  .shell-main {
+    padding: 12px 13px 22px;
+  }
+}
+
+@media (max-width: 430px) {
+  .kd-brand-subtitle,
+  .brand-subtitle {
+    display: none;
+  }
+}

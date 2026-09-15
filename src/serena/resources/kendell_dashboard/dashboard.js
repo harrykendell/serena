@@ -26,6 +26,8 @@ let jobsDialogExpandedJob = null;
 let jobsDialogDetailGeneration = 0;
 let visibleActivityPanels = [];
 let serenaOverviewPanels = new Map();
+let serenaOverviewGroupNodes = new Map();
+const serenaOverviewGroupExpansion = new Map([["active", true]]);
 let visibleElapsedNodes = [];
 let selectedSerenaPanel = null;
 let selectedSerenaRoot = null;
@@ -80,8 +82,17 @@ function setText(id, value, fallback = "—") {
 function setConnection(state, label) {
   const node = byId("connection-state");
   if (!node) return;
+  const resolvedLabel = label || "Connected";
   node.dataset.state = state;
-  setText("connection-label", label, "Connected");
+  setText("connection-label", resolvedLabel, "Connected");
+  const menuButton = byId("serena-options-button");
+  if (menuButton) {
+    menuButton.dataset.state = state;
+    menuButton.dataset.tone = state === "error" ? "bad" : "";
+    const menuLabel = `${resolvedLabel}. Open Serena status and options`;
+    menuButton.setAttribute("aria-label", menuLabel);
+    menuButton.title = menuLabel;
+  }
   if (state === "connected") {
     setText("last-update", new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }), "");
   }
@@ -309,7 +320,7 @@ function renderLoadingRoute() {
     if (!target) continue;
     target.replaceChildren();
     const loading = document.createElement("div");
-    loading.className = "empty-card";
+    loading.className = "kd-surface empty-card";
     loading.textContent = "Loading…";
     target.append(loading);
   }
@@ -341,12 +352,17 @@ function renderCurrentDocument({ preserveViewport = false } = {}) {
 function renderOverview(state) {
   latestOverview = state || {};
   renderOverviewMetadata(state?.session || {}, state?.jobs || {});
-  renderSerenaOverview(state?.serena?.panels || []);
-  renderOrchestratorOverview(state?.orchestrator?.panels || []);
-  applyActivityView();
+  renderSerenaOverview(
+    state?.serena?.panels || [],
+    state?.orchestrator?.panels || []
+  );
+  applyActivityView("serena");
 }
 
 function renderOverviewMetadata(session, jobs) {
+  setText("access-identity", session.access_identity, "Cloudflare Access");
+  const signOut = byId("access-sign-out");
+  if (signOut) signOut.title = session.access_identity ? `Sign out ${session.access_identity}` : "Sign out of Cloudflare Access";
   setText("runtime-policy", session.runtime_policy, "ChatGPT");
   setText("version", session.serena_version, "—");
   latestTools = session.active_tools || [];
@@ -398,6 +414,13 @@ function sessionDay(timestampSeconds) {
 }
 
 function sessionDayLabel(date) {
+  const today = new Date();
+  if (
+    date.getFullYear() === today.getFullYear()
+    && date.getMonth() === today.getMonth()
+    && date.getDate() === today.getDate()
+  ) return "Today";
+
   const day = date.getDate();
   const mod100 = day % 100;
   const suffix = mod100 >= 11 && mod100 <= 13
@@ -406,76 +429,188 @@ function sessionDayLabel(date) {
   const weekday = date.toLocaleDateString("en-GB", { weekday: "long" });
   const month = date.toLocaleDateString("en-GB", { month: "long" });
   const year = date.getFullYear();
-  const yearSuffix = year === new Date().getFullYear() ? "" : ` ${year}`;
+  const yearSuffix = year === today.getFullYear() ? "" : ` ${year}`;
 
   return `${weekday} ${day}${suffix} ${month}${yearSuffix}`;
 }
 
-function renderSerenaOverview(panels) {
+function serenaSessionGroups(serenaPanels, orchestratorPanels = []) {
+  const sessions = [
+    ...serenaPanels.map(panel => ({ kind: "serena", panel })),
+    ...orchestratorPanels.map(panel => ({ kind: "orchestrator", panel })),
+  ].sort((a, b) => {
+    const activeDelta = Number(Boolean(b.panel?.active)) - Number(Boolean(a.panel?.active));
+    if (activeDelta) return activeDelta;
+    return Number(b.panel?.updated_at || 0) - Number(a.panel?.updated_at || 0);
+  });
+
+  const groups = [];
+  let current = null;
+  for (const session of sessions) {
+    const summary = session.panel || {};
+    const day = summary.active ? null : sessionDay(summary.updated_at);
+    const key = summary.active ? "active" : day ? `day:${day.key}` : "day:unknown";
+    const label = summary.active ? "Active" : day ? sessionDayLabel(day.date) : "Earlier";
+    if (!current || current.key !== key) {
+      current = { key, label, defaultExpanded: groups.length === 0, panels: [] };
+      groups.push(current);
+    }
+    current.panels.push(session);
+  }
+
+  return groups;
+}
+
+function serenaSessionGroupNode(group) {
+  let entry = serenaOverviewGroupNodes.get(group.key);
+  if (!entry) {
+    const root = document.createElement("section");
+    root.className = "session-group";
+    root.dataset.groupKey = group.key;
+
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "session-group-toggle kd-group-divider";
+
+    const chevron = document.createElement("span");
+    chevron.className = "kd-group-divider-chevron";
+    chevron.setAttribute("aria-hidden", "true");
+
+    const label = document.createElement("span");
+    label.className = "session-group-label kd-group-divider-label";
+
+    const count = document.createElement("span");
+    count.className = "kd-group-divider-count";
+
+    const body = document.createElement("div");
+    body.className = "session-group-body";
+    body.id = `serena-session-group-${group.key.replaceAll(/[^a-zA-Z0-9_-]/g, "-")}`;
+    toggle.setAttribute("aria-controls", body.id);
+    toggle.append(chevron, label, count);
+    root.append(toggle, body);
+
+    toggle.addEventListener("click", () => {
+      const expanded = toggle.getAttribute("aria-expanded") !== "true";
+      toggle.setAttribute("aria-expanded", String(expanded));
+      body.hidden = !expanded;
+      serenaOverviewGroupExpansion.set(group.key, expanded);
+    });
+
+    entry = { root, toggle, label, count, body };
+    serenaOverviewGroupNodes.set(group.key, entry);
+  }
+
+  const expanded = serenaOverviewGroupExpansion.has(group.key)
+    ? serenaOverviewGroupExpansion.get(group.key)
+    : group.defaultExpanded;
+  serenaOverviewGroupExpansion.set(group.key, expanded);
+  entry.toggle.setAttribute("aria-expanded", String(expanded));
+  entry.body.hidden = !expanded;
+  entry.label.textContent = group.label;
+  entry.count.textContent = String(group.panels.length);
+  return entry;
+}
+
+function orchestratorSessionCard(panel) {
+  const root = document.createElement("div");
+  root.className = "serena-activity-panel orchestrator-session-panel";
+  root.dataset.panelId = panel.panel_id;
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "activity-header orchestrator-session-card";
+
+  const logo = document.createElement("img");
+  logo.className = "activity-logo orchestrator-session-logo";
+  logo.src = dashboardAssetUrl("orchestrator-logo.svg");
+  logo.alt = "";
+  logo.setAttribute("aria-hidden", "true");
+
+  const heading = document.createElement("span");
+  heading.className = "activity-heading orchestrator-session-copy";
+  const title = document.createElement("span");
+  title.className = "activity-title";
+  title.textContent = panel.display_name || "Orchestrator";
+  const summary = document.createElement("span");
+  summary.className = "activity-summary";
+  const delegateCount = Number(panel.delegate_count || 0);
+  const activeCount = Number(panel.active_count || 0);
+  summary.textContent = `${delegateCount} ${delegateCount === 1 ? "delegate" : "delegates"}${activeCount ? ` · ${activeCount} active` : ""}`;
+  heading.append(title, summary);
+
+  const meta = document.createElement("span");
+  meta.className = "activity-header-meta";
+
+  const chevron = document.createElement("span");
+  chevron.textContent = "›";
+  chevron.className = "activity-chevron orchestrator-chevron";
+
+  button.append(logo, heading, meta, chevron);
+  button.addEventListener("click", () => navigate({ kind: "orchestrator", panelId: panel.panel_id, expandedEntryId: null }));
+  root.append(button);
+  return root;
+}
+
+function renderSerenaOverview(serenaPanels, orchestratorPanels = []) {
   const container = byId("serena-widgets");
   if (!container) return;
   visibleActivityPanels = [];
   selectedSerenaPanel = null;
   selectedSerenaRoot = null;
 
-  if (!panels.length) {
+  if (!serenaPanels.length && !orchestratorPanels.length) {
     for (const { panel } of serenaOverviewPanels.values()) panel.destroy();
     serenaOverviewPanels = new Map();
-    container.replaceChildren(emptyCard("No Serena session activity recorded yet."));
+    serenaOverviewGroupNodes = new Map();
+    container.replaceChildren(emptyCard("No session activity recorded yet."));
     return;
   }
 
   const nextPanels = new Map();
-  const desiredNodes = [];
-  let previousDayKey = null;
-  for (const summary of panels) {
-    const day = sessionDay(summary.started_at);
-    if (day && previousDayKey !== null && day.key !== previousDayKey) {
-      const separator = document.createElement("div");
-      separator.className = "session-day-separator";
-      separator.textContent = sessionDayLabel(day.date);
-      desiredNodes.push(separator);
-    }
-    if (day) previousDayKey = day.key;
+  const nextGroupNodes = new Map();
+  const desiredGroups = [];
+  for (const group of serenaSessionGroups(serenaPanels, orchestratorPanels)) {
+    const groupEntry = serenaSessionGroupNode(group);
+    const groupPanels = [];
 
-    const snapshot = activitySummarySnapshot(summary);
-    const existing = serenaOverviewPanels.get(summary.panel_id);
-    let root = existing?.root || null;
-    let panel = existing?.panel || null;
-    if (!root || !panel) {
-      root = document.createElement("div");
-      root.dataset.panelId = summary.panel_id;
-      panel = new window.SerenaActivity.ActivityPanel(root, {
-        initialCollapsed: true,
-        summaryMode: true,
-        onOpen: () => openSerenaSummaryPanel(panel, root, summary.panel_id),
-      });
-    } else {
-      panel.demote();
+    for (const session of group.panels) {
+      const summary = session.panel;
+      if (session.kind === "orchestrator") {
+        groupPanels.push(orchestratorSessionCard(summary));
+        continue;
+      }
+
+      const snapshot = activitySummarySnapshot(summary);
+      const existing = serenaOverviewPanels.get(summary.panel_id);
+      let root = existing?.root || null;
+      let panel = existing?.panel || null;
+      if (!root || !panel) {
+        root = document.createElement("div");
+        root.dataset.panelId = summary.panel_id;
+        panel = new window.SerenaActivity.ActivityPanel(root, {
+          initialCollapsed: true,
+          summaryMode: true,
+          onOpen: () => openSerenaSummaryPanel(panel, root, summary.panel_id),
+        });
+      } else {
+        panel.demote();
+      }
+      panel.render(snapshot);
+      nextPanels.set(summary.panel_id, { root, panel });
+      groupPanels.push(root);
     }
-    panel.render(snapshot);
-    nextPanels.set(summary.panel_id, { root, panel });
-    desiredNodes.push(root);
+
+    groupEntry.body.replaceChildren(...groupPanels);
+    nextGroupNodes.set(group.key, groupEntry);
+    desiredGroups.push(groupEntry.root);
   }
 
   for (const [panelId, entry] of serenaOverviewPanels) {
     if (!nextPanels.has(panelId)) entry.panel.destroy();
   }
   serenaOverviewPanels = nextPanels;
-
-  let cursor = container.firstChild;
-  for (const node of desiredNodes) {
-    if (node === cursor) {
-      cursor = cursor.nextSibling;
-      continue;
-    }
-    container.insertBefore(node, cursor);
-  }
-  while (cursor) {
-    const next = cursor.nextSibling;
-    cursor.remove();
-    cursor = next;
-  }
+  serenaOverviewGroupNodes = nextGroupNodes;
+  container.replaceChildren(...desiredGroups);
 }
 
 function selectedBackButton(label) {
@@ -558,17 +693,9 @@ async function loadDashboardMedia(callId, media) {
   };
 }
 
-function setOrchestratorSectionDetail(selected, title = "") {
-  const titleNode = byId("orchestrator-title");
-  const noteNode = titleNode?.parentElement?.querySelector(".section-note");
-  if (!titleNode || !noteNode) return;
-  titleNode.textContent = selected ? title : "Orchestrator";
-  noteNode.textContent = selected ? "Selected retained orchestration" : "Retained orchestrations";
-}
-
 function emptyCard(message) {
   const node = document.createElement("div");
-  node.className = "empty-card";
+  node.className = "kd-surface empty-card";
   node.textContent = message;
   return node;
 }
@@ -587,48 +714,13 @@ function delegateStatusLabel(state) {
   return String(state || "").toLowerCase().replaceAll("_", " ");
 }
 
-function renderOrchestratorOverview(panels) {
-  const container = byId("orchestrator-widgets");
-  if (!container) return;
-  container.replaceChildren();
-  setText("orchestrator-panel-count", panels.length, "0");
-  setOrchestratorSectionDetail(false);
-  if (!panels.length) {
-    container.append(emptyCard("No orchestration activity recorded yet."));
-    return;
-  }
-
-  for (const panel of panels) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "orchestrator-session-card";
-    const copy = document.createElement("span");
-    copy.className = "orchestrator-session-copy";
-    const title = document.createElement("strong");
-    title.textContent = panel.display_name || "Orchestrator";
-    const summary = document.createElement("span");
-    const delegateCount = Number(panel.delegate_count || 0);
-    const activeCount = Number(panel.active_count || 0);
-    summary.textContent = `${delegateCount} ${delegateCount === 1 ? "delegate" : "delegates"}${activeCount ? ` · ${activeCount} active` : ""}`;
-    copy.append(title, summary);
-    const chevron = document.createElement("span");
-    chevron.textContent = "›";
-    chevron.className = "orchestrator-chevron";
-    button.append(copy, chevron);
-    button.addEventListener("click", () => navigate({ kind: "orchestrator", panelId: panel.panel_id, expandedEntryId: null }));
-    container.append(button);
-  }
-}
-
 function renderSelectedOrchestrator(documentState) {
   const container = byId("orchestrator-widgets");
   if (!container || !documentState) return;
   container.replaceChildren();
   visibleActivityPanels = [];
-  setOrchestratorSectionDetail(true, documentState.display_name || "Orchestrator");
-  setText("orchestrator-panel-count", "1", "1");
   applyActivityView("orchestrator");
-  container.append(selectedBackButton("All orchestrations"));
+  container.append(selectedBackButton("All sessions"));
 
   const list = document.createElement("div");
   list.className = "orchestrator-delegate-list";
@@ -742,41 +834,11 @@ function renderDelegateDetail(detail, expectedId) {
 
 function applyActivityView(forceView = null) {
   if (forceView) activeOverviewView = forceView;
-  const columns = byId("activity-columns");
-  if (columns) {
-    columns.dataset.activeView = activeOverviewView;
-    columns.dataset.route = currentRoute.kind;
-  }
-  for (const button of document.querySelectorAll("[data-activity-view-tab]")) {
-    const active = button.dataset.activityViewTab === activeOverviewView;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-selected", String(active));
-    button.tabIndex = active ? 0 : -1;
-  }
-}
 
-function setupActivityViewTabs() {
-  const buttons = Array.from(document.querySelectorAll("[data-activity-view-tab]"));
-  for (const [index, button] of buttons.entries()) {
-    button.addEventListener("click", () => {
-      const view = button.dataset.activityViewTab;
-      if (view !== "serena" && view !== "orchestrator") return;
-      if (currentRoute.kind !== "overview") returnToOverview();
-      activeOverviewView = view;
-      applyActivityView();
-    });
-    button.addEventListener("keydown", event => {
-      let nextIndex = null;
-      if (event.key === "ArrowRight") nextIndex = (index + 1) % buttons.length;
-      else if (event.key === "ArrowLeft") nextIndex = (index - 1 + buttons.length) % buttons.length;
-      else if (event.key === "Home") nextIndex = 0;
-      else if (event.key === "End") nextIndex = buttons.length - 1;
-      if (nextIndex === null) return;
-      event.preventDefault();
-      buttons[nextIndex]?.focus();
-      buttons[nextIndex]?.click();
-    });
-  }
+  const serenaPanel = byId("serena-activity-panel");
+  const orchestratorPanel = byId("orchestrator-activity-panel");
+  if (serenaPanel) serenaPanel.hidden = activeOverviewView !== "serena";
+  if (orchestratorPanel) orchestratorPanel.hidden = activeOverviewView !== "orchestrator";
 }
 
 function consumeNotificationTarget(snapshot) {
@@ -919,9 +981,30 @@ function renderRunningJobs() {
   jobsDialogPanel.render(runningJobsSnapshot());
 }
 
+function closeHeaderMenu() {
+  const menu = byId("serena-options-menu");
+  if (menu?.open) menu.open = false;
+}
+
+function setupHeaderMenu() {
+  const menu = byId("serena-options-menu");
+  if (!menu) return;
+  document.addEventListener("click", event => {
+    if (!menu.open) return;
+    const target = event.target instanceof Node ? event.target : null;
+    if (target && !menu.contains(target)) menu.open = false;
+  });
+  document.addEventListener("keydown", event => {
+    if (event.key !== "Escape" || !menu.open) return;
+    menu.open = false;
+    menu.querySelector("summary")?.focus();
+  });
+}
+
 function setupJobsDialog() {
   const dialog = byId("jobs-dialog");
   byId("jobs-button")?.addEventListener("click", () => {
+    closeHeaderMenu();
     renderRunningJobs();
     dialog?.showModal();
     const expandedJobId = jobsDialogPanel?.expandedEntryId || null;
@@ -939,6 +1022,7 @@ function openResourceDialog() {
   const dialog = byId("resource-dialog");
   const container = byId("resource-dialog-content");
   if (!dialog || !container) return;
+  closeHeaderMenu();
   container.replaceChildren();
   if (!latestTools.length) container.append(emptyCard("No active tools."));
   for (const toolName of latestTools) {
@@ -974,15 +1058,22 @@ function setNotificationButtonState(button, state) {
     : state === "denied"
       ? "Job notifications blocked by browser settings"
       : "Enable job notifications";
+  const note = enabled
+    ? "Enabled"
+    : state === "denied"
+      ? "Blocked by browser settings"
+      : "Enable completion notifications";
   button.setAttribute("aria-label", label);
   button.title = label;
+  setText("notification-state-note", note, "Enable completion notifications");
 }
 
 async function setupPushNotifications() {
   const button = byId("notification-button");
+  const row = byId("notification-row");
   if (!button) return;
   if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
-    button.hidden = true;
+    if (row) row.hidden = true;
     return;
   }
   try {
@@ -1024,7 +1115,7 @@ async function setupPushNotifications() {
     });
   } catch (error) {
     console.error("Web Push setup failed", error);
-    button.hidden = true;
+    if (row) row.hidden = true;
   }
 }
 
@@ -1074,7 +1165,7 @@ function handlePopState() {
   void refresh();
 }
 
-setupActivityViewTabs();
+setupHeaderMenu();
 setupJobsDialog();
 setupResourceDialog();
 void setupPushNotifications();

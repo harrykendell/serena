@@ -70,7 +70,10 @@ def test_dashboard_serves_shell_overview_and_selected_session(tmp_path: Path, mo
     manifest = client.get("/dashboard/manifest.webmanifest")
     app_icon = client.get("/dashboard/serena-app-icon-180.png")
     versioned_dashboard_script = client.get("/dashboard/dashboard.js?v=test")
-    state = client.get("/dashboard/api/state").get_json()
+    state = client.get(
+        "/dashboard/api/state",
+        headers={"Cf-Access-Authenticated-User-Email": "user@example.com"},
+    ).get_json()
     panel_id = state["serena"]["panels"][0]["panel_id"]
     selected = client.get(f"/dashboard/api/serena/sessions/{panel_id}").get_json()
 
@@ -93,9 +96,11 @@ def test_dashboard_serves_shell_overview_and_selected_session(tmp_path: Path, mo
     assert b"serena-widgets" in response.data
     assert b"orchestrator-widgets" in response.data
     assert state["session"]["runtime_policy"] == "ChatGPT"
+    assert state["session"]["access_identity"] == "user@example.com"
     assert state["jobs"] == {"status": "success", "jobs": [], "running_jobs": 0, "max_concurrent_jobs": 12}
     assert state["orchestrator"] == {"status": "success", "panels": []}
     assert len(state["serena"]["panels"]) == 1
+    assert state["serena"]["panels"][0]["updated_at"] >= state["serena"]["panels"][0]["started_at"]
     assert selected["panel_id"] == panel_id
     assert [call["call_id"] for call in selected["calls"]] == ["execution-a"]
     assert selected["dashboard_jobs"] == {

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kendell UI gallery</title>
+  <link rel="stylesheet" href="kendell-tokens.css">
+  <link rel="stylesheet" href="kendell-shell.css">
+  <style>
+    body { padding: 20px; }
+    .gallery { width: min(1500px, 100%); margin: 0 auto; display: grid; gap: 22px; }
+    .gallery-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; align-items: start; }
+    .gallery-card { min-width: 0; }
+    .gallery-card h2 { margin: 0 0 7px; font-size: 13px; }
+    .gallery-card iframe { display: block; width: 100%; height: 560px; border: 1px solid var(--kd-border); border-radius: var(--kd-radius-lg); background: var(--kd-bg); }
+    .gallery-card.mobile iframe { width: min(390px, 100%); height: 720px; margin: 0 auto; }
+    .gallery-note { margin: 0; color: var(--kd-muted); font-size: 11px; }
+    @media (max-width: 900px) { .gallery-grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main class="gallery">
+    <div>
+      <h1 style="margin:0 0 4px;font-size:18px">Kendell UI visual fixture</h1>
+      <p class="gallery-note">The same shared component specimen rendered at desktop/mobile viewport widths and forced light/dark themes.</p>
+    </div>
+    <section class="gallery-grid" aria-label="Desktop fixtures">
+      <div class="gallery-card">
+        <h2>Desktop · Light</h2>
+        <iframe src="kendell-ui-specimen.html?theme=light" title="Desktop light Kendell UI specimen"></iframe>
+      </div>
+      <div class="gallery-card">
+        <h2>Desktop · Dark</h2>
+        <iframe src="kendell-ui-specimen.html?theme=dark" title="Desktop dark Kendell UI specimen"></iframe>
+      </div>
+    </section>
+    <section class="gallery-grid" aria-label="Mobile fixtures">
+      <div class="gallery-card mobile">
+        <h2>Mobile · Light · 390 px</h2>
+        <iframe src="kendell-ui-specimen.html?theme=light" title="Mobile light Kendell UI specimen"></iframe>
+      </div>
+      <div class="gallery-card mobile">
+        <h2>Mobile · Dark · 390 px</h2>
+        <iframe src="kendell-ui-specimen.html?theme=dark" title="Mobile dark Kendell UI specimen"></iframe>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
