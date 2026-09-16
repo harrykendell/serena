@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 from flask import Flask, Response, abort, redirect, request, stream_with_context
 from mcp.types import ResourceLink
@@ -413,6 +414,10 @@ class CustomDashboard:
             if panel_id is None:
                 return redirect("/dashboard/")  # type: ignore[return-value]
             return redirect(f"/dashboard/?panel={panel_id}&job={job_id}")  # type: ignore[return-value]
+
+        @app.route("/dashboard/chatgpt/<conversation_id>", methods=["GET"])
+        def open_chatgpt_conversation(conversation_id: str) -> Response:
+            return redirect(f"https://chatgpt.com/c/{quote(conversation_id, safe='')}")  # type: ignore[return-value]
 
         @app.route("/dashboard/api/state", methods=["GET"])
         def get_dashboard_state() -> Response:

@@ -37,6 +37,15 @@ uv run serena start-mcp-server \
   --streamable-http-path /serena
 ```
 
+To build/install the native Codex Desktop wrapper with Serena approval notifications and upstream tray usage enabled:
+
+```bash
+cd codex-desktop
+./install.sh
+```
+
+All Codex Desktop integration state and commands live under `codex-desktop/` in this repository. The bootstrap clones the unmodified upstream `codex-desktop-linux` repository into `codex-desktop/upstream/`, generates `codex-desktop/overlay/` with upstream `tray-usage` plus Serena's `serena-approval-notifications` feature, and runs the stock native bootstrap against that overlay. The cloned checkout and generated overlay are gitignored; no external checkout or maintained Codex Desktop fork is required.
+
 Project activation may be supplied with `--project` or performed later through the MCP tools. Hosted routing, Cloudflare Tunnel configuration, and service supervision are deployment concerns outside the runtime itself; the current `mcp.kendell.uk` workstation deployment is documented in [`docs/03-special-guides/cloudflared_deployment.md`](docs/03-special-guides/cloudflared_deployment.md).
 
 ## Development

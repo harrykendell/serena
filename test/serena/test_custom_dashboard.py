@@ -138,6 +138,9 @@ def test_job_notification_link_redirects_to_originating_panel(tmp_path: Path, mo
     assert response.status_code == 302
     assert response.headers["Location"] == f"/dashboard/?panel={panel_id}&job={job_id}"
     assert client.get("/dashboard/job/ffffffffffffffffffffffffffffffff").headers["Location"] == "/dashboard/"
+    chat_response = client.get("/dashboard/chatgpt/chat-ios")
+    assert chat_response.status_code == 302
+    assert chat_response.headers["Location"] == "https://chatgpt.com/c/chat-ios"
 
 
 def test_dashboard_registers_single_web_push_subscription(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -169,7 +172,7 @@ def test_dashboard_forwards_loopback_chatgpt_approval_to_web_push(tmp_path: Path
 
     response = client.post(
         "/api/chatgpt-approval",
-        data='{"conversation_id":"chat-ios","title":"iOS approval test","message_id":"approval-message","connector_id":"serena","connector_name":"Serena","tool_name":"execute_shell_command"}',
+        data='{"conversation_id":"chat-ios","title":"Allow file materialization?","description":"ChatGPT needs your approval to materialize 1 file attachment returned by Serena.","message_id":"approval-message","connector_id":"serena","connector_name":"Serena"}',
         content_type="text/plain;charset=UTF-8",
     )
 
@@ -179,7 +182,8 @@ def test_dashboard_forwards_loopback_chatgpt_approval_to_web_push(tmp_path: Path
     assert notification.conversation_id == "chat-ios"
     assert notification.message_id == "approval-message"
     assert notification.connector_name == "Serena"
-    assert notification.tool_name == "execute_shell_command"
+    assert notification.title == "Allow file materialization?"
+    assert notification.description == "ChatGPT needs your approval to materialize 1 file attachment returned by Serena."
     assert client.post("/api/chatgpt-approval", data="not-json", content_type="text/plain").status_code == 400
 
 

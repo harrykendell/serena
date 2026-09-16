@@ -57,12 +57,11 @@ def test_web_push_notifier_sends_chatgpt_approval_to_registered_browsers(tmp_pat
     notification = ChatGPTApprovalNotification.from_payload(
         {
             "conversation_id": "chat-ios",
-            "title": "iOS approval test",
+            "title": "Allow file materialization?",
+            "description": "ChatGPT needs your approval to materialize 1 file attachment returned by Serena.",
             "message_id": "approval-message",
             "connector_id": "serena",
             "connector_name": "Serena",
-            "tool_name": "execute_shell_command",
-            "tool_title": "Execute Shell Command",
         }
     )
 
@@ -70,10 +69,10 @@ def test_web_push_notifier_sends_chatgpt_approval_to_registered_browsers(tmp_pat
     payload = json.loads(str(sent[0]["data"]))
 
     assert payload == {
-        "title": "iOS approval test",
-        "body": "Approval required · Serena · Execute Shell Command",
+        "title": "Allow file materialization?",
+        "body": "ChatGPT needs your approval to materialize 1 file attachment returned by Serena.",
         "tag": "chatgpt-approval-chat-ios-approval-message",
-        "url": "/dashboard/",
+        "url": "/dashboard/chatgpt/chat-ios",
     }
 
 

@@ -29,6 +29,10 @@ tmp/
 *.bak
 *.tmp
 
+# Local Codex Desktop checkout and generated feature overlay
+/codex-desktop/upstream/
+/codex-desktop/overlay/
+
 # Serena-generated local state
 /*.yml
 !*.template.yml

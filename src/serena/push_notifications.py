@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import quote
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -60,6 +61,7 @@ class ChatGPTApprovalNotification:
     title: str
     message_id: str
     connector_id: str
+    description: str | None = None
     connector_name: str | None = None
     tool_name: str | None = None
     tool_title: str | None = None
@@ -90,6 +92,7 @@ class ChatGPTApprovalNotification:
             title=optional_string("title") or "ChatGPT",
             message_id=required_string("message_id"),
             connector_id=required_string("connector_id"),
+            description=optional_string("description"),
             connector_name=optional_string("connector_name"),
             tool_name=optional_string("tool_name"),
             tool_title=optional_string("tool_title"),
@@ -147,22 +150,26 @@ class WebPushNotifier:
 
     def send_chatgpt_approval(self, notification: ChatGPTApprovalNotification) -> bool:
         """Send one cloud ChatGPT approval request to every registered browser."""
-        detail = ["Approval required"]
-        if notification.connector_name:
-            detail.append(notification.connector_name)
-        elif notification.connector_id:
-            detail.append(notification.connector_id)
-        if notification.tool_title:
-            detail.append(notification.tool_title)
-        elif notification.tool_name:
-            detail.append(notification.tool_name)
+        if notification.description:
+            body = notification.description
+        else:
+            detail = ["Approval required"]
+            if notification.connector_name:
+                detail.append(notification.connector_name)
+            elif notification.connector_id:
+                detail.append(notification.connector_id)
+            if notification.tool_title:
+                detail.append(notification.tool_title)
+            elif notification.tool_name:
+                detail.append(notification.tool_name)
+            body = " · ".join(detail)
 
         payload = json.dumps(
             {
                 "title": notification.title,
-                "body": " · ".join(detail),
+                "body": body,
                 "tag": f"chatgpt-approval-{notification.conversation_id}-{notification.message_id}",
-                "url": "/dashboard/",
+                "url": f"/dashboard/chatgpt/{quote(notification.conversation_id, safe='')}",
             },
             ensure_ascii=False,
             separators=(",", ":"),
