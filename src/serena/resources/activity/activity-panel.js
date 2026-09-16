@@ -483,6 +483,7 @@
       this.mediaCache = new Map();
       this.expandedCallDetailKey = null;
       this.liveNodes = [];
+      this.headerLiveStartedAt = null;
       this.hasRenderedRows = false;
       this.retired = false;
       this.summaryFlashTimer = null;
@@ -721,6 +722,9 @@
 
     tick(nowSeconds) {
       const now = number(nowSeconds) ?? Date.now() / 1000;
+      if (this.headerLiveStartedAt !== null) {
+        this.durationNode.textContent = formatLiveDuration(now - this.headerLiveStartedAt);
+      }
       for (const item of this.liveNodes) {
         item.node.textContent = formatLiveDuration(now - item.startedAt);
       }
@@ -788,9 +792,24 @@ _releaseMedia(callId) {
       }
 
       this.clockNode.textContent = latest ? formatClock(latest.started_at) : formatClock(snapshot.started_at);
+
+      const currentJobs = snapshot.run_id ? jobs.filter(job => job.current_turn) : jobs;
+      const runningStartedAt = [...calls, ...currentJobs]
+        .filter(item => isRunning(item.status))
+        .map(item => number(item.running_at ?? item.started_at ?? item.submitted_at))
+        .filter(value => value !== null)
+        .reduce((latestStartedAt, startedAt) => latestStartedAt === null || startedAt > latestStartedAt ? startedAt : latestStartedAt, null);
+      const latestStartedAt = latest && isRunning(latest.status) ? number(latest.running_at ?? latest.started_at) : null;
+      this.headerLiveStartedAt = runningStartedAt ?? latestStartedAt;
+
       const span = number(snapshot.submission_span_seconds);
-      this.durationNode.textContent = span === null ? "" : formatDuration(span);
-      this.durationNode.title = span === null ? "" : "Time between first and latest submitted tool";
+      if (this.headerLiveStartedAt !== null) {
+        this.durationNode.textContent = formatLiveDuration(Date.now() / 1000 - this.headerLiveStartedAt);
+        this.durationNode.title = "Elapsed time for current activity";
+      } else {
+        this.durationNode.textContent = span === null ? "" : formatDuration(span);
+        this.durationNode.title = span === null ? "" : "Time between first and latest submitted tool";
+      }
     }
 
     _flashNewActivity(previous) {
@@ -999,13 +1018,14 @@ _releaseMedia(callId) {
       timing.className = "activity-row-timing";
       const submittedAt = number(item.started_at ?? item.submitted_at);
       const runningAt = number(item.running_at);
+      const liveStartedAt = runningAt ?? submittedAt;
       appendText(timing, formatClock(submittedAt), "activity-row-clock");
       const elapsed = appendText(timing, "", "activity-row-elapsed");
       const finishedAt = number(item.finished_at);
       if (normalizedStatus === "queued") {
         elapsed.textContent = "Queued";
-      } else if (runningAt !== null && isRunning(normalizedStatus) && finishedAt === null) {
-        this.liveNodes.push({ node: elapsed, startedAt: runningAt });
+      } else if (liveStartedAt !== null && isRunning(normalizedStatus) && finishedAt === null) {
+        this.liveNodes.push({ node: elapsed, startedAt: liveStartedAt });
       } else if (finishedAt !== null && runningAt !== null) {
         elapsed.textContent = formatDuration(finishedAt - runningAt);
       } else if (finishedAt !== null && submittedAt !== null) {
@@ -1016,7 +1036,6 @@ _releaseMedia(callId) {
       const chevron = appendText(button, this.expandedEntryId === id ? "⌄" : "›", "activity-row-chevron");
       button.prepend(status, copy, timing);
       row.append(button);
-
 
       if (this.expandedEntryId === id) {
         const detailContainer = document.createElement("div");
