@@ -20,8 +20,13 @@ self.addEventListener("notificationclick", (event) => {
   const targetUrl = new URL(event.notification.data?.url || "/dashboard/", self.location.origin).href;
   const dashboardUrl = new URL("/dashboard/", self.location.origin).href;
 
+  const targetPath = new URL(targetUrl).pathname;
+  const opensChatGPT = targetPath.startsWith("/dashboard/chatgpt/");
+
   event.waitUntil(
     clients.matchAll({ type: "window", includeUncontrolled: true }).then((windows) => {
+      if (opensChatGPT) return clients.openWindow(targetUrl);
+
       const existing = windows.find((client) => client.url.startsWith(dashboardUrl));
       if (existing) {
         return existing.navigate(targetUrl).then((client) => client?.focus());
