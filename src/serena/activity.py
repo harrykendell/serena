@@ -8,6 +8,7 @@ from serena.execution_store import ActivityPanelRun, ExecutionStore
 ACTIVITY_RESOURCE_URI = "ui://serena/activity-v34.html"
 _ACTIVITY_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
 ACTIVITY_RESOURCE_DIR = Path(__file__).parent / "resources" / "activity"
+KENDELL_UI_RESOURCE_DIR = Path(__file__).parent / "resources" / "kendell_dashboard"
 
 
 class ActivityRunManager:
@@ -53,6 +54,7 @@ def register_activity_resource(mcp: FastMCP) -> None:
 @lru_cache(maxsize=1)
 def activity_widget_html() -> str:
     """Returns the self-contained activity widget HTML assembled from shared assets."""
+    tokens = (KENDELL_UI_RESOURCE_DIR / "kendell-tokens.css").read_text(encoding="utf-8")
     styles = (ACTIVITY_RESOURCE_DIR / "activity-panel.css").read_text(encoding="utf-8")
     renderer = (ACTIVITY_RESOURCE_DIR / "activity-panel.js").read_text(encoding="utf-8")
     host = (ACTIVITY_RESOURCE_DIR / "inline-host.js").read_text(encoding="utf-8")
@@ -61,7 +63,7 @@ def activity_widget_html() -> str:
         '<html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         '<meta name="color-scheme" content="light dark">'
-        f"<style>{styles}</style></head>"
+        f"<style>{tokens}\n{styles}</style></head>"
         '<body style="margin:0;background:transparent">'
         '<div id="serena-activity-root"></div>'
         f"<script>{renderer}</script>"

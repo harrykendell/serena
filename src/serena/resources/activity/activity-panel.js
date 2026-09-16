@@ -185,6 +185,292 @@
     return fallback;
   }
 
+  class SymbolResultRenderer {
+    constructor() {
+      this.toolNames = new Set([
+        "get_symbols_overview",
+        "find_symbol",
+        "find_declaration",
+        "find_implementations",
+        "find_referencing_symbols",
+      ]);
+    }
+
+    canRender(toolName, value) {
+      return this.toolNames.has(toolName) && value !== null && typeof value === "object";
+    }
+
+    render(toolName, value) {
+      if (toolName === "get_symbols_overview") return this._renderOverview(value);
+      if (toolName === "find_referencing_symbols") return this._renderReferences(value);
+      return this._renderRecords(value);
+    }
+
+    _empty(text) {
+      const node = document.createElement("span");
+      node.className = "activity-scalar";
+      node.textContent = text;
+      return node;
+    }
+
+    _renderOverview(value) {
+      if (!value || Array.isArray(value) || typeof value !== "object") return renderValue(value);
+      const root = document.createElement("div");
+      root.className = "activity-symbol-tree";
+      this._appendOverviewGroups(root, value);
+      return root.childElementCount ? root : this._empty("No symbols");
+    }
+
+    _appendOverviewGroups(parent, groups) {
+      for (const [kind, symbols] of Object.entries(groups || {})) {
+        if (!Array.isArray(symbols)) continue;
+        for (const symbol of symbols) {
+          if (typeof symbol === "string") {
+            this._appendSymbol(parent, symbol, kind);
+            continue;
+          }
+          if (!symbol || Array.isArray(symbol) || typeof symbol !== "object") continue;
+          for (const [name, children] of Object.entries(symbol)) {
+            const branch = this._appendSymbol(parent, name, kind);
+            if (children && !Array.isArray(children) && typeof children === "object") {
+              const childContainer = document.createElement("div");
+              childContainer.className = "activity-symbol-children";
+              this._appendOverviewGroups(childContainer, children);
+              if (childContainer.childElementCount) branch.append(childContainer);
+            }
+          }
+        }
+      }
+    }
+
+    _renderRecords(value) {
+      const records = Array.isArray(value) ? value : [value];
+      if (!records.length) return this._empty("No symbols");
+      if (!records.every(record => this._isSymbolRecord(record))) return renderValue(value);
+
+      const root = document.createElement("div");
+      root.className = "activity-symbol-tree";
+      for (const record of records) this._appendRecord(root, record);
+      return root;
+    }
+
+    _renderReferences(value) {
+      if (!value || Array.isArray(value) || typeof value !== "object") return renderValue(value);
+      const root = document.createElement("div");
+      root.className = "activity-result-groups";
+
+      for (const [path, kindGroups] of Object.entries(value)) {
+        if (!kindGroups || Array.isArray(kindGroups) || typeof kindGroups !== "object") return renderValue(value);
+        const section = document.createElement("section");
+        section.className = "activity-result-group";
+        appendText(section, path, "activity-result-group-heading");
+
+        const tree = document.createElement("div");
+        tree.className = "activity-symbol-tree";
+        for (const [kind, records] of Object.entries(kindGroups)) {
+          if (!Array.isArray(records)) continue;
+          for (const record of records) {
+            if (this._isSymbolRecord(record)) this._appendRecord(tree, record, kind, path);
+          }
+        }
+        if (tree.childElementCount) section.append(tree);
+        root.append(section);
+      }
+
+      return root.childElementCount ? root : this._empty("No references");
+    }
+
+    _isSymbolRecord(record) {
+      return Boolean(
+        record
+        && !Array.isArray(record)
+        && typeof record === "object"
+        && (typeof record.name_path === "string" || typeof record.name === "string")
+        && (typeof record.kind === "string" || record.children !== undefined),
+      );
+    }
+
+    _appendSymbol(parent, name, kind) {
+      const branch = document.createElement("div");
+      branch.className = "activity-symbol-branch";
+      const row = document.createElement("div");
+      row.className = "activity-symbol-row";
+      appendText(row, name, "activity-symbol-name");
+      appendText(row, kind, "activity-symbol-kind");
+      branch.append(row);
+      parent.append(branch);
+      return branch;
+    }
+
+    _appendRecord(parent, record, fallbackKind = "", groupedPath = "") {
+      const name = record.name_path || record.name || "<symbol>";
+      const kind = record.kind || fallbackKind || "Symbol";
+      const branch = this._appendSymbol(parent, name, kind);
+
+      const metadata = [];
+      if (record.relative_path && record.relative_path !== groupedPath) metadata.push(record.relative_path);
+      if (record.body_location && typeof record.body_location === "object") {
+        const start = record.body_location.start_line;
+        const end = record.body_location.end_line;
+        if (start !== undefined && end !== undefined) metadata.push(`${start}–${end}`);
+      }
+      if (metadata.length) appendText(branch, metadata.join(" · "), "activity-symbol-meta");
+
+      if (record.children && !Array.isArray(record.children) && typeof record.children === "object") {
+        const children = document.createElement("div");
+        children.className = "activity-symbol-children";
+        for (const [childKind, childRecords] of Object.entries(record.children)) {
+          if (!Array.isArray(childRecords)) continue;
+          for (const child of childRecords) {
+            if (typeof child === "string") {
+              this._appendSymbol(children, child, childKind);
+            } else if (child && typeof child === "object") {
+              this._appendRecord(children, child, childKind);
+            }
+          }
+        }
+        if (children.childElementCount) branch.append(children);
+      }
+
+      for (const field of ["info", "body", "content_around_reference"]) {
+        if (record[field] === null || record[field] === undefined || record[field] === "") continue;
+        const detail = document.createElement("div");
+        detail.className = `activity-symbol-detail activity-symbol-${field.replaceAll("_", "-")}`;
+        detail.append(renderValue(record[field]));
+        branch.append(detail);
+      }
+    }
+  }
+
+  class DiagnosticsResultRenderer {
+    canRender(toolName, value) {
+      return toolName === "get_diagnostics_for_file" && value !== null && !Array.isArray(value) && typeof value === "object";
+    }
+
+    render(_toolName, value) {
+      const root = document.createElement("div");
+      root.className = "activity-diagnostics";
+
+      for (const [path, severities] of Object.entries(value || {})) {
+        if (!severities || Array.isArray(severities) || typeof severities !== "object") return renderValue(value);
+        const section = document.createElement("section");
+        section.className = "activity-result-group";
+        appendText(section, path, "activity-result-group-heading");
+
+        for (const [severity, symbols] of Object.entries(severities)) {
+          if (!symbols || Array.isArray(symbols) || typeof symbols !== "object") continue;
+          for (const [symbolName, diagnostics] of Object.entries(symbols)) {
+            if (!Array.isArray(diagnostics)) continue;
+            const symbol = document.createElement("div");
+            symbol.className = "activity-diagnostic-symbol";
+            if (symbolName !== "<file>") appendText(symbol, symbolName, "activity-diagnostic-symbol-name");
+            for (const diagnostic of diagnostics) this._appendDiagnostic(symbol, severity, diagnostic);
+            section.append(symbol);
+          }
+        }
+        root.append(section);
+      }
+
+      if (root.childElementCount) return root;
+      const empty = document.createElement("span");
+      empty.className = "activity-scalar";
+      empty.textContent = "No diagnostics";
+      return empty;
+    }
+
+    _appendDiagnostic(parent, severity, diagnostic) {
+      if (!diagnostic || Array.isArray(diagnostic) || typeof diagnostic !== "object") return;
+      const row = document.createElement("div");
+      row.className = "activity-diagnostic-row";
+      appendText(row, severity, `activity-diagnostic-severity activity-diagnostic-${severity.toLowerCase()}`);
+
+      const location = [];
+      if (diagnostic.line !== undefined) location.push(String(diagnostic.line));
+      if (diagnostic.column !== undefined) location.push(String(diagnostic.column));
+      if (location.length) appendText(row, location.join(":"), "activity-diagnostic-location");
+      appendText(row, String(diagnostic.message ?? ""), "activity-diagnostic-message");
+
+      const source = [diagnostic.source, diagnostic.code].filter(value => value !== null && value !== undefined && value !== "");
+      if (source.length) appendText(row, source.join(" · "), "activity-diagnostic-source");
+      parent.append(row);
+    }
+  }
+
+  class SemanticListResultRenderer {
+    constructor() {
+      this.toolNames = new Set(["search_for_pattern", "list_dir", "find_file", "list_memories"]);
+    }
+
+    canRender(toolName, value) {
+      return this.toolNames.has(toolName) && value !== null && !Array.isArray(value) && typeof value === "object";
+    }
+
+    render(toolName, value) {
+      return toolName === "search_for_pattern" ? this._renderSearch(value) : this._renderGroups(value);
+    }
+
+    _renderSearch(value) {
+      const root = document.createElement("div");
+      root.className = "activity-result-groups";
+      for (const [path, matches] of Object.entries(value || {})) {
+        if (!Array.isArray(matches)) return renderValue(value);
+        const section = document.createElement("section");
+        section.className = "activity-result-group";
+        appendText(section, path, "activity-result-group-heading");
+        const items = document.createElement("div");
+        items.className = "activity-semantic-list";
+        for (const match of matches) {
+          const item = document.createElement("pre");
+          item.className = "activity-semantic-match";
+          item.textContent = String(match);
+          items.append(item);
+        }
+        section.append(items);
+        root.append(section);
+      }
+      return root.childElementCount ? root : this._empty("No matches");
+    }
+
+    _renderGroups(value) {
+      const root = document.createElement("div");
+      root.className = "activity-result-groups";
+      for (const [groupName, items] of Object.entries(value || {})) {
+        if (!Array.isArray(items)) return renderValue(value);
+        const section = document.createElement("section");
+        section.className = "activity-result-group";
+        appendText(section, groupName, "activity-result-group-heading activity-result-group-heading-capitalize");
+        const list = document.createElement("div");
+        list.className = "activity-semantic-list";
+        for (const item of items) appendText(list, String(item), "activity-semantic-item");
+        section.append(list);
+        root.append(section);
+      }
+      return root.childElementCount ? root : this._empty("No results");
+    }
+
+    _empty(text) {
+      const node = document.createElement("span");
+      node.className = "activity-scalar";
+      node.textContent = text;
+      return node;
+    }
+  }
+
+  class ToolResultRenderer {
+    constructor() {
+      this.renderers = [new SymbolResultRenderer(), new DiagnosticsResultRenderer(), new SemanticListResultRenderer()];
+    }
+
+    render(toolName, value) {
+      for (const renderer of this.renderers) {
+        if (renderer.canRender(toolName, value)) return renderer.render(toolName, value);
+      }
+      return renderValue(value);
+    }
+  }
+
+  const toolResultRenderer = new ToolResultRenderer();
+
   class ActivityPanel {
     constructor(root, options = {}) {
       if (!(root instanceof Element)) throw new TypeError("ActivityPanel requires a DOM root element");
@@ -770,10 +1056,10 @@ _releaseMedia(callId) {
         error.textContent = detail.error;
         this._appendDetailSection(container, "Error", error);
       } else if (detail.structured_result !== null && detail.structured_result !== undefined) {
-        const result = this._appendDetailSection(container, "Result", renderValue(detail.structured_result));
+        const result = this._appendDetailSection(container, "Result", toolResultRenderer.render(detail.tool_name, detail.structured_result));
         result.classList.add("activity-detail-result");
       } else if (detail.result !== null && detail.result !== undefined && detail.result !== "") {
-        const result = this._appendDetailSection(container, "Result", renderValue(detail.result));
+        const result = this._appendDetailSection(container, "Result", toolResultRenderer.render(detail.tool_name, detail.result));
         result.classList.add("activity-detail-result");
       }
 

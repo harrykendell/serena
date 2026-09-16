@@ -70,7 +70,10 @@ def test_dashboard_serves_shell_overview_and_selected_session(tmp_path: Path, mo
     manifest = client.get("/dashboard/manifest.webmanifest")
     app_icon = client.get("/dashboard/serena-app-icon-180.png")
     versioned_dashboard_script = client.get("/dashboard/dashboard.js?v=test")
-    state = client.get("/dashboard/api/state").get_json()
+    state = client.get(
+        "/dashboard/api/state",
+        headers={"Cf-Access-Authenticated-User-Email": "user@example.com"},
+    ).get_json()
     panel_id = state["serena"]["panels"][0]["panel_id"]
     selected = client.get(f"/dashboard/api/serena/sessions/{panel_id}").get_json()
 
@@ -93,9 +96,11 @@ def test_dashboard_serves_shell_overview_and_selected_session(tmp_path: Path, mo
     assert b"serena-widgets" in response.data
     assert b"orchestrator-widgets" in response.data
     assert state["session"]["runtime_policy"] == "ChatGPT"
+    assert state["session"]["access_identity"] == "user@example.com"
     assert state["jobs"] == {"status": "success", "jobs": [], "running_jobs": 0, "max_concurrent_jobs": 12}
     assert state["orchestrator"] == {"status": "success", "panels": []}
     assert len(state["serena"]["panels"]) == 1
+    assert state["serena"]["panels"][0]["updated_at"] >= state["serena"]["panels"][0]["started_at"]
     assert selected["panel_id"] == panel_id
     assert [call["call_id"] for call in selected["calls"]] == ["execution-a"]
     assert selected["dashboard_jobs"] == {
@@ -153,6 +158,29 @@ def test_dashboard_registers_single_web_push_subscription(tmp_path: Path, monkey
     assert config["public_key"].startswith("B")
     assert response.status_code == 200
     assert response.get_json() == {"status": "success"}
+
+
+def test_dashboard_forwards_loopback_chatgpt_approval_to_web_push(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_roots(tmp_path, monkeypatch)
+    dashboard = DashboardServer(agent=_DashboardAgent())
+    client = dashboard._app.test_client()
+    sender = MagicMock(return_value=True)
+    monkeypatch.setattr(dashboard._custom_dashboard._push_notifier, "send_chatgpt_approval", sender)
+
+    response = client.post(
+        "/api/chatgpt-approval",
+        data='{"conversation_id":"chat-ios","title":"iOS approval test","message_id":"approval-message","connector_id":"serena","connector_name":"Serena","tool_name":"execute_shell_command"}',
+        content_type="text/plain;charset=UTF-8",
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"status": "success", "delivered": True}
+    notification = sender.call_args.args[0]
+    assert notification.conversation_id == "chat-ios"
+    assert notification.message_id == "approval-message"
+    assert notification.connector_name == "Serena"
+    assert notification.tool_name == "execute_shell_command"
+    assert client.post("/api/chatgpt-approval", data="not-json", content_type="text/plain").status_code == 400
 
 
 def test_custom_dashboard_can_name_retained_serena_conversation_before_first_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

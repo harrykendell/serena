@@ -151,6 +151,7 @@ def activity_overview_payload(overview: ActivityOverview) -> tuple[dict[str, Any
             "panel_id": summary.panel_id,
             "display_name": summary.display_name,
             "started_at": summary.started_at,
+            "updated_at": summary.updated_at,
             "active": summary.active,
             "tool_count": summary.tool_count,
             "job_count": summary.job_count,

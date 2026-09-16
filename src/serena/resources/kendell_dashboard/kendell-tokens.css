@@ -1,0 +1,132 @@
+/* Kendell UI foundation. Keep byte-for-byte identical across Kendell dashboards. */
+:root,
+[data-kd-theme="light"] {
+  color-scheme: light dark;
+
+  --kd-bg: #f7f9fb;
+  --kd-surface: #ffffff;
+  --kd-surface-2: #f2f5f8;
+  --kd-row-hover: #e3eaf2;
+  --kd-ink: #111827;
+  --kd-muted: #5f6f82;
+  --kd-border: #dfe5ec;
+  --kd-border-strong: #aebdca;
+  --kd-accent: #075c9f;
+  --kd-accent-soft: #e8f2fb;
+  --kd-live: #136d33;
+  --kd-live-soft: #e5f4ef;
+  --kd-warn: #a66400;
+  --kd-warn-soft: #fff4dd;
+  --kd-bad: #b4233a;
+  --kd-bad-soft: #ffe8ed;
+  --kd-quiet: #526175;
+  --kd-quiet-soft: #eef2f6;
+  --kd-shadow: none;
+  --kd-shadow-popover: 0 12px 30px rgb(0 0 0 / 14%);
+  --kd-shadow-dialog: 0 12px 40px rgb(0 0 0 / 18%);
+
+  --kd-font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --kd-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --kd-weight-regular: 400;
+  --kd-weight-medium: 600;
+  --kd-weight-strong: 700;
+
+  --kd-text-micro: 9px;
+  --kd-text-xs: 10px;
+  --kd-text-sm: 11px;
+  --kd-text-md: 12px;
+  --kd-text-lg: 13px;
+  --kd-text-title: 15px;
+  --kd-text-brand: 16px;
+
+  --kd-space-1: 2px;
+  --kd-space-2: 4px;
+  --kd-space-3: 6px;
+  --kd-space-4: 8px;
+  --kd-space-5: 10px;
+  --kd-space-6: 12px;
+  --kd-space-7: 16px;
+
+  --kd-radius-sm: 4px;
+  --kd-radius-md: 6px;
+  --kd-radius-lg: 8px;
+  --kd-radius-pill: 999px;
+  --kd-control-height: 38px;
+  --kd-header-action-size: 34px;
+
+  /* Compatibility aliases while the existing dashboards migrate to --kd-* names. */
+  --bg: var(--kd-bg);
+  --surface: var(--kd-surface);
+  --surface-2: var(--kd-surface-2);
+  --row-hover: var(--kd-row-hover);
+  --ink: var(--kd-ink);
+  --muted: var(--kd-muted);
+  --border: var(--kd-border);
+  --border-strong: var(--kd-border-strong);
+  --accent: var(--kd-accent);
+  --accent-soft: var(--kd-accent-soft);
+  --live: var(--kd-live);
+  --live-soft: var(--kd-live-soft);
+  --warn: var(--kd-warn);
+  --warn-soft: var(--kd-warn-soft);
+  --bad: var(--kd-bad);
+  --bad-soft: var(--kd-bad-soft);
+  --quiet: var(--kd-quiet);
+  --quiet-soft: var(--kd-quiet-soft);
+  --shadow: var(--kd-shadow);
+}
+
+[data-kd-theme="light"] {
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-kd-theme="light"]) {
+    --kd-bg: #10161d;
+    --kd-surface: #161f29;
+    --kd-surface-2: #1d2834;
+    --kd-row-hover: #263544;
+    --kd-ink: #e6edf3;
+    --kd-muted: #9aa8b8;
+    --kd-border: #2c3a49;
+    --kd-border-strong: #425367;
+    --kd-accent: #77b8ff;
+    --kd-accent-soft: #17324b;
+    --kd-live: #64d1a5;
+    --kd-live-soft: #13382c;
+    --kd-warn: #f0b45c;
+    --kd-warn-soft: #432d12;
+    --kd-bad: #ff8a9b;
+    --kd-bad-soft: #47202a;
+    --kd-quiet: #b4bfcc;
+    --kd-quiet-soft: #26313d;
+    --kd-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+    --kd-shadow-popover: 0 12px 30px rgb(0 0 0 / 34%);
+    --kd-shadow-dialog: 0 12px 40px rgb(0 0 0 / 42%);
+  }
+}
+
+[data-kd-theme="dark"] {
+  color-scheme: dark;
+  --kd-bg: #10161d;
+  --kd-surface: #161f29;
+  --kd-surface-2: #1d2834;
+  --kd-row-hover: #263544;
+  --kd-ink: #e6edf3;
+  --kd-muted: #9aa8b8;
+  --kd-border: #2c3a49;
+  --kd-border-strong: #425367;
+  --kd-accent: #77b8ff;
+  --kd-accent-soft: #17324b;
+  --kd-live: #64d1a5;
+  --kd-live-soft: #13382c;
+  --kd-warn: #f0b45c;
+  --kd-warn-soft: #432d12;
+  --kd-bad: #ff8a9b;
+  --kd-bad-soft: #47202a;
+  --kd-quiet: #b4bfcc;
+  --kd-quiet-soft: #26313d;
+  --kd-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+  --kd-shadow-popover: 0 12px 30px rgb(0 0 0 / 34%);
+  --kd-shadow-dialog: 0 12px 40px rgb(0 0 0 / 42%);
+}

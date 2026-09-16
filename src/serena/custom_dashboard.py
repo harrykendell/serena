@@ -23,7 +23,7 @@ from orchestrator.delegates import DelegateError, DelegateStore
 from serena.activity import ACTIVITY_RESOURCE_DIR
 from serena.activity_transport import activity_overview_payload, activity_running_jobs_payload, activity_snapshot_payload
 from serena.activity_view import ActivityView
-from serena.push_notifications import WebPushNotifier
+from serena.push_notifications import ChatGPTApprovalNotification, WebPushNotifier
 from serena.tools.media_tools import read_result_file_link
 
 if TYPE_CHECKING:
@@ -39,6 +39,9 @@ def _dashboard_static_assets() -> tuple[str, str, str]:
     html = index_path.read_text(encoding="utf-8")
     assets = (
         "dashboard.js",
+        "kendell-tokens.css",
+        "kendell-shell.css",
+        "kendell-components.css",
         "styles.css",
         "service-worker.js",
         "manifest.webmanifest",
@@ -295,12 +298,14 @@ class CustomDashboard:
         """Sets the retained dashboard name for one ChatGPT conversation."""
         return self._execution_store.set_session_display_name(session_id, display_name)
 
-    def dashboard_state(self) -> dict[str, Any]:
+    def dashboard_state(self, *, access_identity: str | None = None) -> dict[str, Any]:
         """Returns the complete compact dashboard overview document."""
         serena, jobs = activity_overview_payload(self._activity_view.dashboard_overview())
+        session = self._session_overview.get_session()
+        session["access_identity"] = access_identity
         return {
             "status": "success",
-            "session": self._session_overview.get_session(),
+            "session": session,
             "jobs": jobs,
             "serena": serena,
             "orchestrator": self._orchestrator_overview.get_panels(),
@@ -411,7 +416,13 @@ class CustomDashboard:
 
         @app.route("/dashboard/api/state", methods=["GET"])
         def get_dashboard_state() -> Response:
-            return self._conditional_json_response(app, self._overview_revision(), self.dashboard_state)
+            access_identity = (request.headers.get("Cf-Access-Authenticated-User-Email") or "").strip() or None
+            revision = f"{self._overview_revision()}|access:{access_identity or ''}"
+            return self._conditional_json_response(
+                app,
+                revision,
+                lambda: self.dashboard_state(access_identity=access_identity),
+            )
 
         @app.route("/dashboard/api/events", methods=["GET"])
         def get_dashboard_events() -> Response:
@@ -471,6 +482,16 @@ class CustomDashboard:
                 raise RuntimeError("Orchestrator session payload continued after abort")
 
             return self._conditional_json_response(app, revision, payload)
+
+        @app.route("/api/chatgpt-approval", methods=["POST"])
+        def notify_chatgpt_approval() -> dict[str, object]:
+            try:
+                payload = json.loads(request.get_data(as_text=True))
+                notification = ChatGPTApprovalNotification.from_payload(payload)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                abort(400)
+            delivered = self._push_notifier.send_chatgpt_approval(notification)
+            return {"status": "success", "delivered": delivered}
 
         @app.route("/dashboard/api/push/config", methods=["GET"])
         def get_push_config() -> dict[str, str]:

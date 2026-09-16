@@ -11,114 +11,114 @@
   <link rel="apple-touch-icon" sizes="180x180" href="serena-app-icon-180.png">
   <link rel="apple-touch-icon-precomposed" sizes="180x180" href="serena-app-icon-180.png">
   <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="kendell-tokens.css">
+  <link rel="stylesheet" href="kendell-shell.css">
+  <link rel="stylesheet" href="kendell-components.css">
   <link rel="stylesheet" href="styles.css">
   <script src="dashboard.js" defer data-cfasync="false"></script>
 </head>
 <body>
   <div class="app-shell">
-    <header class="site-header">
-      <div class="brand">
+    <header class="kd-site-header site-header">
+      <div class="kd-brand brand">
         <div class="brand-marks" aria-hidden="true">
-          <img class="brand-mark" src="serena-logo.svg" alt="">
-          <img class="brand-mark" src="orchestrator-logo.svg" alt="">
+          <img class="kd-brand-mark brand-mark" src="serena-logo.svg" alt="">
+          <img class="kd-brand-mark brand-mark" src="orchestrator-logo.svg" alt="">
         </div>
         <div class="brand-copy">
-          <span class="brand-title">Serena + Orchestrator</span>
-          <span class="brand-subtitle">MCP dashboard</span>
+          <span class="kd-brand-title brand-title">Serena + Orchestrator</span>
+          <span class="kd-brand-subtitle brand-subtitle">MCP dashboard</span>
         </div>
       </div>
-      <div class="header-actions">
-        <div class="connection" id="connection-state" data-state="loading">
-          <span class="status-led" aria-hidden="true"></span>
-          <span id="connection-label">Connecting</span>
-          <span class="last-update" id="last-update"></span>
-        </div>
-        <button class="notification-button" id="notification-button" type="button" aria-label="Enable job notifications" aria-pressed="false" title="Enable job notifications">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/>
-          </svg>
-        </button>
+      <div class="kd-header-actions header-actions">
+        <details class="kd-header-menu header-menu" id="serena-options-menu">
+          <summary class="kd-icon-button kd-header-action kd-header-menu-button header-menu-button" id="serena-options-button" data-state="loading" aria-label="Open Serena status and options" title="Serena status and options">
+            <span class="kd-header-menu-icon header-menu-icon" id="access-role-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" stroke-dasharray="2.4 2.2"><circle cx="12" cy="8" r="3.1"/><path d="M5.8 19c.8-4.1 2.9-6.2 6.2-6.2s5.4 2.1 6.2 6.2"/></svg>
+            </span>
+          </summary>
+          <div class="kd-popover-surface kd-header-menu-panel header-menu-panel">
+            <div class="kd-header-menu-heading">
+              <span class="kd-header-menu-title" id="access-identity">Cloudflare Access</span>
+              <span class="kd-header-menu-tag" id="access-role">USER</span>
+            </div>
+            <div class="kd-header-menu-section header-menu-diagnostics">
+              <div class="kd-header-status" id="connection-state" data-state="loading">
+                <div class="kd-status-indicator">
+                  <span class="kd-status-led" aria-hidden="true"></span>
+                  <span class="kd-header-status-title" id="connection-label">Connecting</span>
+                </div>
+                <div class="kd-header-status-times">
+                  <span class="kd-header-status-line" id="last-update">updated n/a</span>
+                  <span class="kd-header-status-line" id="last-fetch">fetched n/a</span>
+                </div>
+              </div>
+            </div>
+            <button class="kd-header-menu-row kd-header-menu-row--divided kd-header-menu-action header-menu-resource" id="jobs-button" type="button" aria-haspopup="dialog" aria-controls="jobs-dialog">
+              <span class="kd-header-menu-copy">
+                <span class="kd-header-menu-option-title">Jobs</span>
+              </span>
+              <strong class="kd-header-menu-value mono"><span id="running-jobs-count">0</span>/<span id="max-jobs-count">—</span></strong>
+            </button>
+            <button class="kd-header-menu-row kd-header-menu-row--divided kd-header-menu-action header-menu-resource" id="tools-button" type="button" aria-haspopup="dialog" aria-controls="resource-dialog">
+              <span class="kd-header-menu-copy">
+                <span class="kd-header-menu-option-title">Active tools</span>
+              </span>
+              <strong class="kd-header-menu-value" id="tool-count">—</strong>
+            </button>
+            <div class="kd-header-menu-row header-menu-notification-row" id="notification-row">
+              <span class="kd-header-menu-copy">
+                <span class="kd-header-menu-option-title">Job notifications</span>
+              </span>
+              <button class="kd-icon-button header-menu-notification-action notification-button" id="notification-button" type="button" aria-label="Enable job notifications" aria-pressed="false" title="Enable job notifications">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/>
+                </svg>
+              </button>
+            </div>
+            <div class="kd-header-menu-footer">
+              <div class="kd-header-menu-detail">Serena <span class="mono" id="version">—</span></div>
+              <a class="kd-header-menu-footer-action" id="access-sign-out" href="/cdn-cgi/access/logout" title="Sign out of Cloudflare Access">Sign out</a>
+            </div>
+          </div>
+        </details>
       </div>
     </header>
 
-    <main class="shell-main">
-      <section class="session-summary" aria-label="Session metadata">
-        <dl class="metadata-grid">
-          <div class="meta-item">
-            <dt>Jobs</dt>
-            <dd>
-              <button class="meta-resource-button mono" id="jobs-button" type="button" aria-haspopup="dialog" aria-controls="jobs-dialog">
-                <span id="running-jobs-count">0</span>/<span id="max-jobs-count">—</span>
-              </button>
-            </dd>
-          </div>
-          <div class="meta-item">
-            <dt>Runtime</dt>
-            <dd id="runtime-policy">—</dd>
-          </div>
-          <div class="meta-item">
-            <dt>Version</dt>
-            <dd class="mono" id="version">—</dd>
-          </div>
-          <div class="meta-item">
-            <dt>Tools</dt>
-            <dd>
-              <button class="meta-resource-button" id="tools-button" type="button" aria-haspopup="dialog" aria-controls="resource-dialog">
-                <span id="tool-count">—</span>
-              </button>
-            </dd>
-          </div>
-        </dl>
-      </section>
-
-
+    <main class="kd-shell-main shell-main">
       <section class="activity-workspace" aria-label="Agent activity">
-        <div class="tabs activity-view-tabs" role="tablist" aria-label="Activity source">
-          <button class="tab-button active" id="serena-tab" type="button" role="tab" data-activity-view-tab="serena" aria-selected="true" aria-controls="serena-activity-panel">Serena</button>
-          <button class="tab-button" type="button" role="tab" data-activity-view-tab="orchestrator" aria-selected="false" aria-controls="orchestrator-activity-panel" tabindex="-1">Orchestrator</button>
-        </div>
-
-        <div class="activity-columns" id="activity-columns" data-active-view="serena">
-          <section class="activity-section" id="serena-activity-panel" role="tabpanel" aria-labelledby="serena-tab">
+        <div class="activity-columns" id="activity-columns">
+          <section class="activity-section" id="serena-activity-panel">
             <div class="session-widgets" id="serena-widgets">
-              <div class="empty-card">No Serena session activity recorded yet.</div>
+              <div class="kd-surface empty-card">No session activity recorded yet.</div>
             </div>
           </section>
 
-          <section class="orchestrator-section" id="orchestrator-activity-panel" role="tabpanel" aria-labelledby="orchestrator-title">
-            <div class="section-head">
-              <div>
-                <h2 class="section-title" id="orchestrator-title">Orchestrator</h2>
-                <p class="section-note">Retained orchestrations</p>
-              </div>
-              <span class="tab-count" id="orchestrator-panel-count">0</span>
-            </div>
-            <div class="session-widgets" id="orchestrator-widgets">
-              <div class="empty-card">No orchestration activity recorded yet.</div>
-            </div>
+          <section class="orchestrator-section" id="orchestrator-activity-panel" hidden>
+            <div class="session-widgets" id="orchestrator-widgets"></div>
           </section>
         </div>
       </section>
     </main>
 
-    <dialog class="memory-dialog resource-dialog" id="jobs-dialog" aria-labelledby="jobs-dialog-title">
+    <dialog class="kd-dialog-surface memory-dialog resource-dialog" id="jobs-dialog" aria-labelledby="jobs-dialog-title">
       <div class="memory-dialog-head">
         <div>
           <div class="memory-dialog-kicker">Serena</div>
           <h2 id="jobs-dialog-title">Jobs</h2>
         </div>
-        <button class="memory-dialog-close" id="jobs-dialog-close" type="button" aria-label="Close jobs">×</button>
+        <button class="kd-icon-button memory-dialog-close" id="jobs-dialog-close" type="button" aria-label="Close jobs">×</button>
       </div>
       <div class="jobs-dialog-content" id="jobs-dialog-content"></div>
     </dialog>
 
-    <dialog class="memory-dialog resource-dialog" id="resource-dialog" aria-labelledby="resource-dialog-title">
+    <dialog class="kd-dialog-surface memory-dialog resource-dialog" id="resource-dialog" aria-labelledby="resource-dialog-title">
       <div class="memory-dialog-head">
         <div>
           <div class="memory-dialog-kicker">Serena</div>
           <h2 id="resource-dialog-title">Active tools</h2>
         </div>
-        <button class="memory-dialog-close" id="resource-dialog-close" type="button" aria-label="Close resources">×</button>
+        <button class="kd-icon-button memory-dialog-close" id="resource-dialog-close" type="button" aria-label="Close resources">×</button>
       </div>
       <div class="resource-dialog-content" id="resource-dialog-content"></div>
     </dialog>

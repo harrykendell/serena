@@ -14,7 +14,7 @@ from typing import Any, cast
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from filelock import FileLock
-from pywebpush import webpush
+from pywebpush import WebPushException, webpush
 
 from serena.config.serena_config import SerenaConfig, SerenaPaths
 from serena.jobs import JobRecord, JobStatus
@@ -52,12 +52,57 @@ class WebPushSubscription:
         return {"endpoint": self.endpoint, "keys": {"p256dh": self.p256dh, "auth": self.auth}}
 
 
+@dataclass(frozen=True)
+class ChatGPTApprovalNotification:
+    """Validated metadata for one cloud ChatGPT approval request."""
+
+    conversation_id: str
+    title: str
+    message_id: str
+    connector_id: str
+    connector_name: str | None = None
+    tool_name: str | None = None
+    tool_title: str | None = None
+
+    @classmethod
+    def from_payload(cls, payload: object) -> ChatGPTApprovalNotification:
+        """Construct a validated approval notification from a loopback watcher payload."""
+        if not isinstance(payload, dict):
+            raise ValueError("ChatGPT approval notification must be a JSON object")
+        data = cast(dict[str, object], payload)
+
+        def required_string(name: str) -> str:
+            value = data.get(name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"ChatGPT approval notification {name} is required")
+            return value.strip()
+
+        def optional_string(name: str) -> str | None:
+            value = data.get(name)
+            if value is None:
+                return None
+            if not isinstance(value, str):
+                raise ValueError(f"ChatGPT approval notification {name} must be a string")
+            return value.strip() or None
+
+        return cls(
+            conversation_id=required_string("conversation_id"),
+            title=optional_string("title") or "ChatGPT",
+            message_id=required_string("message_id"),
+            connector_id=required_string("connector_id"),
+            connector_name=optional_string("connector_name"),
+            tool_name=optional_string("tool_name"),
+            tool_title=optional_string("tool_title"),
+        )
+
+
 class WebPushNotifier:
-    """Owns Serena's single-device Web Push proof-of-concept state and delivery."""
+    """Owns Serena's durable Web Push subscription set and delivery."""
 
     _VAPID_SUBJECT = "https://mcp.kendell.uk"
     _SEND_TIMEOUT_SECONDS = 5
     _TTL_SECONDS = 86_400
+    _STALE_STATUS_CODES = frozenset({404, 410})
 
     def __init__(
         self,
@@ -74,8 +119,10 @@ class WebPushNotifier:
         self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self._root, 0o700)
         self._private_key_path = self._root / "vapid_private.pem"
-        self._subscription_path = self._root / "subscription.json"
+        self._subscriptions_path = self._root / "subscriptions.json"
+        self._legacy_subscription_path = self._root / "subscription.json"
         self._key_lock = FileLock(str(self._root / ".vapid.lock"))
+        self._subscription_lock = FileLock(str(self._root / ".subscriptions.lock"))
         self._sender = sender
         self._minimum_job_duration_seconds = minimum_job_duration_seconds
 
@@ -90,26 +137,48 @@ class WebPushNotifier:
         return base64.urlsafe_b64encode(encoded).rstrip(b"=").decode("ascii")
 
     def save_subscription(self, payload: object) -> WebPushSubscription:
-        """Validate and persist the single proof-of-concept browser subscription."""
+        """Validate and upsert one browser subscription by its push endpoint."""
         subscription = WebPushSubscription.from_payload(payload)
-        self._write_private_file(
-            self._subscription_path,
-            json.dumps(subscription.to_dict(), ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
-        )
+        with self._subscription_lock:
+            subscriptions = {item.endpoint: item for item in self._read_subscriptions_unlocked()}
+            subscriptions[subscription.endpoint] = subscription
+            self._write_subscriptions_unlocked(list(subscriptions.values()))
         return subscription
 
+    def send_chatgpt_approval(self, notification: ChatGPTApprovalNotification) -> bool:
+        """Send one cloud ChatGPT approval request to every registered browser."""
+        detail = ["Approval required"]
+        if notification.connector_name:
+            detail.append(notification.connector_name)
+        elif notification.connector_id:
+            detail.append(notification.connector_id)
+        if notification.tool_title:
+            detail.append(notification.tool_title)
+        elif notification.tool_name:
+            detail.append(notification.tool_name)
+
+        payload = json.dumps(
+            {
+                "title": notification.title,
+                "body": " · ".join(detail),
+                "tag": f"chatgpt-approval-{notification.conversation_id}-{notification.message_id}",
+                "url": "/dashboard/",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return self._send_payload(payload)
+
     def send_job_finished(self, record: JobRecord) -> bool:
-        """Send a completion notification for a sufficiently long naturally completed or failed job."""
+        """Send a completion notification to every registered browser for a qualifying job."""
         duration_seconds = self._duration_seconds(record)
         if (
             record.status not in {JobStatus.COMPLETED, JobStatus.FAILED}
             or duration_seconds is None
             or duration_seconds <= self._minimum_job_duration_seconds
-            or not self._subscription_path.exists()
         ):
             return False
 
-        subscription = WebPushSubscription.from_payload(json.loads(self._subscription_path.read_text(encoding="utf-8")))
         status = "Completed" if record.status is JobStatus.COMPLETED else "Failed"
         title = record.label or record.job_id
         detail = [status]
@@ -126,15 +195,80 @@ class WebPushNotifier:
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        self._sender(
-            subscription_info=subscription.to_dict(),
-            data=payload,
-            vapid_private_key=str(self._private_key_path),
-            vapid_claims={"sub": self._VAPID_SUBJECT},
-            timeout=self._SEND_TIMEOUT_SECONDS,
-            ttl=self._TTL_SECONDS,
+        return self._send_payload(payload)
+
+    def _send_payload(self, payload: str) -> bool:
+        """Send one prepared Web Push payload to every registered browser."""
+        subscriptions = self._load_subscriptions()
+        if not subscriptions:
+            return False
+
+        self._load_or_create_private_key()
+        stale_endpoints: set[str] = set()
+        first_error: Exception | None = None
+        delivered = False
+        for subscription in subscriptions:
+            try:
+                self._sender(
+                    subscription_info=subscription.to_dict(),
+                    data=payload,
+                    vapid_private_key=str(self._private_key_path),
+                    vapid_claims={"sub": self._VAPID_SUBJECT},
+                    timeout=self._SEND_TIMEOUT_SECONDS,
+                    ttl=self._TTL_SECONDS,
+                )
+            except WebPushException as error:
+                if error.status_code in self._STALE_STATUS_CODES:
+                    stale_endpoints.add(subscription.endpoint)
+                elif first_error is None:
+                    first_error = error
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+            else:
+                delivered = True
+
+        if stale_endpoints:
+            self._remove_subscriptions(stale_endpoints)
+        if first_error is not None:
+            raise first_error
+        return delivered
+
+    def _load_subscriptions(self) -> list[WebPushSubscription]:
+        """:return: snapshot of all currently registered browser subscriptions."""
+        with self._subscription_lock:
+            return self._read_subscriptions_unlocked()
+
+    def _read_subscriptions_unlocked(self) -> list[WebPushSubscription]:
+        """:return: persisted subscriptions while the subscription lock is held."""
+        if self._subscriptions_path.exists():
+            payload = json.loads(self._subscriptions_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, list):
+                raise ValueError("Persisted push subscriptions must be a JSON array")
+            subscriptions = [WebPushSubscription.from_payload(item) for item in payload]
+        elif self._legacy_subscription_path.exists():
+            payload = json.loads(self._legacy_subscription_path.read_text(encoding="utf-8"))
+            subscriptions = [WebPushSubscription.from_payload(payload)]
+        else:
+            return []
+
+        unique = {subscription.endpoint: subscription for subscription in subscriptions}
+        return list(unique.values())
+
+    def _write_subscriptions_unlocked(self, subscriptions: list[WebPushSubscription]) -> None:
+        """Persist the complete subscription set while the subscription lock is held."""
+        payload = [subscription.to_dict() for subscription in subscriptions]
+        self._write_private_file(
+            self._subscriptions_path,
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
         )
-        return True
+        self._legacy_subscription_path.unlink(missing_ok=True)
+
+    def _remove_subscriptions(self, endpoints: set[str]) -> None:
+        """Remove subscriptions whose provider has declared their endpoints stale."""
+        with self._subscription_lock:
+            remaining = [subscription for subscription in self._read_subscriptions_unlocked() if subscription.endpoint not in endpoints]
+            self._write_subscriptions_unlocked(remaining)
 
     @staticmethod
     def _duration_seconds(record: JobRecord) -> float | None:
