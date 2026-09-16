@@ -1,0 +1,9 @@
+{
+  "id": "chat-effort-diagnostics",
+  "title": "Chat effort diagnostics",
+  "description": "Lets Chat keep a selected non-Instant effort despite frontend instant-only and reasoning-block normalization, for backend diagnostics.",
+  "defaultEnabled": false,
+  "entrypoints": {
+    "patchDescriptors": "./patch.js"
+  }
+}

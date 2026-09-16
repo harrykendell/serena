@@ -6,6 +6,7 @@ Tracked files:
 
 - `bootstrap.sh` — clones the upstream Linux wrapper, builds the feature overlay, and runs its native bootstrap.
 - `features/serena-approval-notifications/` — Serena-owned ChatGPT approval forwarding feature.
+- `features/chat-effort-diagnostics/` — temporary Chat renderer diagnostic that preserves a selected non-Instant effort while retaining model-specific limits.
 
 Generated local state:
 
