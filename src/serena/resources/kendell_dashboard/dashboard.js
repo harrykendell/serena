@@ -1126,10 +1126,36 @@ async function setupPushNotifications() {
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   }
 
+  async function runPushOperationWithRetry(operationName, operation) {
+    const retryDelaysMs = [150, 400, 1000];
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await operation();
+      } catch (error) {
+        const canRetry = error?.name === "AbortError" && attempt < retryDelaysMs.length;
+        if (!canRetry) {
+          console.error(`Web Push ${operationName} failed`, error);
+          throw error;
+        }
+        await new Promise(resolve => setTimeout(resolve, retryDelaysMs[attempt]));
+      }
+    }
+  }
+
+  const getSubscription = registration => runPushOperationWithRetry(
+    "getSubscription",
+    () => registration.pushManager.getSubscription(),
+  );
+
+  const subscribe = (registration, applicationServerKey) => runPushOperationWithRetry(
+    "subscribe",
+    () => registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey }),
+  );
+
   try {
     await navigator.serviceWorker.register(dashboardAssetUrl("service-worker.js"), { scope: "/dashboard/" });
     const registration = await navigator.serviceWorker.ready;
-    const existing = await registration.pushManager.getSubscription();
+    const existing = Notification.permission === "denied" ? null : await getSubscription(registration);
     if (Notification.permission === "denied") {
       setNotificationButtonState(button, "denied");
     } else if (existing) {
@@ -1156,12 +1182,9 @@ async function setupPushNotifications() {
         const configResponse = await fetch(`${API_PREFIX}/push/config`, { cache: "no-cache" });
         if (!configResponse.ok) throw new Error(`${configResponse.status} ${configResponse.statusText}`);
         const config = await configResponse.json();
-        let subscription = await registration.pushManager.getSubscription();
+        let subscription = await getSubscription(registration);
         if (!subscription) {
-          subscription = await registration.pushManager.subscribe({
-            userVisibleOnly: true,
-            applicationServerKey: decodeBase64Url(config.public_key),
-          });
+          subscription = await subscribe(registration, decodeBase64Url(config.public_key));
         }
         await syncSubscription(subscription);
         setNotificationButtonState(button, "enabled");
