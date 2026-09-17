@@ -3,6 +3,7 @@ import os
 import queue
 import signal
 import subprocess
+import sys
 import threading
 from collections.abc import Callable
 from typing import IO, TYPE_CHECKING, Any, Generic, TypeVar, cast
@@ -12,8 +13,6 @@ import psutil
 from sensai.util.string import ToStringMixin
 
 if TYPE_CHECKING:
-    import ctypes
-
     from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 
 log = logging.getLogger(__name__)
@@ -132,25 +131,17 @@ class ManagedSubprocess(Generic[TStream], ToStringMixin):
 class ManagedSubprocessLauncher:
     """
     Launcher for managed subprocesses (see :class:`ManagedSubprocess`), which are started for stdio-based communication.
-    It is home to the concern of launching a subprocess with well-defined lifecycle properties,
-    ensuring, in particular, that a launched subprocess cannot outlive this process (insofar as
-    the platform allows) -- even if the subprocess is started in its own session (see
-    :meth:`launch`) and this process is terminated forcefully without the opportunity to perform
-    cleanup (e.g. SIGKILL).
 
-    The class is a singleton, as it is (potentially) home to a persistent worker thread.
+    On Linux, subprocesses that start a new session are wrapped in a freshly exec'd helper process.
+    The helper installs ``PR_SET_PDEATHSIG`` and then execs the requested command, ensuring that no
+    Python callback runs in the vulnerable post-fork/pre-exec state of this multithreaded process.
     """
-
-    _PR_SET_PDEATHSIG = 1
-    """the PR_SET_PDEATHSIG option value for prctl(2)"""
 
     _instance: "ManagedSubprocessLauncher | None" = None
     _instance_lock = threading.Lock()
 
     def __init__(self) -> None:
-        self._libc = self._load_libc()
-        self._spawner: "ManagedSubprocessLauncher._PDeathSigSpawner | None" = None
-        self._spawner_lock = threading.Lock()
+        self._spawner = self._PDeathSigSpawner()
 
     @classmethod
     def get_instance(cls) -> "ManagedSubprocessLauncher":
@@ -161,28 +152,15 @@ class ManagedSubprocessLauncher:
         return cls._instance
 
     @staticmethod
-    def _load_libc() -> "ctypes.CDLL | None":
-        """Load libc for Linux parent-death-signal protection."""
-        import ctypes
-
-        try:
-            return ctypes.CDLL(None)
-        except OSError as e:
-            log.warning(
-                "Could not load libc (%s); subprocesses will not be protected against "
-                "orphaning if this process is killed without a chance to shut down cleanly",
-                e,
-            )
-            return None
-
-    def _set_pdeathsig_on_parent_exit(self) -> None:
-        """
-        preexec_fn for subprocess.Popen (no-op if libc is unavailable), which asks the kernel, via
-        prctl(PR_SET_PDEATHSIG), to send this process SIGTERM when its parent dies for any reason,
-        including SIGKILL.
-        """
-        if self._libc is not None:
-            self._libc.prctl(self._PR_SET_PDEATHSIG, signal.SIGTERM)
+    def _with_parent_death_signal(cmd: list[str]) -> list[str]:
+        """Wraps ``cmd`` in the exec-safe Linux parent-death-signal helper."""
+        return [
+            sys.executable,
+            "-m",
+            "solidlsp.util.pdeathsig_exec",
+            str(os.getpid()),
+            *cmd,
+        ]
 
     def launch(self, process_launch_info: "ProcessLaunchInfo", name: str, start_new_session: bool) -> ManagedSubprocess[bytes]:
         """
@@ -197,21 +175,13 @@ class ManagedSubprocessLauncher:
         child_proc_env = os.environ.copy()
         child_proc_env.update(process_launch_info.env)
 
-        # convert the command for shell=True execution, prefixing `exec` when pdeathsig applies
-        use_pdeathsig = start_new_session and self._libc is not None
-        cmd = convert_shell_cmd(process_launch_info.cmd)
-        if use_pdeathsig:
-            # `exec` makes the shell replace its own process image with the program (execve)
-            # instead of forking it as a child, so the PID -- and therefore the PR_SET_PDEATHSIG
-            # registration below, which execve preserves -- carries through to the actual language
-            # server process rather than protecting only the intermediate shell
-            cmd = f"exec {cmd}"
+        # on Linux, establish the first exec boundary before running any Python lifecycle code
+        cmd = list(process_launch_info.cmd)
+        if start_new_session and sys.platform.startswith("linux"):
+            cmd = self._with_parent_death_signal(cmd)
 
-        # assemble platform kwargs and lifecycle settings
         kwargs: dict[str, Any] = subprocess_kwargs()
         kwargs["start_new_session"] = start_new_session
-        if use_pdeathsig:
-            kwargs["preexec_fn"] = self._set_pdeathsig_on_parent_exit
 
         def do_popen() -> ManagedSubprocess[bytes]:
             popen = cast(
@@ -223,29 +193,20 @@ class ManagedSubprocessLauncher:
                     stderr=subprocess.PIPE,
                     env=child_proc_env,
                     cwd=process_launch_info.cwd,
-                    shell=True,
+                    shell=False,
                     **kwargs,
                 ),
             )
             return ManagedSubprocess(popen, name, start_new_session)
 
-        # perform the actual Popen call, funneling the fork() through the dedicated spawner thread
-        # when pdeathsig applies
-        if not use_pdeathsig:
-            return do_popen()
-        else:
-            with self._spawner_lock:
-                if self._spawner is None:
-                    self._spawner = self._PDeathSigSpawner()
-                spawner = self._spawner
-            return spawner.spawn(do_popen)
+        # PDEATHSIG follows the Linux parent *thread*. Funnel protected launches through one
+        # permanent thread so a short-lived tool/runtime worker cannot orphan-kill the child.
+        if start_new_session and sys.platform.startswith("linux"):
+            return self._spawner.spawn(do_popen)
+        return do_popen()
 
     class _PDeathSigSpawner:
-        """
-        Runs subprocess.Popen() calls that register PR_SET_PDEATHSIG on one dedicated, permanently
-        running daemon thread, so the "parent thread" the kernel ties the registration to is one
-        that has the same lifetime as the process
-        """
+        """Runs protected ``Popen`` calls from one permanent parent thread."""
 
         def __init__(self) -> None:
             self._queue: queue.Queue[tuple[Callable[[], ManagedSubprocess[bytes]], "queue.Queue"]] = queue.Queue()
@@ -257,8 +218,8 @@ class ManagedSubprocessLauncher:
                 func, result_queue = self._queue.get()
                 try:
                     result_queue.put((None, func()))
-                except BaseException as e:
-                    result_queue.put((e, None))
+                except BaseException as error:
+                    result_queue.put((error, None))
 
         def spawn(self, func: Callable[[], ManagedSubprocess[bytes]]) -> ManagedSubprocess[bytes]:
             result_queue: queue.Queue = queue.Queue(maxsize=1)
@@ -266,6 +227,7 @@ class ManagedSubprocessLauncher:
             error, process = result_queue.get()
             if error is not None:
                 raise error
+            assert process is not None
             return process
 
 
