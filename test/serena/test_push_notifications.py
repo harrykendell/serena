@@ -76,6 +76,27 @@ def test_web_push_notifier_sends_chatgpt_approval_to_registered_browsers(tmp_pat
     }
 
 
+def test_web_push_notifier_sends_chatgpt_auth_required_to_registered_browsers(tmp_path: Path) -> None:
+    sent: list[dict[str, object]] = []
+    notifier = WebPushNotifier(tmp_path / "push", sender=lambda **kwargs: sent.append(kwargs))
+    notifier.save_subscription(
+        {
+            "endpoint": "https://push.example.invalid/subscription",
+            "keys": {"p256dh": "public-key", "auth": "auth-secret"},
+        }
+    )
+
+    assert notifier.send_chatgpt_auth_required() is True
+    payload = json.loads(str(sent[0]["data"]))
+
+    assert payload == {
+        "title": "ChatGPT session expired",
+        "body": "Open Codex Desktop to refresh the ChatGPT sign-in; Serena approval monitoring is paused.",
+        "tag": "chatgpt-auth-required",
+        "url": "/dashboard/",
+    }
+
+
 def test_web_push_notifier_delivers_to_multiple_registered_browsers(tmp_path: Path) -> None:
     sent: list[dict[str, object]] = []
     notifier = WebPushNotifier(tmp_path / "push", sender=lambda **kwargs: sent.append(kwargs), minimum_job_duration_seconds=240)

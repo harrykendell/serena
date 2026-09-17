@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import socket
 import subprocess
 import sys
@@ -12,6 +14,7 @@ from serena.custom_dashboard import CustomDashboard
 
 if TYPE_CHECKING:
     from serena.agent import SerenaAgent
+    from serena.chatgpt_approval_watcher import ChatGPTApprovalWatcher
 
 log = logging.getLogger(__name__)
 
@@ -32,13 +35,14 @@ class DashboardServer:
         host: str = "127.0.0.1",
         trusted_hosts: list[str] | None = None,
         port: int | None = None,
+        chatgpt_watcher: ChatGPTApprovalWatcher | None = None,
     ) -> None:
         self._host = host
         self._port = port
         self._app = Flask(self.__class__.__name__)
         if trusted_hosts:
             self._app.config["TRUSTED_HOSTS"] = trusted_hosts
-        self._custom_dashboard = CustomDashboard(self._app, agent)
+        self._custom_dashboard = CustomDashboard(self._app, agent, chatgpt_watcher)
         self._setup_routes()
 
     def set_serena_session_name(self, session_id: str, display_name: str) -> str:
@@ -98,7 +102,7 @@ class DashboardServer:
         return port
 
     def run_in_thread(self) -> tuple[threading.Thread, int]:
-        """Starts the dashboard in a daemon thread and returns the thread and port."""
+        """Starts the dashboard in a daemon thread and returns the dashboard thread and port."""
         if self._port is None:
             # reserve 24282 for the externally exposed MCP service dashboard
             port = self._find_first_free_port(self.BASE_PORT + 1, self._host)

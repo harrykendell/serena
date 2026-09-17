@@ -931,6 +931,7 @@ class SerenaMCPFactory:
         """
         assert self.agent is not None
         self._set_mcp_tools(mcp_server, openai_tool_compatible=True, structured_output=None)
+        self.agent.start_background_services()
         log.info("MCP server lifetime setup complete")
         try:
             yield

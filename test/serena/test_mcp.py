@@ -1,5 +1,6 @@
 """Tests for the mcp.py module in serena."""
 
+import asyncio
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock
@@ -90,6 +91,21 @@ def test_mcp_server_accepts_custom_streamable_http_path(monkeypatch: pytest.Monk
     mcp = factory.create_mcp_server(streamable_http_path="/serena")
 
     assert mcp.settings.streamable_http_path == "/serena"
+
+
+def test_mcp_lifespan_starts_agent_owned_background_services(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The MCP lifetime starts Serena background services independently of dashboard availability."""
+    factory = SerenaMCPFactory(transport="stdio")
+    agent = MagicMock()
+    factory.agent = agent
+    monkeypatch.setattr(factory, "_set_mcp_tools", MagicMock())
+
+    async def exercise_lifespan() -> None:
+        async with factory.server_lifespan(MagicMock()):
+            agent.start_background_services.assert_called_once_with()
+
+    asyncio.run(exercise_lifespan())
+    agent.on_shutdown.assert_called_once_with()
 
 
 class BasicTool(BaseMockTool):

@@ -24,11 +24,12 @@ from orchestrator.delegates import DelegateError, DelegateStore
 from serena.activity import ACTIVITY_RESOURCE_DIR
 from serena.activity_transport import activity_overview_payload, activity_running_jobs_payload, activity_snapshot_payload
 from serena.activity_view import ActivityView
-from serena.push_notifications import ChatGPTApprovalNotification, WebPushNotifier
+from serena.push_notifications import WebPushNotifier
 from serena.tools.media_tools import read_result_file_link
 
 if TYPE_CHECKING:
     from serena.agent import SerenaAgent
+    from serena.chatgpt_approval_watcher import ChatGPTApprovalWatcher
 
 CUSTOM_DASHBOARD_DIR = Path(__file__).parent / "resources" / "kendell_dashboard"
 
@@ -280,8 +281,9 @@ class DashboardChangeStream:
 class CustomDashboard:
     """Serena-specific dashboard integration kept outside the bundled frontend implementation."""
 
-    def __init__(self, app: Flask, agent: SerenaAgent):
+    def __init__(self, app: Flask, agent: SerenaAgent, chatgpt_watcher: ChatGPTApprovalWatcher | None = None):
         self._session_overview = DashboardSessionOverview(agent)
+        self._chatgpt_watcher = chatgpt_watcher
         self._execution_store = agent.execution_store
         self._job_manager = agent.job_manager
         self._activity_view = ActivityView(
@@ -310,6 +312,7 @@ class CustomDashboard:
             "jobs": jobs,
             "serena": serena,
             "orchestrator": self._orchestrator_overview.get_panels(),
+            "chatgpt_watcher": self._chatgpt_watcher.status().to_dict() if self._chatgpt_watcher is not None else None,
         }
 
     def _activity_media(self, panel_id: str, call_id: str) -> DashboardMediaContent:
@@ -361,6 +364,7 @@ class CustomDashboard:
     def _overview_revision(self) -> str:
         """Returns a cheap source revision for the complete overview route document."""
         runtime = json.dumps(self._session_overview.get_session(), sort_keys=True, separators=(",", ":"))
+        watcher = self._watcher_revision()
         return "|".join(
             (
                 self._revision_nonce,
@@ -368,15 +372,24 @@ class CustomDashboard:
                 self._job_manager.dashboard_revision(),
                 self._orchestrator_overview.revision_token(),
                 hashlib.blake2s(runtime.encode("utf-8"), digest_size=8).hexdigest(),
+                watcher,
             )
         )
+
+    def _watcher_revision(self) -> str:
+        """:return: compact revision token for ChatGPT watcher diagnostics."""
+        if self._chatgpt_watcher is None:
+            return "none"
+        payload = json.dumps(self._chatgpt_watcher.status().to_dict(), sort_keys=True, separators=(",", ":"))
+        return hashlib.blake2s(payload.encode("utf-8"), digest_size=8).hexdigest()
 
     def _stream_revision(self) -> str:
         """Returns the cheap durable revision watched by the live invalidation stream."""
         return (
             f"{self._execution_store.dashboard_revision()}|"
             f"{self._job_manager.dashboard_revision()}|"
-            f"{self._orchestrator_overview.revision_token()}"
+            f"{self._orchestrator_overview.revision_token()}|"
+            f"{self._watcher_revision()}"
         )
 
     def _serena_session_revision(self, panel_id: str, expanded_entry_id: str | None) -> str | None:
@@ -487,16 +500,6 @@ class CustomDashboard:
                 raise RuntimeError("Orchestrator session payload continued after abort")
 
             return self._conditional_json_response(app, revision, payload)
-
-        @app.route("/api/chatgpt-approval", methods=["POST"])
-        def notify_chatgpt_approval() -> dict[str, object]:
-            try:
-                payload = json.loads(request.get_data(as_text=True))
-                notification = ChatGPTApprovalNotification.from_payload(payload)
-            except (json.JSONDecodeError, TypeError, ValueError):
-                abort(400)
-            delivered = self._push_notifier.send_chatgpt_approval(notification)
-            return {"status": "success", "delivered": delivered}
 
         @app.route("/dashboard/api/push/config", methods=["GET"])
         def get_push_config() -> dict[str, str]:

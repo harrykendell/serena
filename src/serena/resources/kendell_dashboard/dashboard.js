@@ -389,6 +389,7 @@ function renderCurrentDocument({ preserveViewport = false } = {}) {
 function renderOverview(state) {
   latestOverview = state || {};
   renderOverviewMetadata(state?.session || {}, state?.jobs || {});
+  renderChatGPTWatcher(state?.chatgpt_watcher || null);
   renderSerenaOverview(
     state?.serena?.panels || [],
     state?.orchestrator?.panels || []
@@ -423,6 +424,33 @@ function renderOverviewMetadata(session, jobs) {
     const expandedJobId = jobsDialogPanel?.expandedEntryId || null;
     if (expandedJobId) void refreshRunningJobDetail(expandedJobId);
   }
+}
+
+function renderChatGPTWatcher(watcher) {
+  const state = String(watcher?.state || "unavailable");
+  const labels = {
+    connected: "Live",
+    starting: "Starting",
+    reconnecting: "Reconnecting",
+    auth_required: "Auth",
+    error: "Error",
+    stopped: "Stopped",
+    unavailable: "—",
+  };
+  setText("chatgpt-watcher-state", labels[state] || state);
+
+  const parts = [];
+  if (Number.isFinite(watcher?.events_seen)) parts.push(`${watcher.events_seen} events`);
+  if (Number.isFinite(watcher?.approvals_forwarded)) parts.push(`${watcher.approvals_forwarded} approvals`);
+  const lastEvent = parseDashboardTimestamp(watcher?.last_event_at);
+  if (lastEvent !== null) parts.push(`last ${timeAgo(lastEvent)}`);
+  const note = byId("chatgpt-watcher-note");
+  if (note) {
+    note.textContent = parts.length ? parts.join(" · ") : state.replaceAll("_", " ");
+    note.title = watcher?.last_error || "";
+  }
+  const row = byId("chatgpt-watcher-row");
+  if (row) row.dataset.state = state;
 }
 
 function activitySummarySnapshot(panel) {

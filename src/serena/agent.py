@@ -20,6 +20,7 @@ from sensai.util.logging import LogTime
 from sensai.util.string import dict_string
 
 from serena import serena_version
+from serena.chatgpt_approval_watcher import ChatGPTApprovalWatcher
 from serena.chatgpt_policy import CHATGPT_PRODUCT_PROMPT
 from serena.config.serena_config import SerenaConfig, SerenaPaths
 from serena.dashboard import DashboardServer, open_url_in_browser
@@ -86,6 +87,7 @@ class SerenaAgent:
         project_activation_error: str | None = None,
         serena_config: SerenaConfig | None = None,
         web_dashboard_port: int | None = None,
+        chatgpt_watcher: ChatGPTApprovalWatcher | None = None,
     ):
         """
         Creates the fixed ChatGPT Serena runtime.
@@ -95,6 +97,7 @@ class SerenaAgent:
         :param project_activation_error: initial project-resolution error exposed in the instruction prompt
         :param serena_config: Serena configuration, or ``None`` to load the default configuration
         :param web_dashboard_port: exact dashboard port, or ``None`` to select a secondary port automatically
+        :param chatgpt_watcher: approval watcher owned by this Serena agent, or ``None`` to create the default watcher
         """
         self._startup_project: Project | None = None
         self._session_id_context: ContextVar[str] = ContextVar(f"serena_session_{id(self)}", default="global")
@@ -108,6 +111,7 @@ class SerenaAgent:
         self._project_activation_callback = project_activation_callback
         self._project_activation_error = project_activation_error
         self._dashboard_manager: DashboardManager | None = None
+        self._chatgpt_watcher = chatgpt_watcher or ChatGPTApprovalWatcher()
         self._execution_store = ExecutionStore()
         self._tool_output_store = ToolOutputStore(execution_store=self._execution_store)
         self._job_manager = JobManager(retention_observer=self._execution_store)
@@ -166,6 +170,7 @@ class SerenaAgent:
                 host=self.serena_config.web_dashboard_listen_address,
                 trusted_hosts=self.serena_config.web_dashboard_trusted_hosts,
                 port=web_dashboard_port,
+                chatgpt_watcher=self._chatgpt_watcher,
             )
 
         self._on_config_changed()
@@ -808,9 +813,15 @@ class SerenaAgent:
         if "_session_registry" in self.__dict__:
             self.on_shutdown()
 
+    def start_background_services(self) -> None:
+        """Starts persistent Serena-owned background services."""
+        self._chatgpt_watcher.start()
+
     def on_shutdown(self, timeout: float = 2.0) -> None:
         """Shuts down cached project runtimes and persistent Serena services."""
         log.info("SerenaAgent is shutting down ...")
+        if hasattr(self, "_chatgpt_watcher"):
+            self._chatgpt_watcher.stop()
         if hasattr(self, "_tool_output_store"):
             self._tool_output_store.close()
         self._dashboard_manager = None

@@ -1,9 +1,0 @@
-{
-  "id": "serena-approval-notifications",
-  "title": "Serena approval notifications",
-  "description": "Forward confirmation prompts already present in ChatGPT Desktop conversation responses to Serena Web Push without generating ChatGPT requests.",
-  "defaultEnabled": false,
-  "entrypoints": {
-    "patchDescriptors": "./patch.js"
-  }
-}

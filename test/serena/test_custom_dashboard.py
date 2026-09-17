@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -111,6 +112,42 @@ def test_dashboard_serves_shell_overview_and_selected_session(tmp_path: Path, mo
     }
 
 
+def test_dashboard_exposes_compact_chatgpt_watcher_diagnostics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_roots(tmp_path, monkeypatch)
+    watcher = SimpleNamespace(
+        status=lambda: SimpleNamespace(
+            to_dict=lambda: {
+                "state": "connected",
+                "connected": True,
+                "last_connected_at": "2026-09-17T14:00:00+00:00",
+                "last_event_at": "2026-09-17T14:01:00+00:00",
+                "last_conversation_check_at": "2026-09-17T14:01:00+00:00",
+                "last_approval_at": None,
+                "last_error": None,
+                "events_seen": 3,
+                "conversations_checked": 2,
+                "approvals_forwarded": 1,
+            }
+        )
+    )
+    dashboard = DashboardServer(agent=_DashboardAgent(), chatgpt_watcher=watcher)
+
+    state = dashboard._app.test_client().get("/dashboard/api/state").get_json()
+
+    assert state["chatgpt_watcher"] == {
+        "state": "connected",
+        "connected": True,
+        "last_connected_at": "2026-09-17T14:00:00+00:00",
+        "last_event_at": "2026-09-17T14:01:00+00:00",
+        "last_conversation_check_at": "2026-09-17T14:01:00+00:00",
+        "last_approval_at": None,
+        "last_error": None,
+        "events_seen": 3,
+        "conversations_checked": 2,
+        "approvals_forwarded": 1,
+    }
+
+
 def test_job_notification_link_redirects_to_originating_panel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_roots(tmp_path, monkeypatch)
     agent = _DashboardAgent()
@@ -161,30 +198,6 @@ def test_dashboard_registers_single_web_push_subscription(tmp_path: Path, monkey
     assert config["public_key"].startswith("B")
     assert response.status_code == 200
     assert response.get_json() == {"status": "success"}
-
-
-def test_dashboard_forwards_loopback_chatgpt_approval_to_web_push(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _configure_roots(tmp_path, monkeypatch)
-    dashboard = DashboardServer(agent=_DashboardAgent())
-    client = dashboard._app.test_client()
-    sender = MagicMock(return_value=True)
-    monkeypatch.setattr(dashboard._custom_dashboard._push_notifier, "send_chatgpt_approval", sender)
-
-    response = client.post(
-        "/api/chatgpt-approval",
-        data='{"conversation_id":"chat-ios","title":"Allow file materialization?","description":"ChatGPT needs your approval to materialize 1 file attachment returned by Serena.","message_id":"approval-message","connector_id":"serena","connector_name":"Serena"}',
-        content_type="text/plain;charset=UTF-8",
-    )
-
-    assert response.status_code == 200
-    assert response.get_json() == {"status": "success", "delivered": True}
-    notification = sender.call_args.args[0]
-    assert notification.conversation_id == "chat-ios"
-    assert notification.message_id == "approval-message"
-    assert notification.connector_name == "Serena"
-    assert notification.title == "Allow file materialization?"
-    assert notification.description == "ChatGPT needs your approval to materialize 1 file attachment returned by Serena."
-    assert client.post("/api/chatgpt-approval", data="not-json", content_type="text/plain").status_code == 400
 
 
 def test_custom_dashboard_can_name_retained_serena_conversation_before_first_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

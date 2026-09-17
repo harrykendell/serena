@@ -176,6 +176,20 @@ class WebPushNotifier:
         )
         return self._send_payload(payload)
 
+    def send_chatgpt_auth_required(self) -> bool:
+        """Send one notification that standalone ChatGPT monitoring needs Codex sign-in attention."""
+        payload = json.dumps(
+            {
+                "title": "ChatGPT session expired",
+                "body": "Open Codex Desktop to refresh the ChatGPT sign-in; Serena approval monitoring is paused.",
+                "tag": "chatgpt-auth-required",
+                "url": "/dashboard/",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return self._send_payload(payload)
+
     def send_job_finished(self, record: JobRecord) -> bool:
         """Send a completion notification to every registered browser for a qualifying job."""
         duration_seconds = self._duration_seconds(record)
