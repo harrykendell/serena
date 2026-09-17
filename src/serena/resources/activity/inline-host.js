@@ -4,6 +4,14 @@
   const root = document.getElementById("serena-activity-root");
   if (!root || !window.SerenaActivity?.ActivityPanel) return;
 
+  const BRIDGE_CALL_TIMEOUT_MS = 5000;
+  const BRIDGE_MAX_PENDING_CALLS = 4;
+
+  const warning = document.createElement("div");
+  warning.className = "activity-inline-warning";
+  warning.hidden = true;
+  root.insertAdjacentElement("afterend", warning);
+
   let snapshot = null;
   let runId = null;
   let pollTimer = null;
@@ -13,6 +21,9 @@
   let detailGeneration = 0;
   let heightFrame = null;
   let lastNotifiedHeight = null;
+  let pollWarning = null;
+  let detailWarning = null;
+  let pendingBridgeCalls = 0;
 
   function unwrap(result) {
     return result?.structuredContent ?? result?.structured_content ?? result;
@@ -22,13 +33,13 @@
     return String(value || "").toLowerCase();
   }
 
-  function isRunning(item) {
+  function isActive(item) {
     const current = status(item?.status);
-    return current === "starting" || current === "running";
+    return current === "starting" || current === "running" || current === "queued" || current === "pending" || current === "waiting";
   }
 
-  function hasRunningActivity(next) {
-    return [...(next?.calls || []), ...(next?.jobs || [])].some(isRunning);
+  function hasActiveActivity(next) {
+    return [...(next?.calls || []), ...(next?.jobs || [])].some(isActive);
   }
 
   function latestActivityTimestamp(next) {
@@ -39,8 +50,8 @@
   }
 
   function pollDelay(next) {
-    if ((next?.calls || []).some(isRunning)) return 500;
-    if ((next?.jobs || []).some(isRunning)) return 3000;
+    if ((next?.calls || []).some(isActive)) return 500;
+    if ((next?.jobs || []).some(isActive)) return 3000;
     return 5000;
   }
 
@@ -55,15 +66,84 @@
     });
   }
 
+
+  function syncWarning() {
+    const message = pollWarning || detailWarning;
+    warning.textContent = message || "";
+    warning.hidden = !message;
+    notifyHeight();
+  }
+
   async function callTool(name, args) {
     if (!window.openai?.callTool) throw new Error("Serena activity bridge is unavailable");
-    return unwrap(await window.openai.callTool(name, args));
+    if (pendingBridgeCalls >= BRIDGE_MAX_PENDING_CALLS) {
+      throw new Error("Serena activity bridge has too many unresolved calls");
+    }
+
+    pendingBridgeCalls += 1;
+    const bridgePromise = Promise.resolve().then(() => window.openai.callTool(name, args));
+    bridgePromise.then(
+      () => { pendingBridgeCalls -= 1; },
+      () => { pendingBridgeCalls -= 1; },
+    );
+
+    let timeout = null;
+    const timeoutPromise = new Promise((_, reject) => {
+      timeout = setTimeout(
+        () => reject(new Error(`Serena activity bridge call timed out: ${name}`)),
+        BRIDGE_CALL_TIMEOUT_MS,
+      );
+    });
+    try {
+      return unwrap(await Promise.race([bridgePromise, timeoutPromise]));
+    } finally {
+      if (timeout !== null) clearTimeout(timeout);
+    }
   }
 
   function entryKind(next, entryId) {
     if ((next?.calls || []).some(item => item.call_id === entryId)) return "call";
     if ((next?.jobs || []).some(item => item.job_id === entryId)) return "job";
     return null;
+  }
+
+  function preserveExpandedDetail(next) {
+    const entryId = panel.expandedEntryId;
+    if (!entryId || !next?.run_id) return next;
+    const kind = entryKind(next, entryId);
+    if (kind === "call") {
+      const detail = next.expanded_call?.call_id === entryId
+        ? next.expanded_call
+        : snapshot?.expanded_call?.call_id === entryId ? snapshot.expanded_call : null;
+      return { ...next, expanded_call: detail, expanded_job: null };
+    }
+    if (kind === "job") {
+      const detail = next.expanded_job?.job_id === entryId
+        ? next.expanded_job
+        : snapshot?.expanded_job?.job_id === entryId ? snapshot.expanded_job : null;
+      return { ...next, expanded_call: null, expanded_job: detail };
+    }
+    return next;
+  }
+
+  function mergeExpandedDetail(detailState, entryId) {
+    if (!snapshot || !detailState || snapshot.run_id !== detailState.run_id) return detailState;
+    const kind = entryKind(snapshot, entryId);
+    if (kind === "call" && detailState.expanded_call?.call_id === entryId) {
+      return { ...snapshot, expanded_call: detailState.expanded_call, expanded_job: null };
+    }
+    if (kind === "job" && detailState.expanded_job?.job_id === entryId) {
+      return { ...snapshot, expanded_call: null, expanded_job: detailState.expanded_job };
+    }
+    return preserveExpandedDetail(detailState);
+  }
+
+  function hasExpandedDetail(entryId) {
+    if (!snapshot || panel.expandedEntryId !== entryId) return false;
+    const kind = entryKind(snapshot, entryId);
+    if (kind === "call") return snapshot.expanded_call?.call_id === entryId;
+    if (kind === "job") return snapshot.expanded_job?.job_id === entryId;
+    return false;
   }
 
   async function withExpandedDetail(next) {
@@ -90,13 +170,13 @@
       return;
     }
     const latest = latestActivityTimestamp(next);
-    const recent = hasRunningActivity(next) || (latest !== null && Date.now() / 1000 - latest <= 30);
+    const recent = hasActiveActivity(next) || (latest !== null && Date.now() / 1000 - latest <= 30);
     panel.setCollapsed(!recent);
     initialCollapseResolved = true;
   }
 
   async function loadMedia(callId, media) {
-    const result = await window.openai.callTool("get_activity_media", { run_id: runId, call_id: callId });
+    const result = await callTool("get_activity_media", { run_id: runId, call_id: callId });
     const content = result?.content ?? result?.structuredContent?.content ?? result?.structured_content?.content ?? [];
     const image = content.find(block => block?.type === "image" && block.data);
     if (image) {
@@ -113,9 +193,11 @@
     return { type: media?.media_type || "file", src: media?.uri || "", name: media?.name };
   }
 
-  async function expand(entryId) {
+  async function expand(entryId, retryCount = 0) {
     const generation = ++detailGeneration;
     if (!snapshot || !entryId) {
+      detailWarning = null;
+      syncWarning();
       if (snapshot) {
         snapshot = { ...snapshot, expanded_call: null, expanded_job: null };
         panel.render(snapshot);
@@ -125,10 +207,18 @@
     try {
       const next = await withExpandedDetail(snapshot);
       if (generation !== detailGeneration || panel.expandedEntryId !== entryId) return;
-      snapshot = next;
-      panel.render(snapshot);
+      detailWarning = null;
+      syncWarning();
+      render(mergeExpandedDetail(next, entryId));
     } catch (_) {
-      // Keep the row open with its loading placeholder across transient failures.
+      if (generation !== detailGeneration || panel.expandedEntryId !== entryId) return;
+      detailWarning = "Expanded detail unavailable; retrying.";
+      syncWarning();
+      if (retryCount >= 2) return;
+      setTimeout(() => {
+        if (retired || generation !== detailGeneration || panel.expandedEntryId !== entryId || hasExpandedDetail(entryId)) return;
+        void expand(entryId, retryCount + 1);
+      }, 500 * (retryCount + 1));
     }
   }
 
@@ -143,10 +233,11 @@
     if (!next?.run_id) return;
     if (runId && next.run_id !== runId) return;
     if (runId && Number(next.updated_at || 0) < Number(snapshot?.updated_at || 0)) return;
-    runId = next.run_id;
-    snapshot = next;
-    applyInitialCollapsedPolicy(next);
-    panel.render(next);
+    const displayed = preserveExpandedDetail(next);
+    runId = displayed.run_id;
+    snapshot = displayed;
+    applyInitialCollapsedPolicy(displayed);
+    panel.render(displayed);
     syncClock();
   }
 
@@ -170,28 +261,61 @@
     pollTimer = null;
     clockTimer = null;
     heightFrame = null;
+    pollWarning = null;
+    detailWarning = null;
+    warning.textContent = "";
+    warning.hidden = true;
     panel.retire();
   }
 
   async function poll() {
     if (retired) return;
     if (!runId || !window.openai?.callTool) {
+      if (runId && !window.openai?.callTool) {
+        pollWarning = "Live updates unavailable; retrying.";
+        syncWarning();
+      }
       pollTimer = setTimeout(poll, 250);
       return;
     }
+
     let next = snapshot;
     try {
       const state = await callTool("get_activity", { run_id: runId });
+      pollWarning = null;
       if (state?.run_id === runId) {
-        next = panel.expandedEntryId ? await withExpandedDetail(state) : state;
-        render(next);
+        render(state);
+        next = snapshot;
+        if (panel.expandedEntryId) {
+          const entryId = panel.expandedEntryId;
+          const generation = detailGeneration;
+          try {
+            const detailed = await withExpandedDetail(state);
+            if (generation === detailGeneration && panel.expandedEntryId === entryId) {
+              next = mergeExpandedDetail(detailed, entryId);
+              detailWarning = null;
+              render(next);
+              next = snapshot;
+            }
+          } catch (_) {
+            if (generation === detailGeneration && panel.expandedEntryId === entryId) {
+              detailWarning = hasExpandedDetail(entryId)
+                ? "Detail refresh unavailable; showing last result."
+                : "Expanded detail unavailable; retrying.";
+            }
+          }
+        } else {
+          detailWarning = null;
+        }
       }
-      if (next?.superseded && !hasRunningActivity(next)) {
+      syncWarning();
+      if (next?.superseded && !hasActiveActivity(next)) {
         retire();
         return;
       }
     } catch (_) {
-      // Preserve the last complete snapshot on transient bridge/server failures.
+      pollWarning = "Live updates unavailable; retrying.";
+      syncWarning();
     }
     pollTimer = setTimeout(poll, pollDelay(next));
   }
@@ -205,8 +329,11 @@
     // seed a new iframe, or recover from a newer same-run host snapshot if app polling stalled.
     detailGeneration += 1;
     panel.setExpandedEntryId(null);
+    pollWarning = null;
+    detailWarning = null;
+    syncWarning();
     render(next);
-    if (next.superseded && !hasRunningActivity(next)) retire();
+    if (next.superseded && !hasActiveActivity(next)) retire();
   }
 
   window.addEventListener("openai:set_globals", acceptGlobals, { passive: true });

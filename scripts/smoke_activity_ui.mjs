@@ -318,10 +318,11 @@ function prepareHtml(state, scenarioScript, { preludeScript = "" } = {}) {
 }
 
 
-function prepareInlineHtml(state, scenarioScript, { forceHidden = false, pollState = state } = {}) {
+function prepareInlineHtml(state, scenarioScript, { forceHidden = false, pollState = state, callToolSource = null } = {}) {
   const hiddenScript = forceHidden
     ? 'Object.defineProperty(document, "hidden", { configurable: true, get: () => true });'
     : "";
+  const callTool = callToolSource || `async () => ({ structuredContent: ${JSON.stringify(pollState)} })`;
   return `<!doctype html>
 <html>
 <head>
@@ -332,7 +333,7 @@ function prepareInlineHtml(state, scenarioScript, { forceHidden = false, pollSta
 ${hiddenScript}
 window.openai = {
   toolOutput: ${JSON.stringify(state)},
-  callTool: async () => ({ structuredContent: ${JSON.stringify(pollState)} }),
+  callTool: ${callTool},
   notifyIntrinsicHeight: () => { window.__heightNotifications = (window.__heightNotifications || 0) + 1; },
 };
 </script>
@@ -728,6 +729,302 @@ async function inlineFreshGlobalsRecoveryScenario() {
   const dom = await runChrome(prepareInlineHtml(initial, scenario, { pollState: initial }), 200);
   if (!dom.includes("SMOKE_PASS inline-fresh-globals-recovery")) {
     throw new Error("Inline fresh globals recovery smoke failed");
+  }
+}
+
+
+async function inlineQueuedActivityStaysLiveScenario() {
+  const state = selected(false);
+  state.run_id = "inline-queued-live";
+  state.superseded = true;
+  const queued = { ...call(0, true), status: "queued" };
+  state.calls = [queued];
+  state.tool_count = 1;
+  state.latest_activity = {
+    label: queued.tool_name,
+    detail: queued.detail,
+    scope: queued.scope,
+    status: queued.status,
+    started_at: queued.started_at,
+    finished_at: queued.finished_at,
+  };
+  state.updated_at = queued.started_at;
+
+  const scenario = `
+    setTimeout(() => {
+      const panel = document.querySelector(".serena-activity-panel");
+      const elapsed = document.querySelector(".activity-row-elapsed")?.textContent || "";
+      const pass = panel && !panel.classList.contains("retired") && elapsed === "Queued";
+      document.getElementById("smoke-marker").textContent = pass
+        ? "SMOKE_PASS inline-queued-stays-live"
+        : "SMOKE_FAIL inline-queued-stays-live retired=" + panel?.classList.contains("retired") + " elapsed=" + elapsed;
+    }, 100);
+  `;
+  const dom = await runChrome(prepareInlineHtml(state, scenario, { pollState: state }), 200);
+  if (!dom.includes("SMOKE_PASS inline-queued-stays-live")) {
+    throw new Error("Inline queued activity smoke failed");
+  }
+}
+
+async function inlinePollingFailureWarningScenario() {
+  const state = selected(false);
+  state.run_id = "inline-poll-warning";
+  state.calls = [call(0, false)];
+  state.tool_count = 1;
+  state.updated_at = state.calls[0].finished_at;
+
+  const callToolSource = `async name => {
+    if (name === "get_activity") throw new Error("bridge unavailable");
+    return { structuredContent: {} };
+  }`;
+  const scenario = `
+    setTimeout(() => {
+      const warning = document.querySelector(".activity-inline-warning");
+      const pass = warning && !warning.hidden && warning.textContent.includes("Live updates unavailable");
+      document.getElementById("smoke-marker").textContent = pass
+        ? "SMOKE_PASS inline-poll-warning"
+        : "SMOKE_FAIL inline-poll-warning hidden=" + warning?.hidden + " text=" + warning?.textContent;
+    }, 100);
+  `;
+  const dom = await runChrome(prepareInlineHtml(state, scenario, { callToolSource }), 200);
+  if (!dom.includes("SMOKE_PASS inline-poll-warning")) {
+    throw new Error("Inline polling failure warning smoke failed");
+  }
+}
+
+async function inlinePollingTimeoutWarningScenario() {
+  const state = selected(false);
+  state.run_id = "inline-poll-timeout";
+  state.calls = [call(0, true)];
+  state.tool_count = 1;
+  state.updated_at = state.calls[0].started_at;
+
+  const callToolSource = `async name => {
+    if (name === "get_activity") return new Promise(() => {});
+    return { structuredContent: {} };
+  }`;
+  const scenario = `
+    setTimeout(() => {
+      const warning = document.querySelector(".activity-inline-warning");
+      const pass = warning && !warning.hidden && warning.textContent.includes("Live updates unavailable");
+      document.getElementById("smoke-marker").textContent = pass
+        ? "SMOKE_PASS inline-poll-timeout-warning"
+        : "SMOKE_FAIL inline-poll-timeout-warning hidden=" + warning?.hidden + " text=" + warning?.textContent;
+    }, 5100);
+  `;
+  const dom = await runChrome(prepareInlineHtml(state, scenario, { callToolSource }), 5250);
+  if (!dom.includes("SMOKE_PASS inline-poll-timeout-warning")) {
+    throw new Error("Inline polling timeout warning smoke failed");
+  }
+}
+
+async function inlineDetailFailureKeepsLiveSnapshotScenario() {
+  const initial = selected(false);
+  initial.run_id = "inline-detail-warning";
+  initial.calls = [call(0, true)];
+  initial.tool_count = 1;
+  initial.updated_at = initial.calls[0].started_at;
+
+  const fresh = structuredClone(initial);
+  fresh.calls.push(call(1, false));
+  fresh.tool_count = 2;
+  fresh.latest_activity = {
+    label: fresh.calls[1].tool_name,
+    detail: fresh.calls[1].detail,
+    scope: fresh.calls[1].scope,
+    status: fresh.calls[1].status,
+    started_at: fresh.calls[1].started_at,
+    finished_at: fresh.calls[1].finished_at,
+  };
+  fresh.updated_at = fresh.calls[1].finished_at;
+
+  const callToolSource = `async name => {
+    window.__activityPolls = window.__activityPolls || 0;
+    if (name === "get_activity") {
+      window.__activityPolls += 1;
+      return { structuredContent: window.__activityPolls === 1 ? ${JSON.stringify(initial)} : ${JSON.stringify(fresh)} };
+    }
+    if (name === "get_activity_detail") throw new Error("detail unavailable");
+    return { structuredContent: {} };
+  }`;
+  const scenario = `
+    setTimeout(() => {
+      document.querySelector(".activity-row-button")?.click();
+    }, 75);
+    setTimeout(() => {
+      const rows = document.querySelectorAll(".activity-row");
+      const warning = document.querySelector(".activity-inline-warning");
+      const pass = rows.length === 2
+        && warning
+        && !warning.hidden
+        && warning.textContent.includes("Expanded detail unavailable");
+      document.getElementById("smoke-marker").textContent = pass
+        ? "SMOKE_PASS inline-detail-failure-keeps-snapshot"
+        : "SMOKE_FAIL inline-detail-failure-keeps-snapshot rows=" + rows.length + " hidden=" + warning?.hidden + " text=" + warning?.textContent;
+    }, 700);
+  `;
+  const dom = await runChrome(prepareInlineHtml(initial, scenario, { callToolSource }), 850);
+  if (!dom.includes("SMOKE_PASS inline-detail-failure-keeps-snapshot")) {
+    throw new Error("Inline detail failure snapshot smoke failed");
+  }
+}
+
+async function inlineDetailSurvivesRefreshFailureScenario() {
+  const state = selected(false);
+  state.run_id = "inline-detail-retained";
+  state.calls = [call(0, true)];
+  state.tool_count = 1;
+  state.updated_at = state.calls[0].started_at;
+
+  const detail = {
+    call_id: "call-0",
+    tool_name: "read_file",
+    status: "running",
+    arguments: { relative_path: "retained-detail.txt" },
+    structured_result: null,
+    result: null,
+    error: null,
+    media: null,
+  };
+  const callToolSource = `async name => {
+    if (name === "get_activity") return { structuredContent: ${JSON.stringify(state)} };
+    if (name === "get_activity_detail") {
+      window.__detailCalls = (window.__detailCalls || 0) + 1;
+      if (window.__detailCalls === 1) return { structuredContent: ${JSON.stringify(detail)} };
+      throw new Error("detail refresh unavailable");
+    }
+    return { structuredContent: {} };
+  }`;
+  const scenario = `
+    setTimeout(() => document.querySelector(".activity-row-button")?.click(), 75);
+    setTimeout(() => {
+      const detailNode = document.querySelector(".activity-detail");
+      const warning = document.querySelector(".activity-inline-warning");
+      const pass = detailNode?.textContent.includes("retained-detail.txt")
+        && warning
+        && !warning.hidden
+        && warning.textContent.includes("showing last result");
+      document.getElementById("smoke-marker").textContent = pass
+        ? "SMOKE_PASS inline-detail-retained"
+        : "SMOKE_FAIL inline-detail-retained detail=" + detailNode?.textContent + " warning=" + warning?.textContent;
+    }, 700);
+  `;
+  const dom = await runChrome(prepareInlineHtml(state, scenario, { callToolSource }), 850);
+  if (!dom.includes("SMOKE_PASS inline-detail-retained")) {
+    throw new Error("Inline retained detail smoke failed");
+  }
+}
+
+async function inlineDetailRetriesAfterInitialFailureScenario() {
+  const state = selected(false);
+  const now = Date.now() / 1000;
+  state.run_id = "inline-detail-retry";
+  state.calls = [call(0, false)];
+  state.calls[0].started_at = now;
+  state.calls[0].finished_at = now + 0.1;
+  state.tool_count = 1;
+  state.latest_activity = {
+    label: state.calls[0].tool_name,
+    detail: state.calls[0].detail,
+    scope: state.calls[0].scope,
+    status: state.calls[0].status,
+    started_at: state.calls[0].started_at,
+    finished_at: state.calls[0].finished_at,
+  };
+  state.updated_at = state.calls[0].finished_at;
+
+  const detail = {
+    call_id: "call-0",
+    tool_name: "read_file",
+    status: "completed",
+    arguments: { relative_path: "retry-detail.txt" },
+    structured_result: null,
+    result: "retry succeeded",
+    error: null,
+    media: null,
+  };
+  const callToolSource = `async name => {
+    if (name === "get_activity") return { structuredContent: ${JSON.stringify(state)} };
+    if (name === "get_activity_detail") {
+      window.__detailCalls = (window.__detailCalls || 0) + 1;
+      if (window.__detailCalls === 1) throw new Error("transient detail failure");
+      return { structuredContent: ${JSON.stringify(detail)} };
+    }
+    return { structuredContent: {} };
+  }`;
+  const scenario = `
+    setTimeout(() => document.querySelector(".activity-row-button")?.click(), 75);
+    setTimeout(() => {
+      const detailNode = document.querySelector(".activity-detail");
+      const warning = document.querySelector(".activity-inline-warning");
+      const pass = detailNode?.textContent.includes("retry-detail.txt")
+        && detailNode?.textContent.includes("retry succeeded")
+        && warning?.hidden
+        && window.__detailCalls === 2;
+      document.getElementById("smoke-marker").textContent = pass
+        ? "SMOKE_PASS inline-detail-retry"
+        : "SMOKE_FAIL inline-detail-retry calls=" + window.__detailCalls + " detail=" + detailNode?.textContent + " warning=" + warning?.textContent;
+    }, 800);
+  `;
+  const dom = await runChrome(prepareInlineHtml(state, scenario, { callToolSource }), 950);
+  if (!dom.includes("SMOKE_PASS inline-detail-retry")) {
+    throw new Error("Inline detail retry smoke failed");
+  }
+}
+
+async function inlineExpandedDetailVisibilityScenario() {
+  const state = selected(false);
+  state.run_id = "inline-detail-visibility";
+  state.calls = Array.from({ length: 10 }, (_, index) => call(index, index === 9));
+  state.tool_count = state.calls.length;
+  state.latest_activity = {
+    label: state.calls[9].tool_name,
+    detail: state.calls[9].detail,
+    scope: state.calls[9].scope,
+    status: state.calls[9].status,
+    started_at: state.calls[9].started_at,
+    finished_at: state.calls[9].finished_at,
+  };
+  state.updated_at = state.calls[9].started_at;
+
+  const detail = {
+    call_id: "call-9",
+    tool_name: "read_file",
+    status: "running",
+    arguments: Object.fromEntries(Array.from({ length: 12 }, (_, index) => [`parameter_${index}`, `value_${index}`])),
+    structured_result: null,
+    result: null,
+    error: null,
+    media: null,
+  };
+  const callToolSource = `async name => {
+    if (name === "get_activity") return { structuredContent: ${JSON.stringify(state)} };
+    if (name === "get_activity_detail") return { structuredContent: ${JSON.stringify(detail)} };
+    return { structuredContent: {} };
+  }`;
+  const scenario = `
+    setTimeout(() => {
+      const rows = document.querySelectorAll(".activity-row-button");
+      rows[rows.length - 1]?.click();
+    }, 75);
+    setTimeout(() => {
+      const list = document.querySelector(".activity-list");
+      const detail = document.querySelector('[data-entry-id="call-9"] .activity-detail');
+      const listRect = list?.getBoundingClientRect();
+      const detailRect = detail?.getBoundingClientRect();
+      const visible = listRect && detailRect
+        ? Math.max(0, Math.min(listRect.bottom, detailRect.bottom) - Math.max(listRect.top, detailRect.top))
+        : 0;
+      const pass = visible >= 48 && detail?.textContent.includes("parameter_0");
+      document.getElementById("smoke-marker").textContent = pass
+        ? "SMOKE_PASS inline-expanded-detail-visible"
+        : "SMOKE_FAIL inline-expanded-detail-visible visible=" + visible + " scroll=" + list?.scrollTop + "/" + list?.scrollHeight;
+    }, 250);
+  `;
+  const dom = await runChrome(prepareInlineHtml(state, scenario, { callToolSource }), 350);
+  if (!dom.includes("SMOKE_PASS inline-expanded-detail-visible")) {
+    const marker = dom.match(/<div id="smoke-marker"[^>]*>.*?<\/div>/s)?.[0] || "missing marker";
+    throw new Error(`Inline expanded detail visibility smoke failed: ${marker}`);
   }
 }
 
@@ -1999,6 +2296,13 @@ await runningIconAnimationScenario();
 await inlineHiddenTimerScenario();
 await inlineStaleGlobalsAnimationScenario();
 await inlineFreshGlobalsRecoveryScenario();
+await inlineQueuedActivityStaysLiveScenario();
+await inlinePollingFailureWarningScenario();
+await inlinePollingTimeoutWarningScenario();
+await inlineDetailFailureKeepsLiveSnapshotScenario();
+await inlineDetailSurvivesRefreshFailureScenario();
+await inlineDetailRetriesAfterInitialFailureScenario();
+await inlineExpandedDetailVisibilityScenario();
 await expandedLiveAnimationContinuityScenario();
 await inlineExpandedHeightNotificationScenario();
 await overviewRequestScenario(10);

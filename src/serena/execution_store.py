@@ -119,6 +119,8 @@ class ExecutionStore:
     _DATABASE_SCHEMA_VERSION = 3
     _DATABASE_FILENAME = "state.sqlite3"
     _BUSY_TIMEOUT_MS = 5_000
+    _ACTIVITY_RUN_REUSE_SECONDS = 30.0
+    _ACTIVITY_BOOTSTRAP_TOOLS = frozenset({"initial_instructions", "activate_project", "get_current_config", "read_memory"})
 
     def __init__(
         self,
@@ -701,12 +703,63 @@ class ExecutionStore:
             row = self._connection.execute("SELECT * FROM sessions WHERE panel_id = ?", (panel_id,)).fetchone()
             return self._session_from_row(row) if row is not None else None
 
+    def _reusable_activity_run(self, session_id: str, now: float) -> ActivityPanelRun | None:
+        """Returns the current run when opening another panel should remain idempotent."""
+        row = self._connection.execute(
+            """
+            SELECT *
+            FROM activity_runs
+            WHERE session_id = ? AND superseded = 0
+            ORDER BY started_at DESC, run_id DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return None
+
+        execution_rows = self._connection.execute(
+            """
+            SELECT executions.execution_id, executions.tool_name, executions.status
+            FROM activity_run_executions
+            JOIN executions ON executions.execution_id = activity_run_executions.execution_id
+            WHERE activity_run_executions.run_id = ?
+            ORDER BY activity_run_executions.position ASC
+            """,
+            (str(row["run_id"]),),
+        ).fetchall()
+        has_live_execution = any(str(execution["status"]) in {"running", "queued"} for execution in execution_rows)
+        bootstrap_only = now - float(row["started_at"]) <= self._ACTIVITY_RUN_REUSE_SECONDS and all(
+            str(execution["tool_name"]) in self._ACTIVITY_BOOTSTRAP_TOOLS for execution in execution_rows
+        )
+        if not has_live_execution and not bootstrap_only:
+            return None
+
+        return ActivityPanelRun(
+            run_id=str(row["run_id"]),
+            session_id=str(row["session_id"]),
+            project_name=str(row["project_name"]),
+            started_at=float(row["started_at"]),
+            superseded=bool(row["superseded"]),
+            execution_ids=[str(execution["execution_id"]) for execution in execution_rows],
+        )
+
     def start_activity_run(self, session_id: str, project_name: str) -> ActivityPanelRun:
-        """Starts a panel run and carries live executions from its predecessor."""
+        """Opens one activity run, reusing a still-current bootstrap or live run."""
         now = time.time()
         run_id = uuid.uuid4().hex
         with self._transaction():
             self._prune()
+            reusable = self._reusable_activity_run(session_id, now)
+            if reusable is not None:
+                if project_name and reusable.project_name != project_name:
+                    self._connection.execute(
+                        "UPDATE activity_runs SET project_name = ? WHERE run_id = ?",
+                        (project_name, reusable.run_id),
+                    )
+                    reusable.project_name = project_name
+                return reusable
+
             previous = self._connection.execute(
                 """
                 SELECT run_id
@@ -1085,7 +1138,7 @@ class ExecutionStore:
         return self._session_from_row(row)
 
     def _interrupt_stale_state(self) -> None:
-        """Marks execution and panel state left live by a previous Serena process as historical."""
+        """Marks interrupted executions terminal while preserving activity-run ownership."""
         now = time.time()
         message = "Serena restarted before this tool call reached a terminal state."
         with self._transaction():
@@ -1113,7 +1166,6 @@ class ExecutionStore:
                 """,
                 (now, now, message, message),
             )
-            self._connection.execute("UPDATE activity_runs SET superseded = 1 WHERE superseded = 0")
 
     @staticmethod
     def _dump_json(value: object) -> str:

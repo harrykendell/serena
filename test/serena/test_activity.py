@@ -334,7 +334,7 @@ def test_activity_run_refreshes_git_metrics_only_when_requested() -> None:
     assert refreshed["git_ahead_commits"] == 4
 
 
-def test_activity_tracker_rehydrates_historical_turn_after_restart(tmp_path: Path) -> None:
+def test_activity_tracker_preserves_current_turn_ownership_after_restart(tmp_path: Path) -> None:
     source = _FakeJobSource([_job_record("job-a", "retained job", JobStatus.COMPLETED)])
     store_root = tmp_path / "execution-store"
     tracker = _ActivityHarness(source, execution_store=ExecutionStore(store_root))
@@ -360,7 +360,7 @@ def test_activity_tracker_rehydrates_historical_turn_after_restart(tmp_path: Pat
     snapshot = restored.get_run("conversation-a", run["run_id"])
     detail = restored.get_call_detail("conversation-a", run["run_id"], call_id)
 
-    assert snapshot["superseded"] is True
+    assert snapshot["superseded"] is False
     assert [call["tool_name"] for call in snapshot["calls"]] == ["search_for_pattern", "start_job", "execute_shell_command"]
     assert snapshot["calls"][-1]["call_id"] == interrupted_id
     assert snapshot["calls"][-1]["status"] == "failed"
@@ -368,6 +368,11 @@ def test_activity_tracker_rehydrates_historical_turn_after_restart(tmp_path: Pat
     assert [(job["job_id"], job["current_turn"]) for job in snapshot["jobs"]] == [("job-a", True)]
     assert detail["arguments"] == {"substring_pattern": "_ActivityHarness", "relative_path": "src/serena"}
     assert json.loads(detail["result"]) == {"matches": 3}
+
+    continued_id = restored.start_tool("conversation-a", "git_status", {})
+    continued = restored.get_run("conversation-a", run["run_id"])
+    assert continued["calls"][-1]["call_id"] == continued_id
+    assert continued["calls"][-1]["tool_name"] == "git_status"
 
 
 def test_activity_tracker_uses_semantic_tool_detail_lines() -> None:
@@ -721,21 +726,53 @@ def test_activity_tracker_isolates_conversations() -> None:
         tracker.get_run("conversation-b", run["run_id"])
 
 
-def test_activity_tracker_supersedes_previous_panel_in_same_conversation() -> None:
+def test_activity_tracker_reuses_live_panel_before_superseding_completed_work() -> None:
     tracker = _ActivityHarness(_FakeJobSource())
     first = tracker.start_run("conversation-a", "serena")
     call_id = tracker.start_tool("conversation-a", "execute_shell_command", {"command": "sleep 5"})
 
-    second = tracker.start_run("conversation-a", "serena")
-    second_state = tracker.get_run("conversation-a", second["run_id"])
+    repeated = tracker.start_run("conversation-a", "serena")
+    repeated_state = tracker.get_run("conversation-a", repeated["run_id"])
 
-    assert tracker.get_run("conversation-a", first["run_id"])["superseded"] is True
-    assert second_state["superseded"] is False
-    assert [(call["call_id"], call["status"]) for call in second_state["calls"]] == [(call_id, "queued")]
+    assert repeated["run_id"] == first["run_id"]
+    assert repeated_state["superseded"] is False
+    assert [(call["call_id"], call["status"]) for call in repeated_state["calls"]] == [(call_id, "queued")]
 
     tracker.finish_tool(call_id, succeeded=True)
-    assert tracker.get_run("conversation-a", first["run_id"])["calls"][0]["status"] == "completed"
-    assert tracker.get_run("conversation-a", second["run_id"])["calls"][0]["status"] == "completed"
+    next_turn = tracker.start_run("conversation-a", "serena")
+
+    assert next_turn["run_id"] != first["run_id"]
+    assert tracker.get_run("conversation-a", first["run_id"])["superseded"] is True
+    assert next_turn["superseded"] is False
+    assert next_turn["calls"] == []
+
+
+def test_activity_tracker_reuses_recent_bootstrap_only_panel() -> None:
+    tracker = _ActivityHarness(_FakeJobSource())
+    first = tracker.start_run("conversation-a", "serena")
+    bootstrap_id = tracker.start_tool("conversation-a", "activate_project", {"project": "serena"})
+    tracker.finish_tool(bootstrap_id, succeeded=True)
+
+    repeated = tracker.start_run("conversation-a", "serena")
+
+    assert repeated["run_id"] == first["run_id"]
+    assert repeated["superseded"] is False
+    assert [call["tool_name"] for call in repeated["calls"]] == ["activate_project"]
+
+
+def test_activity_tracker_does_not_reuse_stale_bootstrap_only_panel(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = 1_000.0
+    monkeypatch.setattr("serena.execution_store.time.time", lambda: now)
+    tracker = _ActivityHarness(_FakeJobSource())
+    first = tracker.start_run("conversation-a", "serena")
+    bootstrap_id = tracker.start_tool("conversation-a", "activate_project", {"project": "serena"})
+    tracker.finish_tool(bootstrap_id, succeeded=True)
+
+    now += 31.0
+    next_turn = tracker.start_run("conversation-a", "serena")
+
+    assert next_turn["run_id"] != first["run_id"]
+    assert tracker.get_run("conversation-a", first["run_id"])["superseded"] is True
 
 
 def test_superseded_panel_retains_its_jobs_without_absorbing_background_jobs() -> None:
