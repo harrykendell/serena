@@ -5,7 +5,9 @@
   if (!root || !window.SerenaActivity?.ActivityPanel) return;
 
   const BRIDGE_CALL_TIMEOUT_MS = 5000;
+  const BRIDGE_INITIALIZE_TIMEOUT_MS = 1500;
   const BRIDGE_MAX_ACTIVE_CALLS = 4;
+  const MCP_APPS_PROTOCOL_VERSION = "2026-01-26";
 
   const warning = document.createElement("div");
   warning.className = "activity-inline-warning";
@@ -24,6 +26,9 @@
   let pollWarning = null;
   let detailWarning = null;
   let activeBridgeCalls = 0;
+  let nextRpcId = 1;
+  let mcpAppsBridgePromise = null;
+  const pendingRpcRequests = new Map();
 
   function unwrap(result) {
     return result?.structuredContent ?? result?.structured_content ?? result;
@@ -58,6 +63,82 @@
       // Persistence is opportunistic; live activity must continue without it.
     }
   }
+
+
+  function bridgeErrorMessage(error) {
+    if (error instanceof Error && error.message) return error.message;
+    if (typeof error === "string" && error) return error;
+    try {
+      return JSON.stringify(error);
+    } catch (_) {
+      return "Unknown MCP Apps bridge error";
+    }
+  }
+
+  function rpcRequest(method, params, timeoutMs) {
+    const id = nextRpcId++;
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        pendingRpcRequests.delete(id);
+        reject(new Error(`MCP Apps bridge timed out: ${method}`));
+      }, timeoutMs);
+
+      pendingRpcRequests.set(id, { resolve, reject, timeout });
+      window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
+    });
+  }
+
+  function rpcNotify(method, params = {}) {
+    window.parent.postMessage({ jsonrpc: "2.0", method, params }, "*");
+  }
+
+  async function initializeMcpAppsBridge() {
+    try {
+      const result = await rpcRequest(
+        "ui/initialize",
+        {
+          protocolVersion: MCP_APPS_PROTOCOL_VERSION,
+          appInfo: { name: "Serena activity", version: "1.0.0" },
+          appCapabilities: { availableDisplayModes: ["inline"] },
+        },
+        BRIDGE_INITIALIZE_TIMEOUT_MS,
+      );
+      rpcNotify("ui/notifications/initialized");
+      return Boolean(result?.hostCapabilities?.serverTools);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function mcpAppsBridgeReady() {
+    if (mcpAppsBridgePromise === null) {
+      mcpAppsBridgePromise = initializeMcpAppsBridge();
+    }
+    return mcpAppsBridgePromise;
+  }
+
+  function handleRpcMessage(event) {
+    if (event.source !== window.parent) return;
+    const message = event.data;
+    if (!message || message.jsonrpc !== "2.0" || message.id === undefined) return;
+    if (!Object.prototype.hasOwnProperty.call(message, "result")
+      && !Object.prototype.hasOwnProperty.call(message, "error")) return;
+
+    const pending = pendingRpcRequests.get(message.id);
+    if (!pending) return;
+    pendingRpcRequests.delete(message.id);
+    clearTimeout(pending.timeout);
+
+    if (Object.prototype.hasOwnProperty.call(message, "result")) {
+      pending.resolve(message.result);
+      return;
+    }
+
+    const error = message.error;
+    pending.reject(new Error(error?.message || bridgeErrorMessage(error)));
+  }
+
+  window.addEventListener("message", handleRpcMessage, { passive: true });
 
   function status(value) {
     return String(value || "").toLowerCase();
@@ -105,25 +186,44 @@
   }
 
   async function callTool(name, args) {
-    if (!window.openai?.callTool) throw new Error("Serena activity bridge is unavailable");
     if (activeBridgeCalls >= BRIDGE_MAX_ACTIVE_CALLS) {
       throw new Error("Serena activity bridge has too many concurrent calls");
     }
 
     activeBridgeCalls += 1;
-    let timeout = null;
     try {
-      const bridgePromise = Promise.resolve().then(() => window.openai.callTool(name, args));
-      const timeoutPromise = new Promise((_, reject) => {
-        timeout = setTimeout(
-          () => reject(new Error(`Serena activity bridge call timed out: ${name}`)),
-          BRIDGE_CALL_TIMEOUT_MS,
-        );
-      });
-      return unwrap(await Promise.race([bridgePromise, timeoutPromise]));
+      if (await mcpAppsBridgeReady()) {
+        try {
+          const result = await rpcRequest(
+            "tools/call",
+            { name, arguments: args },
+            BRIDGE_CALL_TIMEOUT_MS,
+          );
+          return unwrap(result);
+        } catch (error) {
+          console.warn("Serena MCP Apps tool call failed; trying ChatGPT compatibility bridge.", error);
+        }
+      }
+
+      if (!window.openai?.callTool) {
+        throw new Error("Serena activity bridge is unavailable");
+      }
+
+      let timeout = null;
+      try {
+        const compatibilityCall = Promise.resolve().then(() => window.openai.callTool(name, args));
+        const timeoutPromise = new Promise((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error(`Serena ChatGPT compatibility bridge timed out: ${name}`)),
+            BRIDGE_CALL_TIMEOUT_MS,
+          );
+        });
+        return unwrap(await Promise.race([compatibilityCall, timeoutPromise]));
+      } finally {
+        if (timeout !== null) clearTimeout(timeout);
+      }
     } finally {
       activeBridgeCalls -= 1;
-      if (timeout !== null) clearTimeout(timeout);
     }
   }
 
@@ -297,11 +397,7 @@
 
   async function poll() {
     if (retired) return;
-    if (!runId || !window.openai?.callTool) {
-      if (runId && !window.openai?.callTool) {
-        pollWarning = "Live updates unavailable; retrying.";
-        syncWarning();
-      }
+    if (!runId) {
       pollTimer = setTimeout(poll, 250);
       return;
     }
@@ -340,8 +436,8 @@
         retire();
         return;
       }
-    } catch (_) {
-      pollWarning = "Live updates unavailable; retrying.";
+    } catch (error) {
+      pollWarning = `Live updates unavailable; retrying. ${bridgeErrorMessage(error)}`;
       syncWarning();
     }
     pollTimer = setTimeout(poll, pollDelay(next));

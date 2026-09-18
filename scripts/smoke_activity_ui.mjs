@@ -325,6 +325,7 @@ function prepareInlineHtml(
     forceHidden = false,
     pollState = state,
     callToolSource = null,
+    mcpCallToolSource = null,
     toolOutput = state,
     toolResponseMetadata = null,
     widgetState = null,
@@ -335,6 +336,7 @@ function prepareInlineHtml(
     ? 'Object.defineProperty(document, "hidden", { configurable: true, get: () => true });'
     : "";
   const callTool = callToolSource || `async () => ({ structuredContent: ${JSON.stringify(pollState)} })`;
+  const mcpCallTool = mcpCallToolSource || "null";
   const hostScript = bridgeTimeoutMs === null
     ? inlineHostJs
     : inlineHostJs.replace(
@@ -349,6 +351,35 @@ function prepareInlineHtml(
 <script>${activityJs}</script>
 <script>
 ${hiddenScript}
+window.__mcpCallTool = ${mcpCallTool};
+window.addEventListener("message", async event => {
+  const message = event.data;
+  if (!message || message.jsonrpc !== "2.0" || message.id === undefined || !message.method) return;
+  if (message.method === "ui/initialize") {
+    window.postMessage({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: {
+        protocolVersion: "2026-01-26",
+        hostInfo: { name: "smoke-host", version: "1.0.0" },
+        hostCapabilities: window.__mcpCallTool ? { serverTools: {} } : {},
+        hostContext: {},
+      },
+    }, "*");
+    return;
+  }
+  if (message.method !== "tools/call" || !window.__mcpCallTool) return;
+  try {
+    const result = await window.__mcpCallTool(message.params?.name, message.params?.arguments || {});
+    window.postMessage({ jsonrpc: "2.0", id: message.id, result }, "*");
+  } catch (error) {
+    window.postMessage({
+      jsonrpc: "2.0",
+      id: message.id,
+      error: { code: -32000, message: error?.message || String(error) },
+    }, "*");
+  }
+});
 window.openai = {
   toolOutput: ${JSON.stringify(toolOutput)},
   toolResponseMetadata: ${JSON.stringify(toolResponseMetadata)},
@@ -804,7 +835,10 @@ async function inlinePollingFailureWarningScenario() {
   const scenario = `
     setTimeout(() => {
       const warning = document.querySelector(".activity-inline-warning");
-      const pass = warning && !warning.hidden && warning.textContent.includes("Live updates unavailable");
+      const pass = warning
+        && !warning.hidden
+        && warning.textContent.includes("Live updates unavailable")
+        && warning.textContent.includes("bridge unavailable");
       document.getElementById("smoke-marker").textContent = pass
         ? "SMOKE_PASS inline-poll-warning"
         : "SMOKE_FAIL inline-poll-warning hidden=" + warning?.hidden + " text=" + warning?.textContent;
@@ -874,6 +908,48 @@ async function inlineMetadataBootstrapScenario() {
   );
   if (!dom.includes("SMOKE_PASS inline-metadata-bootstrap")) {
     throw new Error("Inline metadata bootstrap smoke failed");
+  }
+}
+
+
+async function inlineMcpAppsBridgePreferredScenario() {
+  const state = selected(false);
+  state.run_id = "inline-mcp-apps-bridge";
+
+  const compatibilityCallTool = `async () => {
+    window.__compatibilityCalls = (window.__compatibilityCalls || 0) + 1;
+    throw new Error("compatibility bridge should not be used");
+  }`;
+  const mcpCallTool = `async name => {
+    window.__mcpBridgeCalls = (window.__mcpBridgeCalls || 0) + 1;
+    if (name === "get_activity") return { structuredContent: ${JSON.stringify(state)} };
+    return { structuredContent: {} };
+  }`;
+  const scenario = `
+    setTimeout(() => {
+      const rows = document.querySelectorAll(".activity-command");
+      const warning = document.querySelector(".activity-inline-warning");
+      const pass = rows.length > 0
+        && (window.__mcpBridgeCalls || 0) >= 1
+        && (window.__compatibilityCalls || 0) === 0
+        && warning?.hidden;
+      document.getElementById("smoke-marker").textContent = pass
+        ? "SMOKE_PASS inline-mcp-apps-bridge"
+        : "SMOKE_FAIL inline-mcp-apps-bridge mcp=" + (window.__mcpBridgeCalls || 0)
+          + " compatibility=" + (window.__compatibilityCalls || 0)
+          + " rows=" + rows.length
+          + " warning=" + warning?.textContent;
+    }, 150);
+  `;
+  const dom = await runChrome(
+    prepareInlineHtml(state, scenario, {
+      callToolSource: compatibilityCallTool,
+      mcpCallToolSource: mcpCallTool,
+    }),
+    250,
+  );
+  if (!dom.includes("SMOKE_PASS inline-mcp-apps-bridge")) {
+    throw new Error("Inline MCP Apps bridge smoke failed");
   }
 }
 
@@ -2425,6 +2501,7 @@ await inlineQueuedActivityStaysLiveScenario();
 await inlinePollingFailureWarningScenario();
 await inlinePollingTimeoutWarningScenario();
 await inlineMetadataBootstrapScenario();
+await inlineMcpAppsBridgePreferredScenario();
 await inlineWidgetStateRecoveryScenario();
 await inlineBridgeTimeoutRecoveryScenario();
 await inlineDetailFailureKeepsLiveSnapshotScenario();
