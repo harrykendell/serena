@@ -318,11 +318,29 @@ function prepareHtml(state, scenarioScript, { preludeScript = "" } = {}) {
 }
 
 
-function prepareInlineHtml(state, scenarioScript, { forceHidden = false, pollState = state, callToolSource = null } = {}) {
+function prepareInlineHtml(
+  state,
+  scenarioScript,
+  {
+    forceHidden = false,
+    pollState = state,
+    callToolSource = null,
+    toolOutput = state,
+    toolResponseMetadata = null,
+    widgetState = null,
+    bridgeTimeoutMs = null,
+  } = {},
+) {
   const hiddenScript = forceHidden
     ? 'Object.defineProperty(document, "hidden", { configurable: true, get: () => true });'
     : "";
   const callTool = callToolSource || `async () => ({ structuredContent: ${JSON.stringify(pollState)} })`;
+  const hostScript = bridgeTimeoutMs === null
+    ? inlineHostJs
+    : inlineHostJs.replace(
+      "const BRIDGE_CALL_TIMEOUT_MS = 5000;",
+      `const BRIDGE_CALL_TIMEOUT_MS = ${Number(bridgeTimeoutMs)};`,
+    );
   return `<!doctype html>
 <html>
 <head>
@@ -332,7 +350,13 @@ function prepareInlineHtml(state, scenarioScript, { forceHidden = false, pollSta
 <script>
 ${hiddenScript}
 window.openai = {
-  toolOutput: ${JSON.stringify(state)},
+  toolOutput: ${JSON.stringify(toolOutput)},
+  toolResponseMetadata: ${JSON.stringify(toolResponseMetadata)},
+  widgetState: ${JSON.stringify(widgetState)},
+  setWidgetState: next => {
+    window.openai.widgetState = next;
+    window.__widgetStateWrites = (window.__widgetStateWrites || 0) + 1;
+  },
   callTool: ${callTool},
   notifyIntrinsicHeight: () => { window.__heightNotifications = (window.__heightNotifications || 0) + 1; },
 };
@@ -341,7 +365,7 @@ window.openai = {
 <body>
 <div id="serena-activity-root"></div>
 <div id="smoke-marker" hidden>SMOKE_PENDING</div>
-<script>${inlineHostJs}</script>
+<script>${hostScript}</script>
 <script>${scenarioScript}</script>
 </body>
 </html>`;
@@ -815,6 +839,107 @@ async function inlinePollingTimeoutWarningScenario() {
   const dom = await runChrome(prepareInlineHtml(state, scenario, { callToolSource }), 5250);
   if (!dom.includes("SMOKE_PASS inline-poll-timeout-warning")) {
     throw new Error("Inline polling timeout warning smoke failed");
+  }
+}
+
+
+async function inlineMetadataBootstrapScenario() {
+  const state = selected(false);
+  state.run_id = "inline-metadata-bootstrap";
+
+  const scenario = `
+    setTimeout(() => {
+      const rows = document.querySelectorAll(".activity-command");
+      const saved = window.openai.widgetState;
+      const pass = rows.length > 0
+        && saved?.serenaActivityRunId === "inline-metadata-bootstrap"
+        && saved?.preserved === "yes"
+        && (window.__widgetStateWrites || 0) >= 1;
+      document.getElementById("smoke-marker").textContent = pass
+        ? "SMOKE_PASS inline-metadata-bootstrap"
+        : "SMOKE_FAIL inline-metadata-bootstrap rows=" + rows.length
+          + " run=" + saved?.serenaActivityRunId
+          + " preserved=" + saved?.preserved
+          + " writes=" + (window.__widgetStateWrites || 0);
+    }, 100);
+  `;
+  const metadata = { mcp_tool_result: { structuredContent: state } };
+  const dom = await runChrome(
+    prepareInlineHtml(state, scenario, {
+      toolOutput: null,
+      toolResponseMetadata: metadata,
+      widgetState: { preserved: "yes" },
+    }),
+    200,
+  );
+  if (!dom.includes("SMOKE_PASS inline-metadata-bootstrap")) {
+    throw new Error("Inline metadata bootstrap smoke failed");
+  }
+}
+
+async function inlineWidgetStateRecoveryScenario() {
+  const state = selected(false);
+  state.run_id = "inline-widget-state-recovery";
+
+  const scenario = `
+    setTimeout(() => {
+      const rows = document.querySelectorAll(".activity-command");
+      const warning = document.querySelector(".activity-inline-warning");
+      const pass = rows.length > 0
+        && window.openai.widgetState?.serenaActivityRunId === "inline-widget-state-recovery"
+        && warning?.hidden;
+      document.getElementById("smoke-marker").textContent = pass
+        ? "SMOKE_PASS inline-widget-state-recovery"
+        : "SMOKE_FAIL inline-widget-state-recovery rows=" + rows.length
+          + " warning=" + warning?.textContent;
+    }, 100);
+  `;
+  const dom = await runChrome(
+    prepareInlineHtml(state, scenario, {
+      toolOutput: null,
+      toolResponseMetadata: null,
+      widgetState: { serenaActivityRunId: state.run_id },
+    }),
+    200,
+  );
+  if (!dom.includes("SMOKE_PASS inline-widget-state-recovery")) {
+    throw new Error("Inline widget-state recovery smoke failed");
+  }
+}
+
+async function inlineBridgeTimeoutRecoveryScenario() {
+  const state = selected(false);
+  state.run_id = "inline-bridge-timeout-recovery";
+  state.calls = [call(0, true)];
+  state.tool_count = 1;
+  state.updated_at = state.calls[0].started_at;
+
+  const callToolSource = `async name => {
+    if (name === "get_activity") {
+      window.__pollCalls = (window.__pollCalls || 0) + 1;
+      if (window.__pollCalls <= 4) return new Promise(() => {});
+      return { structuredContent: ${JSON.stringify(state)} };
+    }
+    return { structuredContent: ${JSON.stringify(state)} };
+  }`;
+  const scenario = `
+    setTimeout(() => {
+      const rows = document.querySelectorAll(".activity-command");
+      const warning = document.querySelector(".activity-inline-warning");
+      const pass = (window.__pollCalls || 0) >= 5 && rows.length === 1 && warning?.hidden;
+      document.getElementById("smoke-marker").textContent = pass
+        ? "SMOKE_PASS inline-bridge-timeout-recovery"
+        : "SMOKE_FAIL inline-bridge-timeout-recovery calls=" + (window.__pollCalls || 0)
+          + " rows=" + rows.length
+          + " warning=" + warning?.textContent;
+    }, 2250);
+  `;
+  const dom = await runChrome(
+    prepareInlineHtml(state, scenario, { callToolSource, bridgeTimeoutMs: 20 }),
+    2350,
+  );
+  if (!dom.includes("SMOKE_PASS inline-bridge-timeout-recovery")) {
+    throw new Error("Inline bridge timeout recovery smoke failed");
   }
 }
 
@@ -2299,6 +2424,9 @@ await inlineFreshGlobalsRecoveryScenario();
 await inlineQueuedActivityStaysLiveScenario();
 await inlinePollingFailureWarningScenario();
 await inlinePollingTimeoutWarningScenario();
+await inlineMetadataBootstrapScenario();
+await inlineWidgetStateRecoveryScenario();
+await inlineBridgeTimeoutRecoveryScenario();
 await inlineDetailFailureKeepsLiveSnapshotScenario();
 await inlineDetailSurvivesRefreshFailureScenario();
 await inlineDetailRetriesAfterInitialFailureScenario();

@@ -983,16 +983,12 @@ def test_activity_tools_expose_widget_and_private_polling_contract() -> None:
     assert show_meta["openai/outputTemplate"] == ACTIVITY_RESOURCE_URI
     assert poll_meta is not None
     assert poll_meta["ui"] == {"visibility": ["app"]}
-    assert poll_meta["openai/visibility"] == "private"
     assert detail_meta is not None
     assert detail_meta["ui"] == {"visibility": ["app"]}
-    assert detail_meta["openai/visibility"] == "private"
     assert media_meta is not None
     assert media_meta["ui"] == {"visibility": ["app"]}
-    assert media_meta["openai/visibility"] == "private"
     assert job_detail_meta is not None
     assert job_detail_meta["ui"] == {"visibility": ["app"]}
-    assert job_detail_meta["openai/visibility"] == "private"
 
 
 def test_activity_poll_uses_run_identity_across_reconnected_mcp_session() -> None:

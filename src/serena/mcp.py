@@ -752,7 +752,6 @@ class SerenaMCPFactory:
             meta={
                 "ui": {"visibility": ["app"]},
                 "openai/widgetAccessible": True,
-                "openai/visibility": "private",
             },
             structured_output=True,
         )
@@ -772,7 +771,6 @@ class SerenaMCPFactory:
             meta={
                 "ui": {"visibility": ["app"]},
                 "openai/widgetAccessible": True,
-                "openai/visibility": "private",
             },
             structured_output=True,
         )
@@ -788,7 +786,6 @@ class SerenaMCPFactory:
             meta={
                 "ui": {"visibility": ["app"]},
                 "openai/widgetAccessible": True,
-                "openai/visibility": "private",
             },
             structured_output=False,
         )
@@ -820,7 +817,6 @@ class SerenaMCPFactory:
             meta={
                 "ui": {"visibility": ["app"]},
                 "openai/widgetAccessible": True,
-                "openai/visibility": "private",
             },
             structured_output=True,
         )

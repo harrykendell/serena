@@ -5,7 +5,7 @@
   if (!root || !window.SerenaActivity?.ActivityPanel) return;
 
   const BRIDGE_CALL_TIMEOUT_MS = 5000;
-  const BRIDGE_MAX_PENDING_CALLS = 4;
+  const BRIDGE_MAX_ACTIVE_CALLS = 4;
 
   const warning = document.createElement("div");
   warning.className = "activity-inline-warning";
@@ -23,10 +23,40 @@
   let lastNotifiedHeight = null;
   let pollWarning = null;
   let detailWarning = null;
-  let pendingBridgeCalls = 0;
+  let activeBridgeCalls = 0;
 
   function unwrap(result) {
     return result?.structuredContent ?? result?.structured_content ?? result;
+  }
+
+
+  function activityState(source) {
+    const direct = source?.toolOutput;
+    if (direct?.run_id) return direct;
+
+    const mcpResult = source?.toolResponseMetadata?.mcp_tool_result;
+    const metadataState = mcpResult?.structuredContent ?? mcpResult?.structured_content;
+    return metadataState?.run_id ? metadataState : null;
+  }
+
+  function widgetRunId(source) {
+    const value = source?.widgetState?.serenaActivityRunId;
+    return typeof value === "string" && value ? value : null;
+  }
+
+  function persistRunId(nextRunId) {
+    if (!nextRunId || !window.openai?.setWidgetState) return;
+    const currentState = window.openai.widgetState;
+    if (widgetRunId(window.openai) === nextRunId) return;
+
+    try {
+      window.openai.setWidgetState({
+        ...(currentState && typeof currentState === "object" ? currentState : {}),
+        serenaActivityRunId: nextRunId,
+      });
+    } catch (_) {
+      // Persistence is opportunistic; live activity must continue without it.
+    }
   }
 
   function status(value) {
@@ -76,27 +106,23 @@
 
   async function callTool(name, args) {
     if (!window.openai?.callTool) throw new Error("Serena activity bridge is unavailable");
-    if (pendingBridgeCalls >= BRIDGE_MAX_PENDING_CALLS) {
-      throw new Error("Serena activity bridge has too many unresolved calls");
+    if (activeBridgeCalls >= BRIDGE_MAX_ACTIVE_CALLS) {
+      throw new Error("Serena activity bridge has too many concurrent calls");
     }
 
-    pendingBridgeCalls += 1;
-    const bridgePromise = Promise.resolve().then(() => window.openai.callTool(name, args));
-    bridgePromise.then(
-      () => { pendingBridgeCalls -= 1; },
-      () => { pendingBridgeCalls -= 1; },
-    );
-
+    activeBridgeCalls += 1;
     let timeout = null;
-    const timeoutPromise = new Promise((_, reject) => {
-      timeout = setTimeout(
-        () => reject(new Error(`Serena activity bridge call timed out: ${name}`)),
-        BRIDGE_CALL_TIMEOUT_MS,
-      );
-    });
     try {
+      const bridgePromise = Promise.resolve().then(() => window.openai.callTool(name, args));
+      const timeoutPromise = new Promise((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`Serena activity bridge call timed out: ${name}`)),
+          BRIDGE_CALL_TIMEOUT_MS,
+        );
+      });
       return unwrap(await Promise.race([bridgePromise, timeoutPromise]));
     } finally {
+      activeBridgeCalls -= 1;
       if (timeout !== null) clearTimeout(timeout);
     }
   }
@@ -236,6 +262,7 @@
     const displayed = preserveExpandedDetail(next);
     runId = displayed.run_id;
     snapshot = displayed;
+    persistRunId(displayed.run_id);
     applyInitialCollapsedPolicy(displayed);
     panel.render(displayed);
     syncClock();
@@ -321,8 +348,12 @@
   }
 
   function acceptGlobals(event) {
-    const next = event?.detail?.globals?.toolOutput;
-    if (!next?.run_id) return;
+    const globals = event?.detail?.globals;
+    const next = activityState(globals);
+    if (!next?.run_id) {
+      if (!runId) runId = widgetRunId(globals);
+      return;
+    }
     if (runId && next.run_id !== runId) return;
     if (runId && Number(next.updated_at || 0) <= Number(snapshot?.updated_at || 0)) return;
 
@@ -338,8 +369,12 @@
 
   window.addEventListener("openai:set_globals", acceptGlobals, { passive: true });
 
-  const initial = window.openai?.toolOutput;
-  if (initial?.run_id) render(initial);
+  const initial = activityState(window.openai);
+  if (initial?.run_id) {
+    render(initial);
+  } else {
+    runId = widgetRunId(window.openai);
+  }
   syncClock();
   void poll();
 })();
