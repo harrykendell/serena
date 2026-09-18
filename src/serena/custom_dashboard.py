@@ -430,7 +430,11 @@ class CustomDashboard:
 
         @app.route("/dashboard/chatgpt/<conversation_id>", methods=["GET"])
         def open_chatgpt_conversation(conversation_id: str) -> Response:
-            return redirect(f"https://chatgpt.com/c/{quote(conversation_id, safe='')}")  # type: ignore[return-value]
+            encoded_conversation_id = quote(conversation_id, safe="")
+            user_agent = request.headers.get("User-Agent", "")
+            if any(device in user_agent for device in ("iPhone", "iPad", "iPod")):
+                return redirect(f"com.openai.chat://chatgpt.com/c/{encoded_conversation_id}")  # type: ignore[return-value]
+            return redirect(f"https://chatgpt.com/c/{encoded_conversation_id}")  # type: ignore[return-value]
 
         @app.route("/dashboard/api/state", methods=["GET"])
         def get_dashboard_state() -> Response:

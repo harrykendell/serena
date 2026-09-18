@@ -179,6 +179,13 @@ def test_job_notification_link_redirects_to_originating_panel(tmp_path: Path, mo
     assert chat_response.status_code == 302
     assert chat_response.headers["Location"] == "https://chatgpt.com/c/chat-ios"
 
+    ios_chat_response = client.get(
+        "/dashboard/chatgpt/chat-ios",
+        headers={"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15"},
+    )
+    assert ios_chat_response.status_code == 302
+    assert ios_chat_response.headers["Location"] == "com.openai.chat://chatgpt.com/c/chat-ios"
+
 
 def test_dashboard_registers_single_web_push_subscription(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_roots(tmp_path, monkeypatch)
