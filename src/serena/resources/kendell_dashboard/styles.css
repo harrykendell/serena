@@ -1,10 +1,64 @@
-.brand-marks,
-.brand-marks {
-  display: flex;
+.brand-flipper {
+  --brand-flip-duration: 7.2s;
+
+  width: 34px;
+  height: 34px;
   flex: 0 0 auto;
-  align-items: center;
-  gap: 5px;
+  perspective: 190px;
+  perspective-origin: 50% 44%;
 }
+
+.brand-flip-card {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transform-style: preserve-3d;
+  animation: brand-logo-turn var(--brand-flip-duration) cubic-bezier(.55, .06, .35, 1) infinite;
+  will-change: transform;
+}
+
+.brand-flip-face {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: 7px;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  pointer-events: none;
+}
+
+.brand-flip-face.back {
+  transform: rotateY(180deg);
+}
+
+.brand-flip-face img {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+@keyframes brand-logo-turn {
+  0%, 36% {
+    transform: rotateX(-2deg) rotateY(0deg);
+  }
+  46%, 86% {
+    transform: rotateX(2deg) rotateY(180deg);
+  }
+  96%, 100% {
+    transform: rotateX(-2deg) rotateY(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-flip-card {
+    animation: none;
+  }
+
+  .brand-flip-face.back {
+    display: none;
+  }
+}
+
 .brand-copy { min-width: 0; }
 .header-menu-resource { font: inherit; }
 .header-menu-notification-action {
